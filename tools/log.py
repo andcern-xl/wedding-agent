@@ -1,47 +1,31 @@
-import json
-from datetime import datetime
-from pathlib import Path
-
-LOG_FILE = Path(__file__).parent.parent / "data" / "drops.jsonl"
-
-
-def _ensure():
-    LOG_FILE.parent.mkdir(exist_ok=True)
-    if not LOG_FILE.exists():
-        LOG_FILE.touch()
+from datetime import datetime, timezone
+from tools.db import get_client
 
 
 def drop(category: str | None, kind: str, content: str, user_id: int):
-    _ensure()
-    entry = {
-        "ts": datetime.now().isoformat(),
-        "user": user_id,
+    get_client().table("wedding_drops").insert({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "user_id": user_id,
         "category": category,
-        "kind": kind,       # "text" | "image"
+        "kind": kind,
         "content": content,
-    }
-    with open(LOG_FILE, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    }).execute()
 
 
 def get_drops(category: str | None = None, limit: int = 60) -> list[dict]:
-    _ensure()
-    entries = []
-    with open(LOG_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
+    q = get_client().table("wedding_drops").select("*").order("ts", desc=False)
     if category:
-        entries = [e for e in entries if e.get("category") == category]
-
-    return entries[-limit:]
+        q = q.eq("category", category)
+    q = q.limit(limit)
+    return q.execute().data or []
 
 
 def get_recent_drops(limit: int = 30) -> list[dict]:
-    return get_drops(category=None, limit=limit)
+    return (
+        get_client().table("wedding_drops")
+        .select("*")
+        .order("ts", desc=True)
+        .limit(limit)
+        .execute()
+        .data or []
+    )[::-1]

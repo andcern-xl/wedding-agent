@@ -1,6 +1,7 @@
 python-telegram-bot==21.10
 anthropic>=0.30.0
 python-dotenv==1.0.1
+supabase>=2.0.0
 
 # Google Docs support (optional but recommended)
 google-api-python-client==2.136.0

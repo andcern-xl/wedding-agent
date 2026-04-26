@@ -1,41 +1,22 @@
-import json
-from datetime import datetime
-from pathlib import Path
-
-PAYMENTS_FILE = Path(__file__).parent.parent / "data" / "payments.json"
-
-
-def _load() -> list:
-    PAYMENTS_FILE.parent.mkdir(exist_ok=True)
-    if not PAYMENTS_FILE.exists():
-        return []
-    with open(PAYMENTS_FILE) as f:
-        return json.load(f)
-
-
-def _save(data: list):
-    PAYMENTS_FILE.parent.mkdir(exist_ok=True)
-    with open(PAYMENTS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+from datetime import datetime, timezone
+from tools.db import get_client
 
 
 def add_payment(entry: dict):
-    data = _load()
-    entry["logged_at"] = datetime.now().isoformat()
-    data.append(entry)
-    _save(data)
+    entry["logged_at"] = datetime.now(timezone.utc).isoformat()
+    get_client().table("wedding_payments").insert(entry).execute()
 
 
 def get_all_payments() -> list:
-    return _load()
+    return get_client().table("wedding_payments").select("*").order("logged_at").execute().data or []
 
 
 def summary() -> dict:
-    payments = _load()
+    payments = get_all_payments()
     total_paid = 0
     total_owing = 0
-    by_person = {}
-    by_vendor = {}
+    by_person: dict = {}
+    by_vendor: dict = {}
 
     for p in payments:
         amount = p.get("amount", 0)
