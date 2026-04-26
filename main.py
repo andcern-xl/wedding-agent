@@ -104,6 +104,10 @@ def main():
     import asyncio
     asyncio.set_event_loop(asyncio.new_event_loop())
 
+    if not os.getenv("RAILWAY_ENVIRONMENT"):
+        print("Not running on Railway. Exiting.")
+        return
+
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not set")
