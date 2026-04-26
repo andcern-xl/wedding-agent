@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
 agent = WeddingAgent()
+conversations: dict[int, list] = {}
 
 
 def allowed(update: Update) -> bool:
@@ -64,6 +65,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
+    chat_id = update.effective_chat.id
+    history = conversations.get(chat_id, [])
+
     if update.message.photo:
         photo = update.message.photo[-1]
         photo_file = await photo.get_file()
@@ -73,6 +77,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await agent.handle_image(
             image_bytes=bytes(photo_bytes),
             caption=caption,
+            history=history,
         )
         log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
         drop(result.get("detected_category"), "image", log_content, user_id)
@@ -83,8 +88,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         drop(detect_category(text), "text", text, user_id)
-        result = await agent.handle_message(text=text)
+        result = await agent.handle_message(text=text, history=history)
 
+    conversations[chat_id] = result.get("history", history)
     await update.message.reply_text(result["text"])
 
 

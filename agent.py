@@ -45,12 +45,14 @@ class WeddingAgent:
             lines.append(f"{icon} {ts} {cat_tag}{d['content']}")
         return "\n".join(lines)
 
-    async def handle_message(self, text: str) -> dict:
+    async def handle_message(self, text: str, history: list[dict] | None = None) -> dict:
+        if history is None:
+            history = []
+
         category = detect_category(text)
         drops = get_drops(category=category, limit=40) if category else get_recent_drops(limit=30)
         context = self._drops_block(drops, "WHAT YOUVE SHARED SO FAR:")
 
-        # Auto-detect Google Doc URLs and note them
         doc_note = ""
         if "docs.google.com" in text:
             doc_id = extract_doc_id(text)
@@ -65,16 +67,24 @@ class WeddingAgent:
 
         user_content = f"[Context]\n{context}\n\n[Message]\n{text}" if context else text
 
+        messages = history + [{"role": "user", "content": user_content}]
+
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
             system=self._build_system_prompt(),
-            messages=[{"role": "user", "content": user_content}],
+            messages=messages,
         )
 
+        reply = response.content[0].text + doc_note
+        updated_history = messages + [{"role": "assistant", "content": reply}]
+        if len(updated_history) > 40:
+            updated_history = updated_history[-40:]
+
         return {
-            "text": response.content[0].text + doc_note,
+            "text": reply,
             "detected_category": category,
+            "history": updated_history,
         }
 
     async def _extract_payment(self, image_bytes: bytes, caption: str) -> dict | None:
@@ -121,8 +131,11 @@ If this image has no financial content, return: {"skip": true}"""
         except (json.JSONDecodeError, IndexError):
             return None
 
-    async def handle_image(self, image_bytes: bytes, caption: str) -> dict:
+    async def handle_image(self, image_bytes: bytes, caption: str, history: list[dict] | None = None) -> dict:
         import asyncio
+        if history is None:
+            history = []
+
         category = detect_category(caption) if caption else None
         drops = get_drops(category=category, limit=30) if category else get_recent_drops(limit=20)
         context = self._drops_block(drops, "WHAT YOUVE SHARED SO FAR:")
@@ -138,12 +151,13 @@ If this image has no financial content, return: {"skip": true}"""
             "text": caption or "What's in this image? Extract anything relevant to our wedding planning.",
         })
 
-        # Run main response + payment extraction in parallel
+        messages = history + [{"role": "user", "content": content}]
+
         main_call = self.client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
             system=self._build_system_prompt(),
-            messages=[{"role": "user", "content": content}],
+            messages=messages,
         )
         payment_call = self._extract_payment(image_bytes, caption)
 
@@ -160,9 +174,15 @@ If this image has no financial content, return: {"skip": true}"""
             by_str = f" by {paid_by}" if paid_by else ""
             suffix = f"\n\n💰 Logged: {currency} {amount:,} {status_label}{by_str} — {vendor}"
 
+        reply = response.content[0].text + suffix
+        updated_history = messages + [{"role": "assistant", "content": reply}]
+        if len(updated_history) > 40:
+            updated_history = updated_history[-40:]
+
         return {
-            "text": response.content[0].text + suffix,
+            "text": reply,
             "detected_category": category or "budget",
+            "history": updated_history,
         }
 
     async def category_status(self, category: str) -> str:
