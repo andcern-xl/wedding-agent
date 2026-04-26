@@ -64,34 +64,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
-
     chat_id = update.effective_chat.id
     history = conversations.get(chat_id, [])
 
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        photo_file = await photo.get_file()
-        photo_bytes = await photo_file.download_as_bytearray()
-        caption = update.message.caption or ""
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        result = await agent.handle_image(
-            image_bytes=bytes(photo_bytes),
-            caption=caption,
-            history=history,
-        )
-        log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
-        drop(result.get("detected_category"), "image", log_content, user_id)
+    try:
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            photo_file = await photo.get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            caption = update.message.caption or ""
 
-    else:
-        text = update.message.text or ""
-        if text.startswith("/"):
-            return
+            result = await agent.handle_image(
+                image_bytes=bytes(photo_bytes),
+                caption=caption,
+                history=history,
+            )
+            log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
+            drop(result.get("detected_category"), "image", log_content, user_id)
 
-        drop(detect_category(text), "text", text, user_id)
-        result = await agent.handle_message(text=text, history=history)
+        else:
+            text = update.message.text or ""
+            if text.startswith("/"):
+                return
 
-    conversations[chat_id] = result.get("history", history)
-    await update.message.reply_text(result["text"])
+            drop(detect_category(text), "text", text, user_id)
+            result = await agent.handle_message(text=text, history=history)
+
+        conversations[chat_id] = result.get("history", history)
+        await update.message.reply_text(result["text"])
+
+    except Exception as e:
+        logger.error(f"Error handling message: {e}")
+        await update.message.reply_text("Something went wrong, try again.")
 
 
 def main():
