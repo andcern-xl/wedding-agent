@@ -1,5 +1,6 @@
 import base64
 import json
+from datetime import datetime, timezone, timedelta
 from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
 from tools.memory import get_all_memory
@@ -18,8 +19,8 @@ HOW TO RESPOND
 - Be concise and practical
 - Reference specific things they've actually dropped — quotes, details, numbers
 - If a screenshot contains a quote, venue, menu, or price — extract and summarise it clearly
-- Plain text only, no asterisks or markdown symbols
-- CAPS for section headers
+- Use Telegram HTML formatting: <b>Section Title</b> for headers, • for bullet points, blank lines between sections
+- Never use asterisks, underscores, or markdown symbols — HTML tags only
 - Sound like a sharp friend helping them plan, not a robot"""
 
 
@@ -224,29 +225,36 @@ If this image has no financial content, return: {"skip": true}"""
         context = "\n\n".join(parts)
         prompt = f"""{context}
 
-Give me a status brief for {cat['name']}. Structure it like this:
+Give me a status brief for {cat['name']}. Use exactly this structure — put --- on its own line between each section:
 
-WHATS CONFIRMED
-Anything that looks like a firm decision or booking.
+<b>What's Confirmed</b>
+Anything that looks like a firm decision or booking. One bullet per item using •
 
-WHATS BEING CONSIDERED
-Options discussed, quotes seen, things in the running.
+---
 
-STILL OPEN
-Key decisions not made yet for this area.
+<b>What's Being Considered</b>
+Options discussed, quotes seen, things in the running. One bullet per item using •
 
-NEXT STEP
+---
+
+<b>Still Open</b>
+Key decisions not made yet for this area. One bullet per item using •
+
+---
+
+<b>Next Step</b>
 One concrete thing to do next.
 
-Tight and plain. No fluff."""
+Use Telegram HTML formatting. <b> for headers only. No markdown."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
+            max_tokens=1200,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
         )
-        return f"{cat['emoji']} {cat['name'].upper()}\n\n{response.content[0].text}"
+        header = f"{cat['emoji']} <b>{cat['name'].upper()}</b>"
+        return f"{header}\n\n{response.content[0].text}"
 
     async def bring_me_up_to_speed(self) -> str:
         all_drops = get_recent_drops(limit=100)
@@ -277,25 +285,132 @@ Tight and plain. No fluff."""
         context = "\n\n".join(parts)
         prompt = f"""{context}
 
-Give a catch-up brief across all wedding planning. Structure it like this:
+Give a catch-up brief across all wedding planning. Use exactly this structure — put --- on its own line between each section:
 
-WHATS BEEN SORTED
-Categories with real progress or confirmed decisions.
+<b>What's Been Sorted</b>
+Categories with real progress or confirmed decisions. One bullet per item using •
 
-WHATS IN MOTION
-Things discussed or being considered but not locked in.
+---
 
-WHATS UNTOUCHED
-Wedding categories with nothing dropped yet.
+<b>What's In Motion</b>
+Things discussed or being considered but not locked in. One bullet per item using •
 
-ONE THING TO DO NEXT
+---
+
+<b>What's Untouched</b>
+Wedding categories with nothing dropped yet. One bullet per item using •
+
+---
+
+<b>One Thing To Do Next</b>
 The single most useful next action right now.
 
-Keep it tight. Plain text, CAPS headers."""
+Use Telegram HTML formatting. <b> for headers only. No markdown."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1200,
+            max_tokens=2048,
+            system=self._build_system_prompt(),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
+    async def priority_brief(self) -> str:
+        all_drops = get_recent_drops(limit=150)
+        all_decisions = get_all_memory()
+        fin = payment_summary()
+
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        two_weeks_ago = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+
+        by_category: dict[str, list] = {}
+        for d in all_drops:
+            cat = d.get("category") or "general"
+            by_category.setdefault(cat, []).append(d)
+
+        untouched = [
+            CATEGORIES[c]["name"]
+            for c in CATEGORIES
+            if c not in by_category
+        ]
+
+        stale = [
+            CATEGORIES[c]["name"]
+            for c, drops in by_category.items()
+            if c in CATEGORIES and all(d["ts"] < two_weeks_ago for d in drops)
+        ]
+
+        context_parts = []
+
+        category_lines = ["PLANNING ACTIVITY BY CATEGORY:"]
+        for cat_key, cat_info in CATEGORIES.items():
+            drops = by_category.get(cat_key, [])
+            recent = [d for d in drops if d["ts"] >= week_ago]
+            if not drops:
+                category_lines.append(f"\n{cat_info['name']}: nothing yet")
+            else:
+                category_lines.append(f"\n{cat_info['name']} ({len(drops)} drops, {len(recent)} this week):")
+                for d in drops[-3:]:
+                    category_lines.append(f"  {d['ts'][:10]}: {d['content'][:120]}")
+        context_parts.append("\n".join(category_lines))
+
+        if untouched:
+            context_parts.append(f"COMPLETELY UNTOUCHED: {', '.join(untouched)}")
+
+        if stale:
+            context_parts.append(f"NO ACTIVITY IN 2+ WEEKS: {', '.join(stale)}")
+
+        locked = []
+        for cat_key, data in all_decisions.items():
+            for dec in data.get("decisions", []):
+                cat_name = CATEGORIES.get(cat_key, {}).get("name", cat_key)
+                locked.append(f"[{cat_name}] {dec}")
+        if locked:
+            context_parts.append("CONFIRMED DECISIONS:\n" + "\n".join(locked))
+
+        if fin["payments"]:
+            context_parts.append(
+                f"BUDGET LOGGED: {fin['total_paid']:,} paid/deposited"
+                + (f", {fin['total_owing']:,} still owing" if fin["total_owing"] else "")
+            )
+
+        context = "\n\n".join(context_parts)
+
+        prompt = f"""{context}
+
+You are a proactive wedding planning coordinator. The couple gets this weekly briefing automatically — they haven't asked a question, you're initiating contact to keep them on track.
+
+Analyse their planning data and generate an opinionated, prioritised action brief. Consider:
+- Venue, photographer, catering, and entertainment book out fast — flag if these lack confirmed decisions
+- Categories untouched or stale for 2+ weeks likely need a nudge
+- Be specific: name the category, the gap, and the exact action they should take
+- If something is going well, acknowledge it briefly
+
+Use exactly this structure with --- between sections:
+
+<b>This Week's Priorities</b>
+2-3 specific tasks to tackle this week. Tell them exactly what to do — which vendors to contact, which decisions to lock in, what to research. Be direct.
+
+---
+
+<b>Don't Let This Slip</b>
+Categories with no progress or that have gone quiet. Name the risk and the action. Venue, photographer, catering going unaddressed is urgent.
+
+---
+
+<b>Momentum Check</b>
+1-2 lines on what's going well. Keep it brief.
+
+---
+
+<b>Blockers & Open Questions</b>
+Key unresolved decisions that are holding up other planning. What needs to be decided before they can move forward elsewhere.
+
+Use • for bullets. <b> tags for headers only. No markdown."""
+
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
         )
