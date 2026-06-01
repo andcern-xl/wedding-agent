@@ -7,18 +7,26 @@ from googleapiclient.discovery import build
 CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
+_creds = None
+_service = None
+
 
 def _get_service():
-    creds = Credentials(
-        token=None,
-        refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
-        client_id=os.environ["GOOGLE_CLIENT_ID"],
-        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        token_uri="https://oauth2.googleapis.com/token",
-        scopes=SCOPES,
-    )
-    creds.refresh(Request())
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    global _creds, _service
+    if _creds is None:
+        _creds = Credentials(
+            token=None,
+            refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
+            client_id=os.environ["GOOGLE_CLIENT_ID"],
+            client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=SCOPES,
+        )
+    if not _creds.valid:
+        _creds.refresh(Request())
+    if _service is None:
+        _service = build("calendar", "v3", credentials=_creds, cache_discovery=False)
+    return _service
 
 
 def get_events(days_ahead: int = 7) -> list[dict]:
