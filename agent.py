@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 from datetime import datetime, date, timezone, timedelta
@@ -9,6 +10,7 @@ from tools.log import get_drops, get_recent_drops
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
+from tools.user_memory import get_summary, save_summary, get_message_count
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -689,6 +691,9 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 
 TODAY'S DATE: {today}
 
+WHAT YOU KNOW ABOUT THIS PERSON
+{user_summary}
+
 PEOPLE
 - Ansen: user_id 63756531
 - Jess / Jessica: user_id 6927468999
@@ -808,7 +813,7 @@ class UnifiedAgent:
         self._wedding = WeddingAgent()
         self._daily = DailyAgent()
 
-    def _build_system(self) -> str:
+    def _build_system(self, user_summary: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -816,6 +821,7 @@ class UnifiedAgent:
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
             today=date.today().isoformat(),
+            user_summary=user_summary or "Nothing yet — this is the start of our history together.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int):
@@ -878,13 +884,14 @@ class UnifiedAgent:
             history = []
 
         self._logged_wedding_drop = False
+        user_summary = get_summary(user_id)
         messages = history + [{"role": "user", "content": text}]
 
         for _ in range(10):
             response = await self.client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=2048,
-                system=self._build_system(),
+                system=self._build_system(user_summary),
                 tools=TOOLS,
                 messages=messages,
             )
@@ -892,7 +899,18 @@ class UnifiedAgent:
             if response.stop_reason == "end_turn":
                 reply = next((b.text for b in response.content if hasattr(b, "text")), "")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop}
+                updated_history = messages[-40:]
+
+                # Compress in background every 6 messages
+                msg_count = get_message_count(user_id) + 1
+                if msg_count % 6 == 0:
+                    asyncio.create_task(
+                        self._compress_and_save(user_id, updated_history, user_summary, msg_count)
+                    )
+                else:
+                    save_summary(user_id, user_summary, msg_count)
+
+                return {"text": reply, "history": updated_history, "notify_partner": self._logged_wedding_drop}
 
             if response.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": response.content})
@@ -908,6 +926,38 @@ class UnifiedAgent:
                 messages.append({"role": "user", "content": tool_results})
 
         return {"text": "Something went wrong, try again.", "history": history}
+
+    async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
+        lines = []
+        for m in messages[-20:]:
+            role = m["role"]
+            content = m["content"] if isinstance(m["content"], str) else "[tool exchange]"
+            lines.append(f"{role}: {content[:300]}")
+
+        prompt = f"""Existing summary:
+{existing_summary or "(none yet)"}
+
+Recent conversation:
+{chr(10).join(lines)}
+
+Update the summary to capture:
+- How this person communicates (style, tone, directness, preferences)
+- What they're currently focused on or working through
+- Recurring topics, habits, or concerns
+- Personal context they've shared (family, pets, work, interests)
+- How they like to use this assistant
+
+Be concise (under 300 words). Write in third person. This will be loaded as context at the start of every future conversation."""
+
+        try:
+            response = await self.client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            save_summary(user_id, response.content[0].text, message_count)
+        except Exception:
+            pass  # compression failure is non-critical
 
     async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
         result = await self._wedding.handle_image(image_bytes=image_bytes, caption=caption, history=history or [])
