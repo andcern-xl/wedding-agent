@@ -3,7 +3,7 @@ import json
 from datetime import datetime, date, timezone, timedelta
 from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
-from tools.memory import get_all_memory
+from tools.memory import get_all_memory, get_category_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops
 from tools.payments import add_payment, summary as payment_summary
@@ -666,3 +666,231 @@ def route_intent(text: str) -> str:
     if is_daily and not is_wedding:
         return "daily"
     return "wedding"
+
+
+# ---------------------------------------------------------------------------
+# Unified agentic agent
+# ---------------------------------------------------------------------------
+
+UNIFIED_SYSTEM_PROMPT = """You are a personal assistant for Ansen and Jess. You help with two things:
+
+1. WEDDING PLANNING — they drop notes, screenshots, quotes, and discussions. You track everything by category and help them make decisions, spot gaps, and keep moving.
+
+2. DAILY LIFE — personal tasks, reminders, and shared to-dos for everyday life.
+
+WEDDING CATEGORIES
+{categories}
+
+DAILY TASK CATEGORIES
+finance 💳, health 🏥, home 🏠, work 💼, social 🎉, travel ✈️, personal 🙋 — plus any custom ones they've created.
+
+PRIVACY RULE
+Tasks with visibility "private" belong only to the person who created them. Never reveal private tasks from one person to the other. Tasks with visibility "shared" are visible to both.
+
+TODAY'S DATE: {today}
+
+HOW TO USE TOOLS
+- Always fetch context with tools before answering — never guess from memory
+- Wedding questions → read_wedding_drops (filter by category when relevant)
+- Task questions → read_daily_tasks
+- Budget/spending → read_payments + read_wedding_drops("budget")
+- "what should I do" / "what's on" → call both read_wedding_drops and read_daily_tasks, synthesise one answer
+- Adding a task about a wedding vendor/category → read the relevant drops first, bake that context into the task description
+- New category request → add_custom_category
+- Decisions / confirmed bookings → read_memory
+
+HOW TO RESPOND
+- Be concise and practical — reference specific details from what they've shared
+- Cross-reference both brains naturally — no need to label responses as "Wedding Brain" or "Daily Brain"
+- Use Telegram HTML: <b>bold</b> for headers, • for bullets
+- Never use asterisks, underscores, or markdown — HTML only
+- Sound like a sharp friend who knows everything they've told you"""
+
+TOOLS = [
+    {
+        "name": "read_wedding_drops",
+        "description": "Read wedding planning notes, messages and screenshots stored by the couple. Use for any wedding-related question.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category slug: venue, budget, guests, catering, photography, decor, entertainment, attire, ceremony, logistics, vendors, timeline, honeymoon. Omit for recent drops across all.",
+                },
+                "limit": {"type": "integer", "description": "Max results. Default 40."},
+            },
+        },
+    },
+    {
+        "name": "read_daily_tasks",
+        "description": "Read open tasks and reminders for the current user — their private tasks plus all shared tasks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_done": {"type": "boolean", "description": "Include completed tasks. Default false."},
+            },
+        },
+    },
+    {
+        "name": "add_daily_task",
+        "description": "Create a new task or reminder for the current user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Clear task description"},
+                "due_date": {"type": "string", "description": "Due date YYYY-MM-DD, or null"},
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "shared"],
+                    "description": "private = only this user sees it. shared = both see it. Infer from me/I (private) vs us/we/both (shared).",
+                },
+                "category": {"type": "string", "description": "Category slug: finance, health, home, work, social, travel, personal, or a custom slug"},
+                "repeat": {"type": "string", "enum": ["none", "daily", "weekly"]},
+            },
+            "required": ["task", "visibility"],
+        },
+    },
+    {
+        "name": "read_payments",
+        "description": "Read wedding payment records — deposits paid, amounts owing, vendor costs.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_memory",
+        "description": "Read locked wedding decisions and saved notes by category.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Category slug to filter. Omit for all."},
+            },
+        },
+    },
+    {
+        "name": "add_custom_category",
+        "description": "Create a new custom daily task category.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Category name"},
+                "emoji": {"type": "string", "description": "Single emoji"},
+            },
+            "required": ["name", "emoji"],
+        },
+    },
+]
+
+
+class UnifiedAgent:
+    def __init__(self):
+        self.client = AsyncAnthropic()
+        self._wedding = WeddingAgent()
+        self._daily = DailyAgent()
+
+    def _build_system(self) -> str:
+        cat_lines = "\n".join(
+            f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
+            for k, v in CATEGORIES.items()
+        )
+        return UNIFIED_SYSTEM_PROMPT.format(
+            categories=cat_lines,
+            today=date.today().isoformat(),
+        )
+
+    async def _execute_tool(self, name: str, inputs: dict, user_id: int):
+        if name == "read_wedding_drops":
+            category = inputs.get("category")
+            limit = inputs.get("limit", 40)
+            drops = get_drops(category=category, limit=limit) if category else get_recent_drops(limit=limit)
+            return [{"ts": d["ts"][:10], "category": d.get("category"), "kind": d["kind"], "content": d["content"]} for d in drops]
+
+        if name == "read_daily_tasks":
+            tasks = get_tasks(user_id, include_done=inputs.get("include_done", False))
+            return [{"id": str(t["id"]), "task": t["task"], "due_date": t.get("due_date"), "category": t.get("category"), "visibility": t["visibility"], "done": t["done"]} for t in tasks]
+
+        if name == "add_daily_task":
+            due = None
+            if inputs.get("due_date"):
+                try:
+                    due = date.fromisoformat(inputs["due_date"])
+                except ValueError:
+                    pass
+            task = add_task(
+                user_id=user_id,
+                task=inputs["task"],
+                due_date=due,
+                repeat=inputs.get("repeat", "none"),
+                visibility=inputs.get("visibility", "private"),
+                category=inputs.get("category"),
+            )
+            return {"status": "created", "id": str(task["id"]), "task": inputs["task"]}
+
+        if name == "read_payments":
+            fin = payment_summary()
+            return {
+                "total_paid": fin["total_paid"],
+                "total_owing": fin["total_owing"],
+                "by_person": fin["by_person"],
+                "payments": [{"vendor": p.get("vendor"), "amount": p.get("amount"), "currency": p.get("currency"), "status": p.get("status"), "paid_by": p.get("paid_by")} for p in fin["payments"]],
+            }
+
+        if name == "read_memory":
+            category = inputs.get("category")
+            return {category: get_category_memory(category)} if category else get_all_memory()
+
+        if name == "add_custom_category":
+            result = add_custom_category(name=inputs["name"], emoji=inputs["emoji"], created_by=user_id)
+            return {"status": "created", "slug": result["slug"], "name": result["name"]}
+
+        return {"error": f"Unknown tool: {name}"}
+
+    async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
+        if history is None:
+            history = []
+
+        messages = history + [{"role": "user", "content": text}]
+
+        for _ in range(10):
+            response = await self.client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                system=self._build_system(),
+                tools=TOOLS,
+                messages=messages,
+            )
+
+            if response.stop_reason == "end_turn":
+                reply = next((b.text for b in response.content if hasattr(b, "text")), "")
+                messages.append({"role": "assistant", "content": reply})
+                return {"text": reply, "history": messages[-40:]}
+
+            if response.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        result = await self._execute_tool(block.name, block.input, user_id)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result, default=str),
+                        })
+                messages.append({"role": "user", "content": tool_results})
+
+        return {"text": "Something went wrong, try again.", "history": history}
+
+    async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
+        result = await self._wedding.handle_image(image_bytes=image_bytes, caption=caption, history=history or [])
+        return result
+
+    # Command methods — delegate to existing agents
+    async def bring_me_up_to_speed(self) -> str:
+        return await self._wedding.bring_me_up_to_speed()
+
+    async def category_status(self, category: str) -> str:
+        return await self._wedding.category_status(category)
+
+    async def priority_brief(self) -> str:
+        return await self._wedding.priority_brief()
+
+    async def daily_brief(self, user_id: int) -> str:
+        return await self._daily.daily_brief(user_id)

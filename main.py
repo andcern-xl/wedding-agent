@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv
-from agent import WeddingAgent, DailyAgent, route_intent
+from agent import UnifiedAgent, route_intent
 from categories import CATEGORIES, detect_category
 from tools.log import drop
 
@@ -28,11 +28,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 ALLOWED_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
-wedding_agent = WeddingAgent()
-daily_agent = DailyAgent()
-agent = wedding_agent  # backwards compat for existing handlers
+agent = UnifiedAgent()
 conversations: dict[int, list] = {}
-daily_conversations: dict[int, list] = {}
 chat_locks: dict[int, asyncio.Lock] = {}
 
 
@@ -139,61 +136,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    history = conversations.get(chat_id, [])
 
     try:
         if update.message.photo:
-            # Photos always go to the wedding brain
-            history = conversations.get(chat_id, [])
             photo = update.message.photo[-1]
             photo_file = await photo.get_file()
             photo_bytes = await photo_file.download_as_bytearray()
             caption = update.message.caption or ""
 
             await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption)
-
-            result = await wedding_agent.handle_image(
-                image_bytes=bytes(photo_bytes),
-                caption=caption,
-                history=history,
-            )
+            result = await agent.handle_image(image_bytes=bytes(photo_bytes), caption=caption, user_id=user_id, history=history)
             log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
             drop(result.get("detected_category"), "image", log_content, user_id)
-            conversations[chat_id] = result.get("history", history)
 
         else:
             text = update.message.text or ""
             if text.startswith("/"):
                 return
 
-            intent = route_intent(text)
-
-            if intent == "daily":
-                history = daily_conversations.get(user_id, [])
-                result = await daily_agent.handle_message(text=text, user_id=user_id, history=history)
-                daily_conversations[user_id] = result.get("history", history)
-                # Don't cross-notify for daily/personal messages
-
-            elif intent == "both":
-                # Run both brains and combine
-                wedding_history = conversations.get(chat_id, [])
-                daily_history = daily_conversations.get(user_id, [])
-                wedding_result, daily_result = await asyncio.gather(
-                    wedding_agent.handle_message(text=text, history=wedding_history),
-                    daily_agent.handle_message(text=text, user_id=user_id, history=daily_history),
-                )
-                conversations[chat_id] = wedding_result.get("history", wedding_history)
-                daily_conversations[user_id] = daily_result.get("history", daily_history)
-                combined = f"<b>Daily</b>\n{daily_result['text']}\n\n<b>Wedding</b>\n{wedding_result['text']}"
-                await update.message.reply_text(combined, parse_mode="HTML")
-                return
-
-            else:
-                history = conversations.get(chat_id, [])
+            # Cross-notify partner for wedding messages; stay quiet for personal daily tasks
+            if route_intent(text) != "daily":
                 await notify_partner(context, update, text=text)
                 drop(detect_category(text), "text", text, user_id)
-                result = await wedding_agent.handle_message(text=text, history=history)
-                conversations[chat_id] = result.get("history", history)
 
+            result = await agent.handle_message(text=text, user_id=user_id, history=history)
+
+        conversations[chat_id] = result.get("history", history)
         await update.message.reply_text(result["text"], parse_mode="HTML")
 
     except Exception as e:
@@ -257,7 +226,7 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     msg = await update.message.reply_text("Checking your tasks...")
-    brief = await daily_agent.daily_brief(user_id)
+    brief = await agent.daily_brief(user_id)
     sections = _split_sections(brief)
     await msg.edit_text(sections[0], parse_mode="HTML")
     for section in sections[1:]:
@@ -269,7 +238,7 @@ async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
         return
     for uid in ALLOWED_IDS:
         try:
-            brief = await daily_agent.daily_brief(uid)
+            brief = await agent.daily_brief(uid)
             sections = _split_sections(brief)
             await context.bot.send_message(chat_id=uid, text="<b>Daily Brief</b>", parse_mode="HTML")
             for section in sections:
