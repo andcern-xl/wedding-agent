@@ -8,6 +8,7 @@ def add_task(
     due_date: date | None = None,
     repeat: str = "none",
     visibility: str = "private",
+    category: str | None = None,
 ) -> dict:
     row = {
         "user_id": user_id,
@@ -18,6 +19,8 @@ def add_task(
     }
     if due_date:
         row["due_date"] = due_date.isoformat()
+    if category:
+        row["category"] = category
     return get_client().table("daily_tasks").insert(row).execute().data[0]
 
 
@@ -67,7 +70,7 @@ def complete_task(task_id: str, user_id: int) -> bool:
         from datetime import timedelta
         old_due = date.fromisoformat(r["due_date"])
         delta = timedelta(days=1 if r["repeat"] == "daily" else 7)
-        add_task(r["user_id"], r["task"], old_due + delta, r["repeat"], r["visibility"])
+        add_task(r["user_id"], r["task"], old_due + delta, r["repeat"], r["visibility"], r.get("category"))
     return True
 
 

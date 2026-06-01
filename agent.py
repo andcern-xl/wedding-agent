@@ -8,6 +8,7 @@ from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks
+from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -442,21 +443,25 @@ TASK_PARSE_PROMPT = """Extract task details from this message and return JSON on
 Message: {message}
 Today's date: {today}
 Day of week: {weekday}
+Available categories: {categories}
 
 Return JSON with these fields:
 {{
   "is_task": true or false,
+  "is_new_category": false,
   "task": "clean task description",
   "due_date": "YYYY-MM-DD or null",
   "repeat": "none or daily or weekly",
-  "visibility": "private or shared"
+  "visibility": "private or shared",
+  "category": "slug from available categories or null"
 }}
 
 Rules:
 - is_task: true if the message is asking to create a reminder or task
+- is_new_category: true if the message is asking to add/create a new category (not a task)
 - visibility: "shared" if message says "us", "we", "both" — otherwise "private"
-- due_date: resolve relative dates using today's date provided
-- If no date mentioned, due_date is null"""
+- due_date: resolve relative dates using today's date provided; null if no date mentioned
+- category: pick the best matching slug from available categories, or null if unclear"""
 
 
 def _task_label(t: dict, today_str: str) -> str:
@@ -479,10 +484,13 @@ class DailyAgent:
 
     async def _parse_task(self, text: str) -> dict | None:
         today = date.today()
+        cats = get_all_categories()
+        cat_list = ", ".join(f"{slug} ({v['emoji']} {v['name']})" for slug, v in cats.items())
         prompt = TASK_PARSE_PROMPT.format(
             message=text,
             today=today.isoformat(),
             weekday=today.strftime("%A"),
+            categories=cat_list,
         )
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -505,6 +513,22 @@ class DailyAgent:
 
         parsed = await self._parse_task(text)
 
+        if parsed and parsed.get("is_new_category"):
+            # Extract name and optional emoji from the message using a quick parse
+            import re
+            emoji_match = re.search(r'[\U00010000-\U0010ffff☀-➿]', text)
+            emoji = emoji_match.group(0) if emoji_match else "📌"
+            # Strip common phrases to get the category name
+            name_raw = re.sub(r"(?i)(add|create|new|a |an |category|called|named|for)\s*", " ", text).strip()
+            name_raw = re.sub(r"[^\w\s]", "", name_raw).strip().title() or "New Category"
+            add_custom_category(name=name_raw, emoji=emoji, created_by=user_id)
+            reply = f"{emoji} Category <b>{name_raw}</b> added — you can now assign tasks to it."
+            updated_history = history + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": reply},
+            ]
+            return {"text": reply, "history": updated_history}
+
         if parsed and parsed.get("is_task"):
             due = None
             if parsed.get("due_date"):
@@ -512,16 +536,21 @@ class DailyAgent:
                     due = date.fromisoformat(parsed["due_date"])
                 except ValueError:
                     pass
+            category = parsed.get("category") or detect_daily_category(text)
             add_task(
                 user_id=user_id,
                 task=parsed["task"],
                 due_date=due,
                 repeat=parsed.get("repeat", "none"),
                 visibility=parsed.get("visibility", "private"),
+                category=category,
             )
+            cats = get_all_categories()
+            cat_info = cats.get(category, {}) if category else {}
+            cat_str = f" [{cat_info.get('emoji', '')} {cat_info.get('name', category)}]" if category else ""
             due_str = f" — due {parsed['due_date']}" if parsed.get("due_date") else ""
-            shared_str = " (shared with partner)" if parsed.get("visibility") == "shared" else ""
-            reply = f"✅ Logged: {parsed['task']}{due_str}{shared_str}"
+            shared_str = " (shared)" if parsed.get("visibility") == "shared" else ""
+            reply = f"✅ Logged{cat_str}: {parsed['task']}{due_str}{shared_str}"
             updated_history = history + [
                 {"role": "user", "content": text},
                 {"role": "assistant", "content": reply},
@@ -551,6 +580,11 @@ class DailyAgent:
         today_str = date.today().isoformat()
         weekday = date.today().strftime("%A")
         data = get_all_tasks_for_brief(user_id)
+        cats = get_all_categories()
+
+        all_tasks = data["overdue"] + data["due_today"] + data["upcoming"] + data["no_date"]
+        if not all_tasks:
+            return "✅ Nothing on your task list. Add tasks by just telling me — \"remind me to X on Friday\"."
 
         parts = [f"TODAY IS {weekday.upper()}, {today_str}"]
 
@@ -566,36 +600,43 @@ class DailyAgent:
             lines = [f"  • {_task_label(t, today_str)}" for t in data["upcoming"][:10]]
             parts.append("COMING UP:\n" + "\n".join(lines))
 
-        if data["no_date"]:
-            lines = [f"  • {_task_label(t, today_str)}" for t in data["no_date"][:5]]
-            parts.append("SOMEDAY:\n" + "\n".join(lines))
+        # Group remaining tasks by category
+        by_cat: dict[str, list] = {}
+        for t in all_tasks:
+            cat = t.get("category") or "personal"
+            by_cat.setdefault(cat, []).append(t)
 
-        if not any([data["overdue"], data["due_today"], data["upcoming"], data["no_date"]]):
-            return "✅ Nothing on your task list. Add tasks by just telling me — \"remind me to X on Friday\"."
+        cat_lines = ["BY CATEGORY:"]
+        for cat_slug, tasks in by_cat.items():
+            info = cats.get(cat_slug, {"emoji": "📌", "name": cat_slug.title()})
+            cat_lines.append(f"\n{info['emoji']} {info['name']}:")
+            for t in tasks:
+                cat_lines.append(f"  • {_task_label(t, today_str)}")
+        parts.append("\n".join(cat_lines))
 
         context = "\n\n".join(parts)
         prompt = f"""{context}
 
-Generate a sharp daily brief. Structure:
+Generate a sharp daily brief grouped by urgency then category. Structure:
 
-<b>Today</b>
-Tasks due today plus overdue items. Be direct — name the task and flag overdue ones urgently.
+<b>Today & Overdue</b>
+Tasks due today plus any overdue. Flag overdue ones urgently. Skip if none.
 
 ---
 
 <b>Coming Up</b>
-Tasks due in the next 7 days. One bullet each.
+Tasks due in the next 7 days. One bullet each. Skip if none.
 
 ---
 
-<b>Someday</b>
-Tasks with no date — brief mention only if any exist.
+<b>By Category</b>
+All open tasks grouped by category. Use the category emoji and name as a sub-header.
 
 Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
+            max_tokens=1000,
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -607,6 +648,7 @@ DAILY_KEYWORDS = {
     "remember to", "to-do", "todo", "task", "errand", "appointment",
     "meeting", "call ", "my tasks", "what's on", "whats on", "what do i",
     "schedule", "book ", "dentist", "doctor", "gym", "pick up", "drop off",
+    "add a category", "create a category", "new category", "add category",
 }
 
 
