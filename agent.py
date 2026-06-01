@@ -11,6 +11,7 @@ from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
 from tools.user_memory import get_summary, save_summary, get_message_count
+from tools.gcal import get_events, create_event, delete_event
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -708,6 +709,9 @@ HOW TO USE TOOLS
 - Adding a task about a wedding vendor → read relevant drops first, bake context into the task description
 - New category request → add_custom_category
 - Decisions / confirmed bookings → read_memory
+- "what's on the calendar" / "what's happening this week" → read_calendar
+- "book", "schedule", "add to calendar" → create_calendar_event
+- "cancel", "remove from calendar" → delete_calendar_event (read_calendar first to get the event ID)
 
 WHEN TO LOG VS NOT LOG
 - log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon
@@ -804,6 +808,42 @@ TOOLS = [
             "required": ["name", "emoji"],
         },
     },
+    {
+        "name": "read_calendar",
+        "description": "Read upcoming events from the shared Google Calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {"type": "integer", "description": "How many days ahead to look. Default 7."},
+            },
+        },
+    },
+    {
+        "name": "create_calendar_event",
+        "description": "Create an event on the shared Google Calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Event title"},
+                "start": {"type": "string", "description": "Start time in ISO 8601 format e.g. 2026-06-07T14:00:00"},
+                "end": {"type": "string", "description": "End time in ISO 8601 format e.g. 2026-06-07T15:00:00"},
+                "description": {"type": "string", "description": "Optional event description"},
+                "location": {"type": "string", "description": "Optional location"},
+            },
+            "required": ["title", "start", "end"],
+        },
+    },
+    {
+        "name": "delete_calendar_event",
+        "description": "Delete or cancel an event from the shared Google Calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string", "description": "The event ID from read_calendar"},
+            },
+            "required": ["event_id"],
+        },
+    },
 ]
 
 
@@ -876,6 +916,22 @@ class UnifiedAgent:
         if name == "add_custom_category":
             result = add_custom_category(name=inputs["name"], emoji=inputs["emoji"], created_by=user_id)
             return {"status": "created", "slug": result["slug"], "name": result["name"]}
+
+        if name == "read_calendar":
+            return get_events(days_ahead=inputs.get("days_ahead", 7))
+
+        if name == "create_calendar_event":
+            return create_event(
+                title=inputs["title"],
+                start=inputs["start"],
+                end=inputs["end"],
+                description=inputs.get("description", ""),
+                location=inputs.get("location", ""),
+            )
+
+        if name == "delete_calendar_event":
+            ok = delete_event(inputs["event_id"])
+            return {"status": "deleted" if ok else "not_found"}
 
         return {"error": f"Unknown tool: {name}"}
 
