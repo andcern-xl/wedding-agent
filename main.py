@@ -26,9 +26,6 @@ except Exception:
 REMINDER_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-logger.info(f"GOOGLE_REFRESH_TOKEN present: {bool(os.getenv('GOOGLE_REFRESH_TOKEN'))}")
-logger.info(f"GOOGLE_CLIENT_ID present: {bool(os.getenv('GOOGLE_CLIENT_ID'))}")
-logger.info(f"GOOGLE_CALENDAR_ID present: {bool(os.getenv('GOOGLE_CALENDAR_ID'))}")
 
 ALLOWED_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
 agent = UnifiedAgent()
