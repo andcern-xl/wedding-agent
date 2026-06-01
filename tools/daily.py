@@ -9,6 +9,7 @@ def add_task(
     repeat: str = "none",
     visibility: str = "private",
     category: str | None = None,
+    assigned_to: int | None = None,
 ) -> dict:
     row = {
         "user_id": user_id,
@@ -21,6 +22,8 @@ def add_task(
         row["due_date"] = due_date.isoformat()
     if category:
         row["category"] = category
+    if assigned_to:
+        row["assigned_to"] = assigned_to
     try:
         return get_client().table("daily_tasks").insert(row).execute().data[0]
     except Exception as e:
@@ -31,12 +34,17 @@ def add_task(
 
 
 def get_tasks(user_id: int, include_done: bool = False) -> list[dict]:
-    """Return tasks visible to this user: their private tasks + all shared tasks."""
+    """Return tasks visible to this user: their own, assigned to them, or shared."""
     q = get_client().table("daily_tasks").select("*")
     if not include_done:
         q = q.eq("done", False)
     rows = q.order("due_date", desc=False, nullsfirst=False).execute().data or []
-    return [r for r in rows if r["visibility"] == "shared" or r["user_id"] == user_id]
+    return [
+        r for r in rows
+        if r["visibility"] == "shared"
+        or r["user_id"] == user_id
+        or r.get("assigned_to") == user_id
+    ]
 
 
 def get_due_today(user_id: int) -> list[dict]:

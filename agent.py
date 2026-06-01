@@ -689,6 +689,10 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 
 TODAY'S DATE: {today}
 
+PEOPLE
+- Ansen: user_id 63756531
+- Jess / Jessica: user_id 6927468999
+
 HOW TO USE TOOLS
 - Always fetch context with tools before answering — never guess from memory
 - Wedding questions → read_wedding_drops (filter by category when relevant)
@@ -746,6 +750,7 @@ TOOLS = [
                 },
                 "category": {"type": "string", "description": "Category slug: finance, health, home, work, social, travel, personal, or a custom slug"},
                 "repeat": {"type": "string", "enum": ["none", "daily", "weekly"]},
+                "assigned_to": {"type": "integer", "description": "User ID to assign this task to. Use when the sender says 'remind Jess to X' or 'remind Ansen to X'. Ansen=63756531, Jess=6927468999."},
             },
             "required": ["task", "visibility"],
         },
@@ -814,6 +819,7 @@ class UnifiedAgent:
                     due = date.fromisoformat(inputs["due_date"])
                 except ValueError:
                     pass
+            assigned_to = inputs.get("assigned_to")
             task = add_task(
                 user_id=user_id,
                 task=inputs["task"],
@@ -821,8 +827,9 @@ class UnifiedAgent:
                 repeat=inputs.get("repeat", "none"),
                 visibility=inputs.get("visibility", "private"),
                 category=inputs.get("category"),
+                assigned_to=assigned_to,
             )
-            return {"status": "created", "id": str(task["id"]), "task": inputs["task"]}
+            return {"status": "created", "id": str(task["id"]), "task": inputs["task"], "assigned_to": assigned_to}
 
         if name == "read_payments":
             fin = payment_summary()
