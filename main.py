@@ -61,14 +61,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     lines = [
-        "💒 Wedding Agent\n",
-        "Just talk — drop notes, screenshots, quotes, anything. I'll figure out what it's about and keep track.\n",
-        "CATEGORY SHORTCUTS",
+        "👋 Two brains, one bot.\n",
+        "💒 WEDDING BRAIN",
+        "Drop notes, screenshots, quotes — anything wedding related. I'll sort it, track it, and keep you both across it.\n",
+        "Wedding category shortcuts:",
     ]
     for key, cat in CATEGORIES.items():
-        lines.append(f"{cat['emoji']} /{key}")
-    lines.append("\n/bringmeuptospeed — full planning overview")
-    lines.append("/plan — what to prioritise this week")
+        lines.append(f"  {cat['emoji']} /{key}")
+    lines.append("\n/bringmeuptospeed — full wedding overview")
+    lines.append("/plan — wedding priorities this week\n")
+    lines.append("🗓 DAILY BRAIN")
+    lines.append("Reminders and tasks for everyday life — personal or shared.")
+    lines.append("  • \"remind me to call the dentist Friday\" → private")
+    lines.append("  • \"remind us to confirm the caterer Monday\" → shared")
+    lines.append("  • \"add a category for Mochi 🐶\" → custom category\n")
+    lines.append("/tasks — your daily brief")
     await update.message.reply_text("\n".join(lines))
 
 
