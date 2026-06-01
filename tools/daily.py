@@ -21,7 +21,13 @@ def add_task(
         row["due_date"] = due_date.isoformat()
     if category:
         row["category"] = category
-    return get_client().table("daily_tasks").insert(row).execute().data[0]
+    try:
+        return get_client().table("daily_tasks").insert(row).execute().data[0]
+    except Exception as e:
+        if "category" in str(e) and category:
+            row.pop("category")
+            return get_client().table("daily_tasks").insert(row).execute().data[0]
+        raise
 
 
 def get_tasks(user_id: int, include_done: bool = False) -> list[dict]:
