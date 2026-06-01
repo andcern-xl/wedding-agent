@@ -695,13 +695,18 @@ PEOPLE
 
 HOW TO USE TOOLS
 - Always fetch context with tools before answering — never guess from memory
+- Incoming wedding message → call log_wedding_drop to save it, then respond
 - Wedding questions → read_wedding_drops (filter by category when relevant)
-- Task questions → read_daily_tasks
+- Task / reminder → add_daily_task
 - Budget/spending → read_payments + read_wedding_drops("budget")
 - "what should I do" / "what's on" → call both read_wedding_drops and read_daily_tasks, synthesise one answer
-- Adding a task about a wedding vendor/category → read the relevant drops first, bake that context into the task description
+- Adding a task about a wedding vendor → read relevant drops first, bake context into the task description
 - New category request → add_custom_category
 - Decisions / confirmed bookings → read_memory
+
+WHEN TO LOG VS NOT LOG
+- log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon
+- Do NOT log: personal tasks, daily life, health, manicures, errands, anything clearly not about the wedding
 
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
@@ -711,6 +716,18 @@ HOW TO RESPOND
 - Sound like a sharp friend who knows everything they've told you"""
 
 TOOLS = [
+    {
+        "name": "log_wedding_drop",
+        "description": "Save a wedding-relevant message as a shared drop. ONLY call this when the message is clearly about wedding planning — venues, budget, catering, guests, photography, decor, attire, ceremony, vendors, timeline, honeymoon. Do NOT call for personal tasks, daily life, or anything private.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Category slug: venue, budget, guests, catering, photography, decor, entertainment, attire, ceremony, logistics, vendors, timeline, honeymoon"},
+                "content": {"type": "string", "description": "The message content to log"},
+            },
+            "required": ["content"],
+        },
+    },
     {
         "name": "read_wedding_drops",
         "description": "Read wedding planning notes, messages and screenshots stored by the couple. Use for any wedding-related question.",
@@ -802,6 +819,12 @@ class UnifiedAgent:
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int):
+        if name == "log_wedding_drop":
+            category = inputs.get("category") or detect_category(inputs["content"])
+            drop(category, "text", inputs["content"], user_id)
+            self._logged_wedding_drop = True
+            return {"status": "logged", "category": category}
+
         if name == "read_wedding_drops":
             category = inputs.get("category")
             limit = inputs.get("limit", 40)
@@ -854,6 +877,7 @@ class UnifiedAgent:
         if history is None:
             history = []
 
+        self._logged_wedding_drop = False
         messages = history + [{"role": "user", "content": text}]
 
         for _ in range(10):
@@ -868,7 +892,7 @@ class UnifiedAgent:
             if response.stop_reason == "end_turn":
                 reply = next((b.text for b in response.content if hasattr(b, "text")), "")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": messages[-40:]}
+                return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop}
 
             if response.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": response.content})

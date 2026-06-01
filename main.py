@@ -13,8 +13,8 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv
-from agent import UnifiedAgent, route_intent
-from categories import CATEGORIES, detect_category
+from agent import UnifiedAgent
+from categories import CATEGORIES
 from tools.log import drop
 
 load_dotenv()
@@ -155,13 +155,10 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             if text.startswith("/"):
                 return
 
-            # Only cross-notify for messages with a detected wedding category
-            wedding_category = detect_category(text)
-            if wedding_category:
-                await notify_partner(context, update, text=text)
-                drop(wedding_category, "text", text, user_id)
-
             result = await agent.handle_message(text=text, user_id=user_id, history=history)
+
+            if result.get("notify_partner"):
+                await notify_partner(context, update, text=text)
 
         conversations[chat_id] = result.get("history", history)
         await update.message.reply_text(result["text"], parse_mode="HTML")
