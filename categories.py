@@ -3,7 +3,7 @@ CATEGORIES = {
         "name": "Budget & Finances",
         "emoji": "💰",
         "description": "Overall budget, deposits, payments, quotes, cost tracking",
-        "keywords": ["budget", "cost", "price", "pay", "deposit", "money", "quote", "invoice", "afford", "spend", "expensive", "cheap", "r", "rand"],
+        "keywords": ["budget", "cost", "price", "pay", "deposit", "money", "quote", "invoice", "afford", "spend", "expensive", "cheap", "rand", " r "],
     },
     "venue": {
         "name": "Venue",
