@@ -3,3 +3,5 @@ venv/
 __pycache__/
 *.pyc
 data/
+migrate.py
+supabase_daily_tasks.sql

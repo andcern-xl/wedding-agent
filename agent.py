@@ -1,12 +1,13 @@
 import base64
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
 from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
 from tools.memory import get_all_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops
 from tools.payments import add_payment, summary as payment_summary
+from tools.daily import add_task, get_all_tasks_for_brief, get_tasks
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -415,3 +416,211 @@ Use • for bullets. <b> tags for headers only. No markdown."""
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text
+
+
+DAILY_SYSTEM_PROMPT = """You are a personal assistant managing tasks and reminders for a couple (Ansen and Jess). You handle their day-to-day tasks — both shared and personal.
+
+PRIVACY RULES
+- Private tasks belong only to the person who created them. Never reveal them to anyone else.
+- Shared tasks (visibility: shared) are visible to both.
+
+HOW TO RESPOND
+- Be concise and direct
+- When adding a task, confirm what you logged: the task, due date, and whether it's shared or personal
+- Use Telegram HTML formatting: <b>bold</b> for emphasis, • for lists
+- Never use asterisks, underscores, or markdown — HTML only
+- Sound like a sharp personal assistant, not a robot
+
+PARSING TASKS
+- "remind me" / "my" / "I need to" → visibility: private
+- "remind us" / "we need to" / "both" → visibility: shared
+- Extract due dates from natural language: "tomorrow", "Friday", "next Monday", etc.
+- If no date is given, store without a due date"""
+
+TASK_PARSE_PROMPT = """Extract task details from this message and return JSON only.
+
+Message: {message}
+Today's date: {today}
+Day of week: {weekday}
+
+Return JSON with these fields:
+{{
+  "is_task": true or false,
+  "task": "clean task description",
+  "due_date": "YYYY-MM-DD or null",
+  "repeat": "none or daily or weekly",
+  "visibility": "private or shared"
+}}
+
+Rules:
+- is_task: true if the message is asking to create a reminder or task
+- visibility: "shared" if message says "us", "we", "both" — otherwise "private"
+- due_date: resolve relative dates using today's date provided
+- If no date mentioned, due_date is null"""
+
+
+def _task_label(t: dict, today_str: str) -> str:
+    icon = "👥" if t["visibility"] == "shared" else "🔒"
+    due = t.get("due_date")
+    if not due:
+        date_str = "no date"
+    elif due < today_str:
+        date_str = f"overdue ({due})"
+    elif due == today_str:
+        date_str = "today"
+    else:
+        date_str = due
+    return f"{icon} {t['task']} — {date_str}"
+
+
+class DailyAgent:
+    def __init__(self):
+        self.client = AsyncAnthropic()
+
+    async def _parse_task(self, text: str) -> dict | None:
+        today = date.today()
+        prompt = TASK_PARSE_PROMPT.format(
+            message=text,
+            today=today.isoformat(),
+            weekday=today.strftime("%A"),
+        )
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        try:
+            raw = response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return json.loads(raw.strip())
+        except (json.JSONDecodeError, IndexError):
+            return None
+
+    async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
+        if history is None:
+            history = []
+
+        parsed = await self._parse_task(text)
+
+        if parsed and parsed.get("is_task"):
+            due = None
+            if parsed.get("due_date"):
+                try:
+                    due = date.fromisoformat(parsed["due_date"])
+                except ValueError:
+                    pass
+            add_task(
+                user_id=user_id,
+                task=parsed["task"],
+                due_date=due,
+                repeat=parsed.get("repeat", "none"),
+                visibility=parsed.get("visibility", "private"),
+            )
+            due_str = f" — due {parsed['due_date']}" if parsed.get("due_date") else ""
+            shared_str = " (shared with partner)" if parsed.get("visibility") == "shared" else ""
+            reply = f"✅ Logged: {parsed['task']}{due_str}{shared_str}"
+            updated_history = history + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": reply},
+            ]
+            return {"text": reply, "history": updated_history}
+
+        # General daily chat — show task context
+        today_str = date.today().isoformat()
+        tasks = get_tasks(user_id, include_done=False)
+        task_lines = [_task_label(t, today_str) for t in tasks[:20]]
+        context = "CURRENT TASKS:\n" + "\n".join(task_lines) if task_lines else "No open tasks."
+
+        messages = history + [{"role": "user", "content": f"[Context]\n{context}\n\n[Message]\n{text}"}]
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            system=DAILY_SYSTEM_PROMPT,
+            messages=messages,
+        )
+        reply = response.content[0].text
+        updated_history = messages + [{"role": "assistant", "content": reply}]
+        if len(updated_history) > 40:
+            updated_history = updated_history[-40:]
+        return {"text": reply, "history": updated_history}
+
+    async def daily_brief(self, user_id: int) -> str:
+        today_str = date.today().isoformat()
+        weekday = date.today().strftime("%A")
+        data = get_all_tasks_for_brief(user_id)
+
+        parts = [f"TODAY IS {weekday.upper()}, {today_str}"]
+
+        if data["overdue"]:
+            lines = [f"  • {_task_label(t, today_str)}" for t in data["overdue"]]
+            parts.append("OVERDUE:\n" + "\n".join(lines))
+
+        if data["due_today"]:
+            lines = [f"  • {_task_label(t, today_str)}" for t in data["due_today"]]
+            parts.append("DUE TODAY:\n" + "\n".join(lines))
+
+        if data["upcoming"]:
+            lines = [f"  • {_task_label(t, today_str)}" for t in data["upcoming"][:10]]
+            parts.append("COMING UP:\n" + "\n".join(lines))
+
+        if data["no_date"]:
+            lines = [f"  • {_task_label(t, today_str)}" for t in data["no_date"][:5]]
+            parts.append("SOMEDAY:\n" + "\n".join(lines))
+
+        if not any([data["overdue"], data["due_today"], data["upcoming"], data["no_date"]]):
+            return "✅ Nothing on your task list. Add tasks by just telling me — \"remind me to X on Friday\"."
+
+        context = "\n\n".join(parts)
+        prompt = f"""{context}
+
+Generate a sharp daily brief. Structure:
+
+<b>Today</b>
+Tasks due today plus overdue items. Be direct — name the task and flag overdue ones urgently.
+
+---
+
+<b>Coming Up</b>
+Tasks due in the next 7 days. One bullet each.
+
+---
+
+<b>Someday</b>
+Tasks with no date — brief mention only if any exist.
+
+Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
+
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            system=DAILY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
+
+DAILY_KEYWORDS = {
+    "remind me", "remind us", "reminder", "don't forget", "dont forget",
+    "remember to", "to-do", "todo", "task", "errand", "appointment",
+    "meeting", "call ", "my tasks", "what's on", "whats on", "what do i",
+    "schedule", "book ", "dentist", "doctor", "gym", "pick up", "drop off",
+}
+
+
+def route_intent(text: str) -> str:
+    """Return 'wedding', 'daily', or 'both'."""
+    lower = text.lower()
+    is_daily = any(kw in lower for kw in DAILY_KEYWORDS)
+    is_wedding = detect_category(text) is not None
+
+    overview_phrases = ["what's on this week", "whats on this week", "what do i have", "weekly overview", "this week"]
+    is_overview = any(p in lower for p in overview_phrases)
+
+    if is_overview:
+        return "both"
+    if is_daily and not is_wedding:
+        return "daily"
+    return "wedding"
