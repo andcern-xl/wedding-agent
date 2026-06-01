@@ -155,10 +155,11 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             if text.startswith("/"):
                 return
 
-            # Cross-notify partner for wedding messages; stay quiet for personal daily tasks
-            if route_intent(text) != "daily":
+            # Only cross-notify for messages with a detected wedding category
+            wedding_category = detect_category(text)
+            if wedding_category:
                 await notify_partner(context, update, text=text)
-                drop(detect_category(text), "text", text, user_id)
+                drop(wedding_category, "text", text, user_id)
 
             result = await agent.handle_message(text=text, user_id=user_id, history=history)
 
