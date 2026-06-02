@@ -674,7 +674,7 @@ Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
 
         # Google Calendar events
         try:
-            events = get_events(days_ahead=7)
+            events = await asyncio.to_thread(get_events, 7)
         except Exception:
             events = []
 
@@ -1034,19 +1034,20 @@ class UnifiedAgent:
             return {"status": "created", "slug": result["slug"], "name": result["name"]}
 
         if name == "read_calendar":
-            return get_events(days_ahead=inputs.get("days_ahead", 7))
+            return await asyncio.to_thread(get_events, inputs.get("days_ahead", 7))
 
         if name == "create_calendar_event":
-            return create_event(
-                title=inputs["title"],
-                start=inputs["start"],
-                end=inputs["end"],
-                description=inputs.get("description", ""),
-                location=inputs.get("location", ""),
+            return await asyncio.to_thread(
+                create_event,
+                inputs["title"],
+                inputs["start"],
+                inputs["end"],
+                inputs.get("description", ""),
+                inputs.get("location", ""),
             )
 
         if name == "delete_calendar_event":
-            ok = delete_event(inputs["event_id"])
+            ok = await asyncio.to_thread(delete_event, inputs["event_id"])
             return {"status": "deleted" if ok else "not_found"}
 
         return {"error": f"Unknown tool: {name}"}
@@ -1089,7 +1090,12 @@ class UnifiedAgent:
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
-                        result = await self._execute_tool(block.name, block.input, user_id)
+                        try:
+                            result = await self._execute_tool(block.name, block.input, user_id)
+                        except Exception as exc:
+                            import logging as _logging
+                            _logging.getLogger(__name__).exception(f"Tool {block.name} failed")
+                            result = {"error": str(exc)}
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
