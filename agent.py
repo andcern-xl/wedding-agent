@@ -645,6 +645,122 @@ Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
         )
         return response.content[0].text
 
+    async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+        """Generate one combined daily brief for all users, sent to both."""
+        today_str = date.today().isoformat()
+        weekday = date.today().strftime("%A")
+        cats = get_all_categories()
+        names = user_names or {}
+
+        # Collect all tasks across users, deduplicating shared ones
+        seen_ids: set = set()
+        merged: list[dict] = []
+        for uid in user_ids:
+            for t in get_tasks(uid, include_done=False):
+                if t["id"] in seen_ids:
+                    continue
+                seen_ids.add(t["id"])
+                t = dict(t)
+                if t["visibility"] == "shared":
+                    t["_owner"] = "shared"
+                else:
+                    t["_owner"] = names.get(uid, str(uid))
+                merged.append(t)
+
+        overdue = [t for t in merged if t.get("due_date") and t["due_date"] < today_str]
+        due_today = [t for t in merged if t.get("due_date") == today_str]
+        upcoming = [t for t in merged if t.get("due_date") and t["due_date"] > today_str]
+        no_date = [t for t in merged if not t.get("due_date")]
+
+        # Google Calendar events
+        try:
+            events = get_events(days_ahead=7)
+        except Exception:
+            events = []
+
+        parts = [f"TODAY IS {weekday.upper()}, {today_str}"]
+
+        if events:
+            ev_lines = []
+            for e in events[:10]:
+                start = e["start"]
+                if "T" in start:
+                    try:
+                        dt = datetime.fromisoformat(start)
+                        start = dt.strftime("%-d %b %H:%M")
+                    except ValueError:
+                        pass
+                ev_lines.append(f"  • {start} — {e['title']}")
+            parts.append("CALENDAR (next 7 days):\n" + "\n".join(ev_lines))
+
+        def _owner_label(t: dict) -> str:
+            owner = t.get("_owner", "")
+            if owner and owner != "shared":
+                return f" [{owner}]"
+            return ""
+
+        if overdue:
+            lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in overdue]
+            parts.append("OVERDUE:\n" + "\n".join(lines))
+
+        if due_today:
+            lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in due_today]
+            parts.append("DUE TODAY:\n" + "\n".join(lines))
+
+        if upcoming:
+            lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in upcoming[:10]]
+            parts.append("COMING UP:\n" + "\n".join(lines))
+
+        if no_date:
+            by_cat: dict[str, list] = {}
+            for t in no_date:
+                cat = t.get("category") or "personal"
+                by_cat.setdefault(cat, []).append(t)
+            cat_lines = ["NO DATE:"]
+            for cat_slug, tasks in by_cat.items():
+                info = cats.get(cat_slug, {"emoji": "📌", "name": cat_slug.title()})
+                cat_lines.append(f"\n{info['emoji']} {info['name']}:")
+                for t in tasks:
+                    cat_lines.append(f"  • {_task_label(t, today_str)}{_owner_label(t)}")
+            parts.append("\n".join(cat_lines))
+
+        if not merged and not events:
+            return "✅ Nothing on the list today. Add tasks by telling me — \"remind us to X on Friday\"."
+
+        context = "\n\n".join(parts)
+        person_list = " and ".join(names.values()) if names else "both of you"
+        prompt = f"""{context}
+
+Generate a sharp combined daily brief for {person_list}. Structure:
+
+<b>📅 Today on the Calendar</b>
+Calendar events today and the next few days. One line each with date/time. Skip if none.
+
+---
+
+<b>Today & Overdue</b>
+Tasks due today plus any overdue. Flag overdue ones urgently. Where tasks belong to one person, note their name in brackets. Skip if none.
+
+---
+
+<b>Coming Up</b>
+Tasks due in the next 7 days. One bullet each. Skip if none.
+
+---
+
+<b>On the List</b>
+Undated open tasks grouped by category. Use category emoji and name as sub-header. Note whose task it is where relevant.
+
+Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
+
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1200,
+            system=DAILY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
 
 DAILY_KEYWORDS = {
     "remind me", "remind us", "reminder", "don't forget", "dont forget",
@@ -1031,3 +1147,6 @@ Be concise (under 300 words). Write in third person. This will be loaded as cont
 
     async def daily_brief(self, user_id: int) -> str:
         return await self._daily.daily_brief(user_id)
+
+    async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+        return await self._daily.combined_daily_brief(user_ids, user_names)

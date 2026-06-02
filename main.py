@@ -222,9 +222,15 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
-    user_id = update.effective_user.id
     msg = await update.message.reply_text("Checking your tasks...")
-    brief = await agent.daily_brief(user_id)
+    user_names: dict[int, str] = {}
+    for uid in ALLOWED_IDS:
+        try:
+            chat = await context.bot.get_chat(uid)
+            user_names[uid] = chat.first_name or str(uid)
+        except Exception:
+            user_names[uid] = str(uid)
+    brief = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
     sections = _split_sections(brief)
     await msg.edit_text(sections[0], parse_mode="HTML")
     for section in sections[1:]:
@@ -234,15 +240,23 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
-    for uid in ALLOWED_IDS:
-        try:
-            brief = await agent.daily_brief(uid)
-            sections = _split_sections(brief)
+    try:
+        user_names: dict[int, str] = {}
+        for uid in ALLOWED_IDS:
+            try:
+                chat = await context.bot.get_chat(uid)
+                user_names[uid] = chat.first_name or str(uid)
+            except Exception:
+                user_names[uid] = str(uid)
+
+        brief = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
+        sections = _split_sections(brief)
+        for uid in ALLOWED_IDS:
             await context.bot.send_message(chat_id=uid, text="<b>Daily Brief</b>", parse_mode="HTML")
             for section in sections:
                 await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
-        except Exception:
-            logger.exception(f"Error sending daily brief to {uid}")
+    except Exception:
+        logger.exception("Error sending combined daily brief")
 
 
 def main():
