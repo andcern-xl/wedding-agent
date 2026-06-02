@@ -147,8 +147,11 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
             await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption)
             result = await agent.handle_image(image_bytes=bytes(photo_bytes), caption=caption, user_id=user_id, history=history)
-            log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
-            drop(result.get("detected_category"), "image", log_content, user_id)
+            try:
+                log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
+                drop(result.get("detected_category"), "image", log_content, user_id)
+            except Exception:
+                logger.exception("Failed to log image drop")
 
         else:
             text = update.message.text or ""

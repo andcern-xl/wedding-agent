@@ -171,14 +171,21 @@ If this image has no financial content, return: {"skip": true}"""
 
         suffix = ""
         if payment:
-            add_payment(payment)
-            status_label = {"paid": "paid", "deposit": "deposit paid", "owing": "still owed", "quote": "quoted"}.get(payment.get("status", ""), payment.get("status", ""))
-            currency = payment.get("currency", "")
-            amount = payment.get("amount", "")
-            vendor = payment.get("vendor", "")
-            paid_by = payment.get("paid_by")
-            by_str = f" by {paid_by}" if paid_by else ""
-            suffix = f"\n\n💰 Logged: {currency} {amount:,} {status_label}{by_str} — {vendor}"
+            try:
+                add_payment(payment)
+            except Exception:
+                pass  # don't let payment logging kill the reply
+            try:
+                status_label = {"paid": "paid", "deposit": "deposit paid", "owing": "still owed", "quote": "quoted"}.get(payment.get("status", ""), payment.get("status", ""))
+                currency = payment.get("currency", "")
+                raw_amount = payment.get("amount", "")
+                amount_str = f"{int(float(raw_amount)):,}" if raw_amount != "" else ""
+                vendor = payment.get("vendor", "")
+                paid_by = payment.get("paid_by")
+                by_str = f" by {paid_by}" if paid_by else ""
+                suffix = f"\n\n💰 Logged: {currency} {amount_str} {status_label}{by_str} — {vendor}"
+            except Exception:
+                suffix = "\n\n💰 Payment details logged."
 
         reply = response.content[0].text + suffix
         updated_history = messages + [{"role": "assistant", "content": reply}]
@@ -1057,7 +1064,10 @@ class UnifiedAgent:
             history = []
 
         self._logged_wedding_drop = False
-        user_summary = get_summary(user_id)
+        try:
+            user_summary = get_summary(user_id)
+        except Exception:
+            user_summary = ""
         messages = history + [{"role": "user", "content": text}]
 
         for _ in range(10):
@@ -1074,33 +1084,44 @@ class UnifiedAgent:
                 messages.append({"role": "assistant", "content": reply})
                 updated_history = messages[-40:]
 
-                # Compress in background every 6 messages
-                msg_count = get_message_count(user_id) + 1
-                if msg_count % 6 == 0:
-                    asyncio.create_task(
-                        self._compress_and_save(user_id, updated_history, user_summary, msg_count)
-                    )
-                else:
-                    save_summary(user_id, user_summary, msg_count)
+                try:
+                    msg_count = get_message_count(user_id) + 1
+                    if msg_count % 6 == 0:
+                        asyncio.create_task(
+                            self._compress_and_save(user_id, updated_history, user_summary, msg_count)
+                        )
+                    else:
+                        save_summary(user_id, user_summary, msg_count)
+                except Exception:
+                    pass  # never let bookkeeping kill a valid reply
 
                 return {"text": reply, "history": updated_history, "notify_partner": self._logged_wedding_drop}
 
+            if response.stop_reason == "max_tokens":
+                # Model hit token limit — return whatever partial text it produced
+                reply = next((b.text for b in response.content if hasattr(b, "text")), "")
+                messages.append({"role": "assistant", "content": reply})
+                return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop}
+
             if response.stop_reason == "tool_use":
+                tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+                if not tool_use_blocks:
+                    # Malformed tool_use response with no tool blocks — bail out
+                    break
                 messages.append({"role": "assistant", "content": response.content})
                 tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        try:
-                            result = await self._execute_tool(block.name, block.input, user_id)
-                        except Exception as exc:
-                            import logging as _logging
-                            _logging.getLogger(__name__).exception(f"Tool {block.name} failed")
-                            result = {"error": str(exc)}
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, default=str),
-                        })
+                for block in tool_use_blocks:
+                    try:
+                        result = await self._execute_tool(block.name, block.input, user_id)
+                    except Exception as exc:
+                        import logging as _logging
+                        _logging.getLogger(__name__).exception(f"Tool {block.name} failed")
+                        result = {"error": str(exc)}
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, default=str),
+                    })
                 messages.append({"role": "user", "content": tool_results})
 
         return {"text": "Something went wrong, try again.", "history": history}
