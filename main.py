@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from agent import UnifiedAgent
 from categories import CATEGORIES
 from tools.log import drop
+from tools.notifications import get_pending_notifications, mark_notification_sent
 
 load_dotenv()
 
@@ -24,6 +25,8 @@ try:
 except Exception:
     REMINDER_TIMEZONE = ZoneInfo("UTC")
 REMINDER_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
+_evening_hour = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
+EVENING_TIME = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -262,6 +265,42 @@ async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error sending combined daily brief")
 
 
+async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        pending = get_pending_notifications()
+    except Exception:
+        logger.exception("Error fetching pending notifications")
+        return
+    for notif in pending:
+        try:
+            await context.bot.send_message(chat_id=notif["user_id"], text=notif["message"])
+            mark_notification_sent(notif["id"])
+        except Exception:
+            logger.exception(f"Failed to send notification {notif['id']} to {notif['user_id']}")
+
+
+async def send_evening_brief(context: ContextTypes.DEFAULT_TYPE):
+    if not ALLOWED_IDS:
+        return
+    try:
+        user_names: dict[int, str] = {}
+        for uid in ALLOWED_IDS:
+            try:
+                chat = await context.bot.get_chat(uid)
+                user_names[uid] = chat.first_name or str(uid)
+            except Exception:
+                user_names[uid] = str(uid)
+
+        brief = await agent.evening_brief(ALLOWED_IDS, user_names)
+        sections = _split_sections(brief)
+        for uid in ALLOWED_IDS:
+            await context.bot.send_message(chat_id=uid, text="<b>Evening Recap</b>", parse_mode="HTML")
+            for section in sections:
+                await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+    except Exception:
+        logger.exception("Error sending evening brief")
+
+
 def main():
     import asyncio
     asyncio.set_event_loop(asyncio.new_event_loop())
@@ -292,6 +331,10 @@ def main():
         app.job_queue.run_daily(send_priority_brief, time=REMINDER_TIME, days=(0,))
         # Daily task brief — every day at 9am
         app.job_queue.run_daily(send_daily_brief, time=REMINDER_TIME)
+        # Evening recap — every day at EVENING_BRIEF_HOUR (default 9pm)
+        app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
+        # Check for scheduled notifications every 60 seconds
+        app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:
         logger.warning("Job queue unavailable — scheduled reminders disabled. Install python-telegram-bot[job-queue].")
 

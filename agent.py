@@ -8,7 +8,9 @@ from tools.memory import get_all_memory, get_category_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops
 from tools.payments import add_payment, summary as payment_summary
-from tools.daily import add_task, get_all_tasks_for_brief, get_tasks
+from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today
+from tools.notifications import schedule_notification as _sched_notif, list_notifications as _list_notifs, cancel_notification as _cancel_notif
+from tools.fyis import log_fyi, get_fyis, get_fyis_today
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
 from tools.user_memory import get_summary, save_summary, get_message_count
 from tools.gcal import get_events, create_event, delete_event
@@ -768,6 +770,126 @@ Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
         )
         return response.content[0].text
 
+    async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+        """End-of-day recap: what was done today, what's coming tomorrow."""
+        today_str = date.today().isoformat()
+        tomorrow_str = (date.today() + timedelta(days=1)).isoformat()
+        tomorrow_weekday = (date.today() + timedelta(days=1)).strftime("%A")
+        names = user_names or {}
+
+        # Completed tasks today — deduplicated
+        seen_ids: set = set()
+        completed: list[dict] = []
+        for uid in user_ids:
+            for t in get_completed_today(uid):
+                if t["id"] in seen_ids:
+                    continue
+                seen_ids.add(t["id"])
+                t = dict(t)
+                t["_owner"] = "shared" if t["visibility"] == "shared" else names.get(uid, str(uid))
+                completed.append(t)
+
+        # Tomorrow's tasks — deduplicated
+        seen_ids = set()
+        tomorrow_tasks: list[dict] = []
+        for uid in user_ids:
+            for t in get_tasks(uid, include_done=False):
+                if t["id"] in seen_ids:
+                    continue
+                if t.get("due_date") != tomorrow_str:
+                    continue
+                seen_ids.add(t["id"])
+                t = dict(t)
+                t["_owner"] = "shared" if t["visibility"] == "shared" else names.get(uid, str(uid))
+                tomorrow_tasks.append(t)
+
+        # Wedding drops today
+        today_drops = [d for d in get_recent_drops(limit=30) if d["ts"][:10] == today_str]
+
+        # FYIs shared today
+        today_fyis = get_fyis_today()
+
+        # Calendar events tomorrow
+        try:
+            all_events = await asyncio.to_thread(get_events, 2)
+            tomorrow_events = [e for e in all_events if e.get("start", "").startswith(tomorrow_str)]
+        except Exception:
+            tomorrow_events = []
+
+        parts = [f"END OF DAY — {today_str}"]
+
+        def _owner_label(t: dict) -> str:
+            owner = t.get("_owner", "")
+            return f" [{owner}]" if owner and owner != "shared" else ""
+
+        if completed:
+            lines = [f"  ✓ {t['task']}{_owner_label(t)}" for t in completed]
+            parts.append("COMPLETED TODAY:\n" + "\n".join(lines))
+
+        if today_drops:
+            lines = []
+            for d in today_drops[:8]:
+                cat = f"[{d['category']}] " if d.get("category") else ""
+                lines.append(f"  • {cat}{d['content'][:120]}")
+            parts.append("WEDDING NOTES TODAY:\n" + "\n".join(lines))
+
+        if today_fyis:
+            lines = []
+            for f in today_fyis:
+                owner = names.get(f["user_id"], str(f["user_id"]))
+                cat = f"[{f['category']}] " if f.get("category") else ""
+                lines.append(f"  • {owner}: {cat}{f['content'][:120]}")
+            parts.append("FYIS SHARED TODAY:\n" + "\n".join(lines))
+
+        if tomorrow_tasks or tomorrow_events:
+            lines = []
+            for e in tomorrow_events:
+                start = e["start"]
+                if "T" in start:
+                    try:
+                        start = datetime.fromisoformat(start).strftime("%-I:%M %p")
+                    except ValueError:
+                        pass
+                lines.append(f"  📅 {start} — {e['title']}")
+            for t in tomorrow_tasks:
+                lines.append(f"  • {t['task']}{_owner_label(t)}")
+            parts.append(f"TOMORROW ({tomorrow_weekday.upper()}):\n" + "\n".join(lines))
+
+        context = "\n\n".join(parts)
+        person_list = " and ".join(names.values()) if names else "both of you"
+
+        prompt = f"""{context}
+
+Generate a concise end-of-day recap for {person_list}. Structure:
+
+<b>✅ Done today</b>
+Tasks completed today. If nothing was done, say so in one line.
+
+---
+
+<b>💬 FYIs</b>
+Updates and info shared today by each person — what your partner wants you to know. Show who shared each one in brackets e.g. [Ansen]. Skip this section entirely if none.
+
+---
+
+<b>💒 Wedding today</b>
+Any wedding notes or updates dropped today. Skip this section entirely if none.
+
+---
+
+<b>📅 Tomorrow</b>
+Calendar events (with times) and tasks due tomorrow. Skip this section entirely if nothing.
+
+Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
+
+        response = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            system=DAILY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
 
 DAILY_KEYWORDS = {
     "remind me", "remind us", "reminder", "don't forget", "dont forget",
@@ -814,6 +936,7 @@ PRIVACY RULE
 Tasks with visibility "private" belong only to the person who created them. Never reveal private tasks from one person to the other. Tasks with visibility "shared" are visible to both.
 
 TODAY'S DATE: {today}
+CURRENT TIMEZONE: {timezone}
 
 WHAT YOU KNOW ABOUT THIS PERSON
 {user_summary}
@@ -822,11 +945,15 @@ PEOPLE
 - Ansen: user_id 63756531
 - Jess / Jessica: user_id 6927468999
 
+PROACTIVE NOTIFICATIONS — YOU CAN DO THIS
+You are running inside a Telegram bot with a job queue. You CAN send messages at specific times. When someone asks for a time-based reminder, call schedule_notification — a background job fires it automatically at the right moment. Never tell the user you can't send proactive messages or push alerts. You can. Use the tool.
+
 HOW TO USE TOOLS
 - Always fetch context with tools before answering — never guess from memory
 - Incoming wedding message → call log_wedding_drop to save it, then respond
 - Wedding questions → read_wedding_drops (filter by category when relevant)
-- Task / reminder → add_daily_task
+- Task / date-based reminder (no specific clock time) → add_daily_task — appears in the morning brief
+- Reminder with a specific time ("at 3pm", "in 2 hours", "tonight at 8", "tomorrow at noon") → schedule_notification — fires as a Telegram push at that exact moment. NEVER use add_daily_task for these.
 - Budget/spending → read_payments + read_wedding_drops("budget")
 - "what should I do" / "what's on" → call both read_wedding_drops and read_daily_tasks, synthesise one answer
 - Adding a task about a wedding vendor → read relevant drops first, bake context into the task description
@@ -835,10 +962,30 @@ HOW TO USE TOOLS
 - "what's on the calendar" / "what's happening this week" → read_calendar
 - "book", "schedule", "add to calendar" → create_calendar_event
 - "cancel", "remove from calendar" → delete_calendar_event (read_calendar first to get the event ID)
+- "what reminders are scheduled" → list_notifications
+- "cancel that reminder" → cancel_notification (list_notifications first to get the ID)
+- Shared update / past-tense info / "FYI" / "just so you know" / "heads up" / completed action → log_fyi (not add_daily_task)
+- "any FYIs?" / "what did we share recently?" → read_fyis
 
 WHEN TO LOG VS NOT LOG
 - log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon
 - Do NOT log: personal tasks, daily life, health, manicures, errands, anything clearly not about the wedding
+
+TASK vs FYI — infer from intent, not keywords
+Ask: does this need to be done, or is it sharing something?
+
+log_fyi when:
+- Past tense / completed action: "I paid the bill", "I booked the restaurant", "I called the vet"
+- Status update: "I'm running late", "the plumber is coming at 3", "the package arrived"
+- News or information: "the vet called, results were fine", "the venue confirmed our date"
+- Sharing context: "the caterer raised their prices", "Mum is arriving Friday"
+
+add_daily_task when:
+- Future action still to be done: "remind me to call", "we need to book", "don't forget to pay"
+- Request directed at the other person: "can you follow up with the venue?", "Jess can you call the florist?"
+- Anything that would sit on a to-do list
+
+When in doubt: if it's something that already happened or is just good to know → FYI. If it needs someone to act → task.
 
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
@@ -886,7 +1033,7 @@ TOOLS = [
     },
     {
         "name": "add_daily_task",
-        "description": "Create a new task or reminder for the current user.",
+        "description": "Create a date-based task or reminder. Use for to-dos with a due date (or no date). Do NOT use when the user gives a specific clock time ('at 3pm', 'in 2 hours') — use schedule_notification for those instead.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -967,6 +1114,58 @@ TOOLS = [
             "required": ["event_id"],
         },
     },
+    {
+        "name": "log_fyi",
+        "description": "Save a shared FYI — information one partner wants the other to know, not an action item. Use for past-tense updates, status shares, 'heads up' messages. Examples: 'FYI I paid the electricity bill', 'just letting you know I booked a table', 'heads up I'll be home late'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The FYI content"},
+                "category": {"type": "string", "description": "Optional category: finance, health, home, work, social, travel, personal"},
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "read_fyis",
+        "description": "Read recent shared FYIs — updates and info shared between Ansen and Jess.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max results. Default 20."},
+            },
+        },
+    },
+    {
+        "name": "schedule_notification",
+        "description": "Schedule a Telegram message to be sent at a specific time. Use when the user says things like 'remind me at 3pm', 'notify me at...', 'send me a message tonight at X'. Supports daily/weekly recurrence.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The message text to send"},
+                "scheduled_at": {"type": "string", "description": "When to send — ISO 8601 datetime with timezone offset e.g. 2026-06-03T15:00:00+08:00"},
+                "recurrence": {"type": "string", "enum": ["none", "daily", "weekly"], "description": "Repeat cadence. Default none."},
+                "for_all_users": {"type": "boolean", "description": "If true, send to both Ansen and Jess. Default false (only the current user)."},
+            },
+            "required": ["message", "scheduled_at"],
+        },
+    },
+    {
+        "name": "list_notifications",
+        "description": "List the current user's upcoming scheduled notifications.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancel_notification",
+        "description": "Cancel a scheduled notification by its ID. Call list_notifications first to get the ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "notification_id": {"type": "string", "description": "The notification ID from list_notifications"},
+            },
+            "required": ["notification_id"],
+        },
+    },
 ]
 
 
@@ -981,9 +1180,11 @@ class UnifiedAgent:
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
         )
+        import os
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
             today=date.today().isoformat(),
+            timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
             user_summary=user_summary or "Nothing yet — this is the start of our history together.",
         )
 
@@ -1057,6 +1258,46 @@ class UnifiedAgent:
             ok = await asyncio.to_thread(delete_event, inputs["event_id"])
             return {"status": "deleted" if ok else "not_found"}
 
+        if name == "log_fyi":
+            result = log_fyi(user_id, inputs["content"], inputs.get("category"))
+            self._logged_fyi = True
+            return {"status": "logged", "id": str(result["id"])}
+
+        if name == "read_fyis":
+            fyis = get_fyis(limit=inputs.get("limit", 20))
+            return [{"id": str(f["id"]), "user_id": f["user_id"], "content": f["content"], "category": f.get("category"), "created_at": f["created_at"][:16]} for f in fyis]
+
+        if name == "schedule_notification":
+            import os
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
+            try:
+                dt = datetime.fromisoformat(inputs["scheduled_at"])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+            except (ValueError, KeyError):
+                return {"error": "Invalid scheduled_at — use ISO 8601 e.g. 2026-06-03T15:00:00+08:00"}
+            if inputs.get("for_all_users"):
+                all_ids = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
+                target_ids = all_ids if all_ids else [user_id]
+            else:
+                target_ids = [user_id]
+            recurrence = inputs.get("recurrence", "none")
+            ids_scheduled = []
+            for uid in target_ids:
+                notif = _sched_notif(uid, inputs["message"], dt, recurrence)
+                ids_scheduled.append(str(notif["id"]))
+            display = dt.strftime("%-d %b at %-I:%M %p")
+            return {"status": "scheduled", "scheduled_at": dt.isoformat(), "display": display, "ids": ids_scheduled}
+
+        if name == "list_notifications":
+            notifs = _list_notifs(user_id)
+            return [{"id": str(n["id"]), "message": n["message"], "scheduled_at": n["scheduled_at"], "recurrence": n.get("recurrence", "none")} for n in notifs]
+
+        if name == "cancel_notification":
+            ok = _cancel_notif(inputs["notification_id"], user_id)
+            return {"status": "cancelled" if ok else "not_found"}
+
         return {"error": f"Unknown tool: {name}"}
 
     async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
@@ -1064,6 +1305,7 @@ class UnifiedAgent:
             history = []
 
         self._logged_wedding_drop = False
+        self._logged_fyi = False
         try:
             user_summary = get_summary(user_id)
         except Exception:
@@ -1095,13 +1337,13 @@ class UnifiedAgent:
                 except Exception:
                     pass  # never let bookkeeping kill a valid reply
 
-                return {"text": reply, "history": updated_history, "notify_partner": self._logged_wedding_drop}
+                return {"text": reply, "history": updated_history, "notify_partner": self._logged_wedding_drop or self._logged_fyi}
 
             if response.stop_reason == "max_tokens":
                 # Model hit token limit — return whatever partial text it produced
                 reply = next((b.text for b in response.content if hasattr(b, "text")), "")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop}
+                return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop or self._logged_fyi}
 
             if response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
@@ -1177,3 +1419,6 @@ Be concise (under 300 words). Write in third person. This will be loaded as cont
 
     async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         return await self._daily.combined_daily_brief(user_ids, user_names)
+
+    async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+        return await self._daily.evening_brief(user_ids, user_names)

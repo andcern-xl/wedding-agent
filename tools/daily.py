@@ -88,6 +88,21 @@ def complete_task(task_id: str, user_id: int) -> bool:
     return True
 
 
+def get_completed_today(user_id: int) -> list[dict]:
+    """Return tasks completed since UTC midnight today."""
+    today_start = f"{date.today().isoformat()}T00:00:00+00:00"
+    rows = (
+        get_client().table("daily_tasks")
+        .select("*")
+        .eq("done", True)
+        .gte("completed_at", today_start)
+        .order("completed_at")
+        .execute()
+        .data or []
+    )
+    return [r for r in rows if r["visibility"] == "shared" or r["user_id"] == user_id]
+
+
 def get_all_tasks_for_brief(user_id: int) -> dict:
     """Return structured task data for brief generation."""
     today = date.today().isoformat()
