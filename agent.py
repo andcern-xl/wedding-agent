@@ -944,8 +944,10 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 TODAY'S DATE: {today}
 CURRENT TIMEZONE: {timezone}
 
-WHAT YOU KNOW ABOUT THIS PERSON
+WHAT YOU KNOW ABOUT THIS PERSON AND THEIR PREFERENCES
 {user_summary}
+
+If the above contains a PREFERENCES section, follow those instructions on every message — they are standing orders, not suggestions.
 
 PEOPLE
 - Ansen: user_id 63756531
@@ -972,6 +974,10 @@ HOW TO USE TOOLS
 - "cancel that reminder" → cancel_notification (list_notifications first to get the ID)
 - Shared update / past-tense info / "FYI" / "just so you know" / "heads up" / completed action → log_fyi (not add_daily_task)
 - "any FYIs?" / "what did we share recently?" → read_fyis
+- "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
+
+TOOL ERRORS — BE HONEST
+If a tool returns {"error": "..."}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
 WHEN TO LOG VS NOT LOG
 - log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon
@@ -1172,6 +1178,17 @@ TOOLS = [
             "required": ["notification_id"],
         },
     },
+    {
+        "name": "save_preference",
+        "description": "Persist a user preference or behavioural instruction that should apply in all future conversations. Use when someone says 'going forward always do X', 'from now on X', 'remember that I prefer X', 'never ask me to confirm X', etc. This is permanent — it will be loaded every session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "preference": {"type": "string", "description": "The preference to remember, written as a clear instruction e.g. 'Always add to Google Calendar immediately without asking for confirmation'"},
+            },
+            "required": ["preference"],
+        },
+    },
 ]
 
 
@@ -1303,6 +1320,21 @@ class UnifiedAgent:
         if name == "cancel_notification":
             ok = _cancel_notif(inputs["notification_id"], user_id)
             return {"status": "cancelled" if ok else "not_found"}
+
+        if name == "save_preference":
+            pref = inputs["preference"].strip()
+            existing = get_summary(user_id)
+            marker = "\n\nPREFERENCES:\n"
+            if marker in existing:
+                before, prefs_block = existing.split(marker, 1)
+                lines = [l for l in prefs_block.splitlines() if l.strip()]
+                lines.append(f"- {pref}")
+                updated = before + marker + "\n".join(lines)
+            else:
+                updated = (existing + marker + f"- {pref}") if existing else (marker.strip() + f"\n- {pref}")
+            count = get_message_count(user_id)
+            save_summary(user_id, updated, count)
+            return {"status": "saved", "preference": pref}
 
         return {"error": f"Unknown tool: {name}"}
 
