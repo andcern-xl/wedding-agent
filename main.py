@@ -102,11 +102,15 @@ async def cmd_bringmeuptospeed(update: Update, context: ContextTypes.DEFAULT_TYP
     if not allowed(update):
         return
     msg = await update.message.reply_text("Pulling everything together...")
-    summary = await agent.bring_me_up_to_speed()
-    sections = _split_sections(summary)
-    await msg.edit_text(sections[0], parse_mode="HTML")
-    for section in sections[1:]:
-        await update.message.reply_text(section, parse_mode="HTML")
+    try:
+        summary = await agent.bring_me_up_to_speed()
+        sections = _split_sections(summary)
+        await msg.edit_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_bringmeuptospeed failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def cmd_category_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,11 +120,15 @@ async def cmd_category_status(update: Update, context: ContextTypes.DEFAULT_TYPE
     if command not in CATEGORIES:
         return
     msg = await update.message.reply_text("Checking...")
-    status = await agent.category_status(command)
-    sections = _split_sections(status)
-    await msg.edit_text(sections[0], parse_mode="HTML")
-    for section in sections[1:]:
-        await update.message.reply_text(section, parse_mode="HTML")
+    try:
+        status = await agent.category_status(command)
+        sections = _split_sections(status)
+        await msg.edit_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_category_status failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,7 +179,9 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
     except Exception as e:
         logger.exception(f"Error handling message: {e}")
-        await update.message.reply_text("Something went wrong, try again.")
+        err_type = type(e).__name__
+        err_msg = str(e)[:300]
+        await update.message.reply_text(f"[DEBUG] {err_type}: {err_msg}")
 
 
 async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
@@ -218,29 +228,37 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     msg = await update.message.reply_text("Analysing where things stand...")
-    brief = await agent.priority_brief()
-    sections = _split_sections(brief)
-    await msg.edit_text(sections[0], parse_mode="HTML")
-    for section in sections[1:]:
-        await update.message.reply_text(section, parse_mode="HTML")
+    try:
+        brief = await agent.priority_brief()
+        sections = _split_sections(brief)
+        await msg.edit_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_plan failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     msg = await update.message.reply_text("Checking your tasks...")
-    user_names: dict[int, str] = {}
-    for uid in ALLOWED_IDS:
-        try:
-            chat = await context.bot.get_chat(uid)
-            user_names[uid] = chat.first_name or str(uid)
-        except Exception:
-            user_names[uid] = str(uid)
-    brief = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-    sections = _split_sections(brief)
-    await msg.edit_text(sections[0], parse_mode="HTML")
-    for section in sections[1:]:
-        await update.message.reply_text(section, parse_mode="HTML")
+    try:
+        user_names: dict[int, str] = {}
+        for uid in ALLOWED_IDS:
+            try:
+                chat = await context.bot.get_chat(uid)
+                user_names[uid] = chat.first_name or str(uid)
+            except Exception:
+                user_names[uid] = str(uid)
+        brief = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
+        sections = _split_sections(brief)
+        await msg.edit_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_tasks failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):

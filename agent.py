@@ -1376,10 +1376,11 @@ class UnifiedAgent:
                 messages.append({"role": "user", "content": tool_results})
 
         import logging as _logging
+        last_reason = response.stop_reason if "response" in dir() else "never_reached_api"
         _logging.getLogger(__name__).error(
-            f"handle_message loop exhausted for user {user_id}. Last stop_reason: {response.stop_reason if 'response' in dir() else 'unknown'}. Messages len: {len(messages)}"
+            f"handle_message loop exhausted for user {user_id}. Last stop_reason: {last_reason}. Messages len: {len(messages)}"
         )
-        return {"text": "Something went wrong, try again.", "history": history}
+        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": history}
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
         lines = []
