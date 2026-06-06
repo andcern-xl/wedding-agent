@@ -58,7 +58,10 @@ class WeddingAgent:
             history = []
 
         category = detect_category(text)
-        drops = get_drops(category=category, limit=40) if category else get_recent_drops(limit=30)
+        try:
+            drops = get_drops(category=category, limit=40) if category else get_recent_drops(limit=30)
+        except Exception:
+            drops = []
         context = self._drops_block(drops, "WHAT YOUVE SHARED SO FAR:")
 
         doc_note = ""
@@ -145,7 +148,10 @@ If this image has no financial content, return: {"skip": true}"""
             history = []
 
         category = detect_category(caption) if caption else None
-        drops = get_drops(category=category, limit=30) if category else get_recent_drops(limit=20)
+        try:
+            drops = get_drops(category=category, limit=30) if category else get_recent_drops(limit=20)
+        except Exception:
+            drops = []
         context = self._drops_block(drops, "WHAT YOUVE SHARED SO FAR:")
 
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -1323,6 +1329,8 @@ class UnifiedAgent:
 
             if response.stop_reason == "end_turn":
                 reply = next((b.text for b in response.content if hasattr(b, "text")), "")
+                if not reply:
+                    reply = "Got it."
                 messages.append({"role": "assistant", "content": reply})
                 updated_history = messages[-40:]
 
@@ -1341,14 +1349,15 @@ class UnifiedAgent:
 
             if response.stop_reason == "max_tokens":
                 # Model hit token limit — return whatever partial text it produced
-                reply = next((b.text for b in response.content if hasattr(b, "text")), "")
+                reply = next((b.text for b in response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
                 return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop or self._logged_fyi}
 
             if response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
                 if not tool_use_blocks:
-                    # Malformed tool_use response with no tool blocks — bail out
+                    import logging as _logging
+                    _logging.getLogger(__name__).error("tool_use stop_reason but no tool_use blocks in response")
                     break
                 messages.append({"role": "assistant", "content": response.content})
                 tool_results = []
@@ -1366,6 +1375,10 @@ class UnifiedAgent:
                     })
                 messages.append({"role": "user", "content": tool_results})
 
+        import logging as _logging
+        _logging.getLogger(__name__).error(
+            f"handle_message loop exhausted for user {user_id}. Last stop_reason: {response.stop_reason if 'response' in dir() else 'unknown'}. Messages len: {len(messages)}"
+        )
         return {"text": "Something went wrong, try again.", "history": history}
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):

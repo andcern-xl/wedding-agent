@@ -24,6 +24,7 @@ def _get_service():
         )
     if not _creds.valid:
         _creds.refresh(Request())
+        _service = None  # rebuild with fresh token
     if _service is None:
         _service = build("calendar", "v3", credentials=_creds, cache_discovery=False)
     return _service
