@@ -1620,16 +1620,15 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 return (2, due)
             return sorted(tasks, key=key)
 
-        def _fmt(t: dict, max_len: int = 55) -> str:
+        def _fmt(t: dict) -> str:
             due = t.get("due_date")
-            raw = t.get("task", "")
-            name = raw[:max_len] + "…" if len(raw) > max_len else raw
+            name = (t.get("task") or "").strip()
             if not due:
                 return f"• {name}"
             elif due < today_str:
-                return f"🔴 {name} — overdue"
+                return f"🔴 {name}"
             elif due == today_str:
-                return f"📅 {name} — today"
+                return f"📅 {name}"
             else:
                 try:
                     d = _date.fromisoformat(due)
@@ -1642,12 +1641,13 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
             "social": "🎉", "travel": "✈️", "personal": "🙋", "wedding": "💒",
         }
 
-        lines: list[str] = ["<b>📋 Reminders</b>\n"]
+        lines: list[str] = ["<b>📋 Reminders</b>"]
         ordered_tasks: list[dict] = []
 
         for uid in user_ids:
             person_name = user_names.get(uid, str(uid))
             tasks = _sort([t for t in personal.get(uid, []) if not _is_junk(t)])
+            lines.append("")
             lines.append(f"<b>{person_name}</b>")
             if tasks:
                 for t in tasks:
@@ -1655,7 +1655,6 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                     ordered_tasks.append(t)
             else:
                 lines.append("• Nothing on the list ✓")
-            lines.append("")
 
         # Shared: dedup by text, filter junk, flat urgency sort
         seen_text: set = set()
@@ -1668,27 +1667,21 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 seen_text.add(key)
                 clean_shared.append(t)
 
+        lines.append("")
         lines.append("<b>👥 Shared</b>")
-        if clean_shared:
-            # Only show category headers if there are 2+ distinct real categories
-            real_cats = {t.get("category") for t in clean_shared if t.get("category")}
-            use_headers = len(real_cats) >= 2
 
-            if use_headers:
-                from collections import defaultdict
-                by_cat: dict = defaultdict(list)
-                for t in clean_shared:
-                    by_cat[t.get("category") or "other"].append(t)
-                for cat, cat_tasks in by_cat.items():
-                    emoji = CAT_EMOJI.get(cat, "📌")
-                    lines.append(f"\n<i>{emoji} {cat.capitalize()}</i>")
-                    for t in cat_tasks:
+        if clean_shared:
+            # Split into urgency groups and add blank line between them
+            urgent = [t for t in clean_shared if t.get("due_date") and t["due_date"] <= today_str]
+            upcoming = [t for t in clean_shared if t.get("due_date") and t["due_date"] > today_str]
+            no_date = [t for t in clean_shared if not t.get("due_date")]
+
+            for group in [urgent, upcoming, no_date]:
+                if group:
+                    lines.append("")
+                    for t in group:
                         lines.append(_fmt(t))
                         ordered_tasks.append(t)
-            else:
-                for t in clean_shared:
-                    lines.append(_fmt(t))
-                    ordered_tasks.append(t)
         else:
             lines.append("• Nothing shared ✓")
 
