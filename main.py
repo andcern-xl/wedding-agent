@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -418,7 +418,22 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not set")
 
-    app = Application.builder().token(token).build()
+    async def post_init(application: Application) -> None:
+        commands = [
+            BotCommand("start", "Intro and help"),
+            BotCommand("commands", "Full command list"),
+            BotCommand("bringmeuptospeed", "Full wedding overview"),
+            BotCommand("plan", "Wedding priorities this week"),
+            BotCommand("tasks", "Daily brief for both"),
+            BotCommand("reminders", "To-dos split by person"),
+            BotCommand("fyis", "Recent shared FYIs"),
+            BotCommand("shared", "Shared brain — confirmed decisions"),
+        ]
+        for key, cat in CATEGORIES.items():
+            commands.append(BotCommand(key, f"{cat['emoji']} {cat['name']} status"))
+        await application.bot.set_my_commands(commands)
+
+    app = Application.builder().token(token).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("commands", cmd_commands))
