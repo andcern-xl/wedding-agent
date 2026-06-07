@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 from agent import UnifiedAgent
 from categories import CATEGORIES
 from tools.notifications import get_pending_notifications, mark_notification_sent
+from tools.user_memory import get_shared_summary
+from tools.fyis import get_fyis
 
 load_dotenv()
 
@@ -76,6 +78,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("  • \"add a category for Mochi 🐶\" → custom category\n")
     lines.append("/tasks — your daily brief")
     lines.append("/reminders — to-dos for both of you")
+    lines.append("/fyis — recent shared FYIs")
+    lines.append("/shared — shared brain (confirmed decisions)")
     lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
 
@@ -116,7 +120,9 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines += [
         "\n<b>Daily</b>",
         "/tasks — daily brief for both of you",
-        "/reminders — to-do list split by person\n",
+        "/reminders — to-do list split by person",
+        "/fyis — recent FYIs from both of you",
+        "/shared — what's in the shared brain\n",
         "<b>Debug</b>",
         "/testnotify — check partner notifications are working",
     ]
@@ -304,6 +310,44 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+async def cmd_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    try:
+        summary = get_shared_summary()
+        if not summary.strip():
+            await update.message.reply_text("Nothing in the shared brain yet. Confirmed decisions will appear here automatically.")
+            return
+        text = "<b>🧠 Shared Brain</b>\n\n" + summary
+        sections = _split_sections(text)
+        await update.message.reply_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_shared failed")
+        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    try:
+        fyis = get_fyis(limit=20)
+        if not fyis:
+            await update.message.reply_text("No FYIs yet.")
+            return
+        lines = ["<b>📨 Recent FYIs</b>\n"]
+        for f in fyis:
+            when = (f.get("created_at") or "")[:10]
+            cat = f.get("category")
+            cat_tag = f" [{cat}]" if cat else ""
+            lines.append(f"• <i>{when}</i>{cat_tag} — {f['content']}")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_fyis failed")
+        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
@@ -382,6 +426,8 @@ def main():
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("reminders", cmd_reminders))
+    app.add_handler(CommandHandler("shared", cmd_shared))
+    app.add_handler(CommandHandler("fyis", cmd_fyis))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
 
     for key in CATEGORIES:
