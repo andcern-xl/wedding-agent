@@ -660,8 +660,9 @@ Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
         )
         return response.content[0].text
 
-    async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
-        """Generate one combined daily brief for all users, sent to both."""
+    async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
+        """Generate one combined daily brief for all users, sent to both.
+        Returns (text, open_tasks) where open_tasks is the full deduped task list."""
         today_str = date.today().isoformat()
         weekday = date.today().strftime("%A")
         cats = get_all_categories()
@@ -740,7 +741,7 @@ Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
             parts.append("\n".join(cat_lines))
 
         if not merged and not events:
-            return "✅ Nothing on the list today. Add tasks by telling me — \"remind us to X on Friday\"."
+            return "✅ Nothing on the list today. Add tasks by telling me — \"remind us to X on Friday\".", []
 
         context = "\n\n".join(parts)
         person_list = " and ".join(names.values()) if names else "both of you"
@@ -774,7 +775,7 @@ Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        return response.content[0].text, merged
 
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         """End-of-day recap: what was done today, what's coming tomorrow."""
@@ -1562,7 +1563,7 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
     async def daily_brief(self, user_id: int) -> str:
         return await self._daily.daily_brief(user_id)
 
-    async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+    async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         return await self._daily.combined_daily_brief(user_ids, user_names)
 
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:

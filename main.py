@@ -293,18 +293,10 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("Checking your tasks...")
     try:
-        user_names: dict[int, str] = {}
-        for uid in ALLOWED_IDS:
-            try:
-                chat = await context.bot.get_chat(uid)
-                user_names[uid] = chat.first_name or str(uid)
-            except Exception:
-                user_names[uid] = str(uid)
-        brief = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-        sections = _split_sections(brief)
-        await msg.edit_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
+        user_names = await _fetch_user_names(context)
+        text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
+        keyboard = _reminders_keyboard(tasks)
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_tasks failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -374,14 +366,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, _, payload = query.data.partition(":")
     if action == "done":
         try:
-            complete_task(payload, user_id)
-            await query.answer("✅ Done!")
+            success = complete_task(payload, user_id)
         except Exception:
             await query.answer("Couldn't mark done — try again.")
             return
+        if not success:
+            await query.answer("That's not your task to mark done.")
+            return
+        await query.answer("✅ Done!")
         try:
             user_names = await _fetch_user_names(context)
-            text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
+            # Re-render whichever view this came from (reminders or daily brief)
+            # We use the same keyboard helper for both — just re-render combined brief
+            text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
             keyboard = _reminders_keyboard(tasks)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception:
@@ -394,20 +391,11 @@ async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
     try:
-        user_names: dict[int, str] = {}
+        user_names = await _fetch_user_names(context)
+        text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
+        keyboard = _reminders_keyboard(tasks)
         for uid in ALLOWED_IDS:
-            try:
-                chat = await context.bot.get_chat(uid)
-                user_names[uid] = chat.first_name or str(uid)
-            except Exception:
-                user_names[uid] = str(uid)
-
-        brief = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-        sections = _split_sections(brief)
-        for uid in ALLOWED_IDS:
-            await context.bot.send_message(chat_id=uid, text="<b>Daily Brief</b>", parse_mode="HTML")
-            for section in sections:
-                await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML", reply_markup=keyboard)
     except Exception:
         logger.exception("Error sending combined daily brief")
 
