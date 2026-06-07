@@ -373,16 +373,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not success:
             await query.answer("That's not your task to mark done.")
             return
+        # Instant feedback: answer the toast and drop the button immediately — no LLM call
         await query.answer("✅ Done!")
         try:
-            user_names = await _fetch_user_names(context)
-            # Re-render whichever view this came from (reminders or daily brief)
-            # We use the same keyboard helper for both — just re-render combined brief
-            text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-            keyboard = _reminders_keyboard(tasks)
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            current = query.message.reply_markup
+            if current:
+                new_rows = [
+                    row for row in current.inline_keyboard
+                    if not any(btn.callback_data == query.data for btn in row)
+                ]
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None
+                )
         except Exception:
-            logger.exception("handle_callback re-render failed")
+            logger.exception("handle_callback button removal failed")
     else:
         await query.answer()
 
