@@ -4,9 +4,10 @@ import logging
 import os
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -18,6 +19,7 @@ from categories import CATEGORIES
 from tools.notifications import get_pending_notifications, mark_notification_sent
 from tools.user_memory import get_shared_summary
 from tools.fyis import get_fyis
+from tools.daily import complete_task
 
 load_dotenv()
 
@@ -82,6 +84,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("/shared — shared brain (confirmed decisions)")
     lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
+
+
+def _reminders_keyboard(tasks: list[dict]) -> InlineKeyboardMarkup | None:
+    rows = []
+    for t in tasks:
+        label = t.get("task", "")
+        label = label[:28] + "…" if len(label) > 28 else label
+        rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{t['id']}")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def _fetch_user_names(context) -> dict[int, str]:
+    names = {}
+    for uid in ALLOWED_IDS:
+        try:
+            chat = await context.bot.get_chat(uid)
+            names[uid] = chat.first_name or str(uid)
+        except Exception:
+            names[uid] = str(uid)
+    return names
 
 
 def _split_sections(text: str, limit: int = 4096) -> list[str]:
@@ -293,18 +315,10 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("Pulling reminders...")
     try:
-        user_names: dict[int, str] = {}
-        for uid in ALLOWED_IDS:
-            try:
-                chat = await context.bot.get_chat(uid)
-                user_names[uid] = chat.first_name or str(uid)
-            except Exception:
-                user_names[uid] = str(uid)
-        brief = await agent.reminders_brief(ALLOWED_IDS, user_names)
-        sections = _split_sections(brief)
-        await msg.edit_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
+        user_names = await _fetch_user_names(context)
+        text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
+        keyboard = _reminders_keyboard(tasks)
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_reminders failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -346,6 +360,34 @@ async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("cmd_fyis failed")
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    user_id = query.from_user.id
+    if ALLOWED_IDS and user_id not in ALLOWED_IDS:
+        await query.answer("Not authorised.")
+        return
+
+    action, _, payload = query.data.partition(":")
+    if action == "done":
+        try:
+            complete_task(payload, user_id)
+            await query.answer("✅ Done!")
+        except Exception:
+            await query.answer("Couldn't mark done — try again.")
+            return
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception:
+            logger.exception("handle_callback re-render failed")
+    else:
+        await query.answer()
 
 
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
@@ -448,6 +490,7 @@ def main():
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
 
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
 
     if app.job_queue is not None:

@@ -1568,8 +1568,9 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         return await self._daily.evening_brief(user_ids, user_names)
 
-    async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
-        """Two-column view: each person's private tasks + a shared section."""
+    async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
+        """Two-column view: each person's private tasks + a shared section.
+        Returns (text, ordered_tasks) where ordered_tasks is the flat list in display order."""
         from datetime import date as _date
         today_str = _date.today().isoformat()
         if user_names is None:
@@ -1626,6 +1627,7 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
         }
 
         lines: list[str] = ["<b>📋 Reminders</b>\n"]
+        ordered_tasks: list[dict] = []
 
         for uid in user_ids:
             person_name = user_names.get(uid, str(uid))
@@ -1634,13 +1636,13 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
             if tasks:
                 for t in tasks:
                     lines.append(_fmt(t))
+                    ordered_tasks.append(t)
             else:
                 lines.append("• Nothing on the list ✓")
             lines.append("")
 
         lines.append("<b>👥 Shared</b>")
         if shared:
-            # Group by category
             from collections import defaultdict
             by_cat: dict = defaultdict(list)
             for t in _sort(shared):
@@ -1651,7 +1653,8 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 lines.append(f"\n<i>{emoji} {cat.capitalize()}</i>")
                 for t in cat_tasks:
                     lines.append(_fmt(t))
+                    ordered_tasks.append(t)
         else:
             lines.append("• Nothing shared ✓")
 
-        return "\n".join(lines)
+        return "\n".join(lines), ordered_tasks
