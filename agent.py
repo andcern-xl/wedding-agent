@@ -1009,6 +1009,16 @@ add_daily_task when:
 
 When in doubt: if it's something that already happened or is just good to know → FYI. If it needs someone to act → task.
 
+TASK QUALITY RULES — enforce these strictly:
+- Task names must be SHORT (under 80 chars). The action only — not the backstory. If you need to include context, log it as an FYI or wedding drop separately, then create a short task.
+  WRONG: "Look into getting an OCBC credit card (any card) so you don't lose points. When ready, transfer $10k..."
+  RIGHT: "Look into OCBC credit card for points"
+- Social events / dinners with a confirmed date and time → create_calendar_event, NOT add_daily_task
+- Package trackers / running balances ("10 manicure sessions, 7 remaining") → save to personal summary via save_preference, NOT add_daily_task
+- Notes about the other person's preferences ("Jess likes kaya waffle") → log_fyi, NOT add_daily_task
+- Items someone already owns or knows about ("AirPods are in the car") → log_fyi, NOT add_daily_task
+- NEVER create a task that starts with "FYI" — that is always a log_fyi call
+
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
 - Cross-reference both brains naturally — no need to label responses as "Wedding Brain" or "Daily Brain"
@@ -1591,11 +1601,12 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                         personal[owner].append(t)
 
         def _sort(tasks: list[dict]) -> list[dict]:
-            return sorted(tasks, key=lambda t: t.get("due_date") or "9999-99-99")
+            return sorted(tasks, key=lambda t: (t.get("due_date") or "9999-99-99", t.get("category") or ""))
 
-        def _fmt(t: dict) -> str:
+        def _fmt(t: dict, max_len: int = 80) -> str:
             due = t.get("due_date")
-            name = t.get("task", "")
+            raw = t.get("task", "")
+            name = raw[:max_len] + "…" if len(raw) > max_len else raw
             if not due:
                 return f"• {name}"
             elif due < today_str:
@@ -1609,12 +1620,17 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 except ValueError:
                     return f"• {name} — {due}"
 
+        CAT_EMOJI = {
+            "finance": "💳", "health": "🏥", "home": "🏠", "work": "💼",
+            "social": "🎉", "travel": "✈️", "personal": "🙋", "wedding": "💒",
+        }
+
         lines: list[str] = ["<b>📋 Reminders</b>\n"]
 
         for uid in user_ids:
-            name = user_names.get(uid, str(uid))
+            person_name = user_names.get(uid, str(uid))
             tasks = _sort(personal.get(uid, []))
-            lines.append(f"<b>{name}</b>")
+            lines.append(f"<b>{person_name}</b>")
             if tasks:
                 for t in tasks:
                     lines.append(_fmt(t))
@@ -1624,8 +1640,17 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
 
         lines.append("<b>👥 Shared</b>")
         if shared:
+            # Group by category
+            from collections import defaultdict
+            by_cat: dict = defaultdict(list)
             for t in _sort(shared):
-                lines.append(_fmt(t))
+                cat = t.get("category") or "general"
+                by_cat[cat].append(t)
+            for cat, cat_tasks in by_cat.items():
+                emoji = CAT_EMOJI.get(cat, "📌")
+                lines.append(f"\n<i>{emoji} {cat.capitalize()}</i>")
+                for t in cat_tasks:
+                    lines.append(_fmt(t))
         else:
             lines.append("• Nothing shared ✓")
 
