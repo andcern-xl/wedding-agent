@@ -984,8 +984,14 @@ TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
 WHEN TO LOG VS NOT LOG
-- log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon
+- log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon — ALL wedding notes go here as the permanent archive
 - Do NOT log: personal tasks, daily life, health, manicures, errands, anything clearly not about the wedding
+
+SHARED BRAIN — for confirmed wedding decisions only, not raw notes:
+Call save_shared_context (in addition to log_wedding_drop) when something is CONFIRMED or DECIDED — not when it's being explored.
+Use it for: "we booked X", "we're going with Y", "venue confirmed for date Z", "guest cap is N", "budget agreed at $X".
+Do NOT use it for vendor quotes, early discussions, maybes, or info that's only useful if someone asks.
+Keep entries to one clear sentence — the shared brain is injected into every API call and must stay lean.
 
 TASK vs FYI — infer from intent, not keywords
 Ask: does this need to be done, or is it sharing something?
@@ -1195,7 +1201,7 @@ TOOLS = [
     },
     {
         "name": "save_shared_context",
-        "description": "Save a fact or decision to the shared brain — it will appear in BOTH Ansen's and Jess's conversations automatically, every session. Use for confirmed couple decisions ('we chose Blooms & Co for florals'), key updates from either person that affect both ('Jess rescheduled the venue tour to Saturday'), or any fact both should always have in context without needing to ask. Unlike log_fyi (one-time push) or log_wedding_drop (queryable archive), this is always-on shared memory.",
+        "description": "Save a confirmed fact or decision to the shared brain — injected into BOTH Ansen's and Jess's prompts every single message. Use ONLY for confirmed/decided things: 'we booked X', 'venue confirmed', 'guest cap agreed at N', 'going with vendor Y'. Do NOT use for quotes, maybes, or info that's only useful if asked — those go in log_wedding_drop instead. Keep it to one clear sentence. This should be called IN ADDITION TO log_wedding_drop for wedding decisions, not instead of it.",
         "input_schema": {
             "type": "object",
             "properties": {
