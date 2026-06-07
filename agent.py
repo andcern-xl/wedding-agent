@@ -1522,3 +1522,76 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
 
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         return await self._daily.evening_brief(user_ids, user_names)
+
+    async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+        """Two-column view: each person's private tasks + a shared section."""
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+        if user_names is None:
+            user_names = {uid: str(uid) for uid in user_ids}
+
+        per_person: dict[int, list[dict]] = {}
+        for uid in user_ids:
+            try:
+                per_person[uid] = get_tasks(uid, include_done=False)
+            except Exception:
+                per_person[uid] = []
+
+        seen_shared: set = set()
+        shared: list[dict] = []
+        personal: dict[int, list[dict]] = {uid: [] for uid in user_ids}
+        seen_personal: set = set()
+
+        for uid, tasks in per_person.items():
+            for t in tasks:
+                tid = t.get("id")
+                if t.get("visibility") == "shared":
+                    if tid not in seen_shared:
+                        seen_shared.add(tid)
+                        shared.append(t)
+                else:
+                    owner = t.get("assigned_to") or t.get("user_id")
+                    if owner in personal and tid not in seen_personal:
+                        seen_personal.add(tid)
+                        personal[owner].append(t)
+
+        def _sort(tasks: list[dict]) -> list[dict]:
+            return sorted(tasks, key=lambda t: t.get("due_date") or "9999-99-99")
+
+        def _fmt(t: dict) -> str:
+            due = t.get("due_date")
+            name = t.get("task", "")
+            if not due:
+                return f"• {name}"
+            elif due < today_str:
+                return f"🔴 {name} — overdue ({due})"
+            elif due == today_str:
+                return f"📅 {name} — today"
+            else:
+                try:
+                    d = _date.fromisoformat(due)
+                    return f"• {name} — {d.day} {d.strftime('%b')}"
+                except ValueError:
+                    return f"• {name} — {due}"
+
+        lines: list[str] = ["<b>📋 Reminders</b>\n"]
+
+        for uid in user_ids:
+            name = user_names.get(uid, str(uid))
+            tasks = _sort(personal.get(uid, []))
+            lines.append(f"<b>{name}</b>")
+            if tasks:
+                for t in tasks:
+                    lines.append(_fmt(t))
+            else:
+                lines.append("• Nothing on the list ✓")
+            lines.append("")
+
+        lines.append("<b>👥 Shared</b>")
+        if shared:
+            for t in _sort(shared):
+                lines.append(_fmt(t))
+        else:
+            lines.append("• Nothing shared ✓")
+
+        return "\n".join(lines)

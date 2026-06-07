@@ -75,6 +75,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("  • \"remind us to confirm the caterer Monday\" → shared")
     lines.append("  • \"add a category for Mochi 🐶\" → custom category\n")
     lines.append("/tasks — your daily brief")
+    lines.append("/reminders — to-dos for both of you")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -256,6 +257,28 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    msg = await update.message.reply_text("Pulling reminders...")
+    try:
+        user_names: dict[int, str] = {}
+        for uid in ALLOWED_IDS:
+            try:
+                chat = await context.bot.get_chat(uid)
+                user_names[uid] = chat.first_name or str(uid)
+            except Exception:
+                user_names[uid] = str(uid)
+        brief = await agent.reminders_brief(ALLOWED_IDS, user_names)
+        sections = _split_sections(brief)
+        await msg.edit_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_reminders failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
@@ -332,6 +355,7 @@ def main():
     app.add_handler(CommandHandler("bringmeuptospeed", cmd_bringmeuptospeed))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
+    app.add_handler(CommandHandler("reminders", cmd_reminders))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
 
     for key in CATEGORIES:
