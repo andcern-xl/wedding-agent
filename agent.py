@@ -1602,17 +1602,32 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                         seen_personal.add(tid)
                         personal[owner].append(t)
 
-        def _sort(tasks: list[dict]) -> list[dict]:
-            return sorted(tasks, key=lambda t: (t.get("due_date") or "9999-99-99", t.get("category") or ""))
+        def _is_junk(t: dict) -> bool:
+            """Filter out FYIs accidentally stored as tasks."""
+            raw = (t.get("task") or "").strip()
+            return raw.lower().startswith("fyi") or raw.lower().startswith("• fyi")
 
-        def _fmt(t: dict, max_len: int = 80) -> str:
+        def _sort(tasks: list[dict]) -> list[dict]:
+            urgency = {"overdue": 0, "today": 1, "upcoming": 2, "none": 3}
+            def key(t):
+                due = t.get("due_date")
+                if not due:
+                    return (3, "")
+                if due < today_str:
+                    return (0, due)
+                if due == today_str:
+                    return (1, due)
+                return (2, due)
+            return sorted(tasks, key=key)
+
+        def _fmt(t: dict, max_len: int = 55) -> str:
             due = t.get("due_date")
             raw = t.get("task", "")
             name = raw[:max_len] + "…" if len(raw) > max_len else raw
             if not due:
                 return f"• {name}"
             elif due < today_str:
-                return f"🔴 {name} — overdue ({due})"
+                return f"🔴 {name} — overdue"
             elif due == today_str:
                 return f"📅 {name} — today"
             else:
@@ -1632,7 +1647,7 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
 
         for uid in user_ids:
             person_name = user_names.get(uid, str(uid))
-            tasks = _sort(personal.get(uid, []))
+            tasks = _sort([t for t in personal.get(uid, []) if not _is_junk(t)])
             lines.append(f"<b>{person_name}</b>")
             if tasks:
                 for t in tasks:
@@ -1642,17 +1657,36 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 lines.append("• Nothing on the list ✓")
             lines.append("")
 
+        # Shared: dedup by text, filter junk, flat urgency sort
+        seen_text: set = set()
+        clean_shared = []
+        for t in _sort(shared):
+            if _is_junk(t):
+                continue
+            key = (t.get("task") or "").strip().lower()[:60]
+            if key and key not in seen_text:
+                seen_text.add(key)
+                clean_shared.append(t)
+
         lines.append("<b>👥 Shared</b>")
-        if shared:
-            from collections import defaultdict
-            by_cat: dict = defaultdict(list)
-            for t in _sort(shared):
-                cat = t.get("category") or "general"
-                by_cat[cat].append(t)
-            for cat, cat_tasks in by_cat.items():
-                emoji = CAT_EMOJI.get(cat, "📌")
-                lines.append(f"\n<i>{emoji} {cat.capitalize()}</i>")
-                for t in cat_tasks:
+        if clean_shared:
+            # Only show category headers if there are 2+ distinct real categories
+            real_cats = {t.get("category") for t in clean_shared if t.get("category")}
+            use_headers = len(real_cats) >= 2
+
+            if use_headers:
+                from collections import defaultdict
+                by_cat: dict = defaultdict(list)
+                for t in clean_shared:
+                    by_cat[t.get("category") or "other"].append(t)
+                for cat, cat_tasks in by_cat.items():
+                    emoji = CAT_EMOJI.get(cat, "📌")
+                    lines.append(f"\n<i>{emoji} {cat.capitalize()}</i>")
+                    for t in cat_tasks:
+                        lines.append(_fmt(t))
+                        ordered_tasks.append(t)
+            else:
+                for t in clean_shared:
                     lines.append(_fmt(t))
                     ordered_tasks.append(t)
         else:
