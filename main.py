@@ -76,6 +76,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("  • \"add a category for Mochi 🐶\" → custom category\n")
     lines.append("/tasks — your daily brief")
     lines.append("/reminders — to-dos for both of you")
+    lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -96,6 +97,30 @@ def _split_sections(text: str, limit: int = 4096) -> list[str]:
         if section:
             result.append(section)
     return result or [text]
+
+
+async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    lines = [
+        "<b>Commands</b>\n",
+        "<b>Info</b>",
+        "/start — intro",
+        "/commands — this list\n",
+        "<b>Wedding</b>",
+        "/bringmeuptospeed — full wedding overview",
+        "/plan — priorities this week",
+    ]
+    for key, cat in CATEGORIES.items():
+        lines.append(f"{cat['emoji']} /{key} — {cat['name'].lower()} status")
+    lines += [
+        "\n<b>Daily</b>",
+        "/tasks — daily brief for both of you",
+        "/reminders — to-do list split by person\n",
+        "<b>Debug</b>",
+        "/testnotify — check partner notifications are working",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_bringmeuptospeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -352,6 +377,7 @@ def main():
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("commands", cmd_commands))
     app.add_handler(CommandHandler("bringmeuptospeed", cmd_bringmeuptospeed))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("tasks", cmd_tasks))

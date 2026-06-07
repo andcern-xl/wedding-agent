@@ -12,7 +12,7 @@ from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_comple
 from tools.notifications import schedule_notification as _sched_notif, list_notifications as _list_notifs, cancel_notification as _cancel_notif
 from tools.fyis import log_fyi, get_fyis, get_fyis_today
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
-from tools.user_memory import get_summary, save_summary, get_message_count
+from tools.user_memory import get_summary, save_summary, get_message_count, get_shared_summary, append_shared_summary
 from tools.gcal import get_events, create_event, delete_event
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
@@ -949,6 +949,9 @@ WHAT YOU KNOW ABOUT THIS PERSON AND THEIR PREFERENCES
 
 If the above contains a PREFERENCES section, follow those instructions on every message — they are standing orders, not suggestions.
 
+SHARED BRAIN — what Ansen and Jess have told you together (visible in both their conversations):
+{shared_summary}
+
 PEOPLE
 - Ansen: user_id 63756531
 - Jess / Jessica: user_id 6927468999
@@ -975,6 +978,7 @@ HOW TO USE TOOLS
 - Shared update / past-tense info / "FYI" / "just so you know" / "heads up" / completed action → log_fyi (not add_daily_task)
 - "any FYIs?" / "what did we share recently?" → read_fyis
 - "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
+- Couple-level decision or fact that both should always know ("we're going with X vendor", "we decided on Y", "Jess rescheduled the venue tour") → save_shared_context — this lives in both their prompts every message, not just queryable on demand
 
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
@@ -1189,6 +1193,17 @@ TOOLS = [
             "required": ["preference"],
         },
     },
+    {
+        "name": "save_shared_context",
+        "description": "Save a fact or decision to the shared brain — it will appear in BOTH Ansen's and Jess's conversations automatically, every session. Use for confirmed couple decisions ('we chose Blooms & Co for florals'), key updates from either person that affect both ('Jess rescheduled the venue tour to Saturday'), or any fact both should always have in context without needing to ask. Unlike log_fyi (one-time push) or log_wedding_drop (queryable archive), this is always-on shared memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The shared fact or decision to remember. One clear sentence."},
+            },
+            "required": ["content"],
+        },
+    },
 ]
 
 
@@ -1198,7 +1213,7 @@ class UnifiedAgent:
         self._wedding = WeddingAgent()
         self._daily = DailyAgent()
 
-    def _build_system(self, user_summary: str = "") -> str:
+    def _build_system(self, user_summary: str = "", shared_summary: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -1209,6 +1224,7 @@ class UnifiedAgent:
             today=date.today().isoformat(),
             timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
             user_summary=user_summary or "Nothing yet — this is the start of our history together.",
+            shared_summary=shared_summary or "Nothing shared yet.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
@@ -1337,6 +1353,11 @@ class UnifiedAgent:
             flags["summary_updated"] = True
             return {"status": "saved", "preference": pref}
 
+        if name == "save_shared_context":
+            content = inputs["content"].strip()
+            append_shared_summary(content)
+            return {"status": "saved", "content": content}
+
         return {"error": f"Unknown tool: {name}"}
 
     @staticmethod
@@ -1357,11 +1378,11 @@ class UnifiedAgent:
                 result.append(m)
         return result
 
-    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str) -> dict:
+    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "summary_updated": False}
         messages = history + [{"role": "user", "content": user_content}]
-        system_prompt = self._build_system(user_summary)
+        system_prompt = self._build_system(user_summary, shared_summary)
         last_response = None
 
         for _ in range(10):
@@ -1435,7 +1456,11 @@ class UnifiedAgent:
             user_summary = get_summary(user_id)
         except Exception:
             user_summary = ""
-        return await self._run_loop(text, user_id, history, user_summary)
+        try:
+            shared_summary = get_shared_summary()
+        except Exception:
+            shared_summary = ""
+        return await self._run_loop(text, user_id, history, user_summary, shared_summary)
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
         lines = []
@@ -1487,6 +1512,10 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
             user_summary = get_summary(user_id)
         except Exception:
             user_summary = ""
+        try:
+            shared_summary = get_shared_summary()
+        except Exception:
+            shared_summary = ""
 
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
         user_content = [
@@ -1494,7 +1523,7 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
             {"type": "text", "text": caption if caption else "What's in this screenshot? Log it if it's wedding-related, act on it if it needs action."},
         ]
         result, payment = await asyncio.gather(
-            self._run_loop(user_content, user_id, history, user_summary),
+            self._run_loop(user_content, user_id, history, user_summary, shared_summary),
             self._wedding._extract_payment(image_bytes, caption),
         )
         if payment:
