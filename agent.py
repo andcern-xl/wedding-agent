@@ -6,7 +6,7 @@ from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
 from tools.memory import get_all_memory, get_category_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
-from tools.log import get_drops, get_recent_drops
+from tools.log import get_drops, get_recent_drops, drop
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today
 from tools.notifications import schedule_notification as _sched_notif, list_notifications as _list_notifs, cancel_notification as _cancel_notif
@@ -977,7 +977,7 @@ HOW TO USE TOOLS
 - "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
 
 TOOL ERRORS — BE HONEST
-If a tool returns {"error": "..."}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
+If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
 WHEN TO LOG VS NOT LOG
 - log_wedding_drop: wedding venues, vendors, budget, guests, catering, decor, attire, ceremony, photography, honeymoon
@@ -1211,11 +1211,11 @@ class UnifiedAgent:
             user_summary=user_summary or "Nothing yet — this is the start of our history together.",
         )
 
-    async def _execute_tool(self, name: str, inputs: dict, user_id: int):
+    async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
         if name == "log_wedding_drop":
             category = inputs.get("category") or detect_category(inputs["content"])
             drop(category, "text", inputs["content"], user_id)
-            self._logged_wedding_drop = True
+            flags["wedding_drop"] = True
             return {"status": "logged", "category": category}
 
         if name == "read_wedding_drops":
@@ -1283,7 +1283,7 @@ class UnifiedAgent:
 
         if name == "log_fyi":
             result = log_fyi(user_id, inputs["content"], inputs.get("category"))
-            self._logged_fyi = True
+            flags["fyi"] = True
             return {"status": "logged", "id": str(result["id"])}
 
         if name == "read_fyis":
@@ -1331,40 +1331,54 @@ class UnifiedAgent:
                 lines.append(f"- {pref}")
                 updated = before + marker + "\n".join(lines)
             else:
-                updated = (existing + marker + f"- {pref}") if existing else (marker.strip() + f"\n- {pref}")
+                updated = existing + marker + f"- {pref}"
             count = get_message_count(user_id)
             save_summary(user_id, updated, count)
+            flags["summary_updated"] = True
             return {"status": "saved", "preference": pref}
 
         return {"error": f"Unknown tool: {name}"}
 
-    async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
-        if history is None:
-            history = []
+    @staticmethod
+    def _strip_image_data(messages: list) -> list:
+        """Replace base64 blobs in history with a placeholder to avoid token bloat on subsequent turns."""
+        result = []
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "image" for b in content
+            ):
+                stripped = [
+                    {"type": "text", "text": "[image]"} if isinstance(b, dict) and b.get("type") == "image" else b
+                    for b in content
+                ]
+                result.append({**m, "content": stripped})
+            else:
+                result.append(m)
+        return result
 
-        self._logged_wedding_drop = False
-        self._logged_fyi = False
-        try:
-            user_summary = get_summary(user_id)
-        except Exception:
-            user_summary = ""
-        messages = history + [{"role": "user", "content": text}]
+    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str) -> dict:
+        import logging as _logging
+        flags = {"wedding_drop": False, "fyi": False, "summary_updated": False}
+        messages = history + [{"role": "user", "content": user_content}]
+        system_prompt = self._build_system(user_summary)
+        last_response = None
 
         for _ in range(10):
-            response = await self.client.messages.create(
+            last_response = await self.client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=2048,
-                system=self._build_system(user_summary),
+                system=system_prompt,
                 tools=TOOLS,
                 messages=messages,
             )
 
-            if response.stop_reason == "end_turn":
-                reply = next((b.text for b in response.content if hasattr(b, "text")), "")
+            if last_response.stop_reason == "end_turn":
+                reply = next((b.text for b in last_response.content if hasattr(b, "text")), "")
                 if not reply:
                     reply = "Got it."
                 messages.append({"role": "assistant", "content": reply})
-                updated_history = messages[-40:]
+                updated_history = self._strip_image_data(messages[-40:])
 
                 try:
                     msg_count = get_message_count(user_id) + 1
@@ -1372,32 +1386,33 @@ class UnifiedAgent:
                         asyncio.create_task(
                             self._compress_and_save(user_id, updated_history, user_summary, msg_count)
                         )
+                    elif flags["summary_updated"]:
+                        # save_preference already wrote a fresh summary — just bump the count
+                        current_summary = get_summary(user_id)
+                        save_summary(user_id, current_summary, msg_count)
                     else:
                         save_summary(user_id, user_summary, msg_count)
                 except Exception:
-                    pass  # never let bookkeeping kill a valid reply
+                    pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": self._logged_wedding_drop or self._logged_fyi}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"]}
 
-            if response.stop_reason == "max_tokens":
-                # Model hit token limit — return whatever partial text it produced
-                reply = next((b.text for b in response.content if hasattr(b, "text")), "Got it.")
+            if last_response.stop_reason == "max_tokens":
+                reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": messages[-40:], "notify_partner": self._logged_wedding_drop or self._logged_fyi}
+                return {"text": reply, "history": self._strip_image_data(messages[-40:]), "notify_partner": flags["wedding_drop"] or flags["fyi"]}
 
-            if response.stop_reason == "tool_use":
-                tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            if last_response.stop_reason == "tool_use":
+                tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]
                 if not tool_use_blocks:
-                    import logging as _logging
                     _logging.getLogger(__name__).error("tool_use stop_reason but no tool_use blocks in response")
                     break
-                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "assistant", "content": last_response.content})
                 tool_results = []
                 for block in tool_use_blocks:
                     try:
-                        result = await self._execute_tool(block.name, block.input, user_id)
+                        result = await self._execute_tool(block.name, block.input, user_id, flags)
                     except Exception as exc:
-                        import logging as _logging
                         _logging.getLogger(__name__).exception(f"Tool {block.name} failed")
                         result = {"error": str(exc)}
                     tool_results.append({
@@ -1407,12 +1422,20 @@ class UnifiedAgent:
                     })
                 messages.append({"role": "user", "content": tool_results})
 
-        import logging as _logging
-        last_reason = response.stop_reason if "response" in dir() else "never_reached_api"
+        last_reason = last_response.stop_reason if last_response else "never_reached_api"
         _logging.getLogger(__name__).error(
-            f"handle_message loop exhausted for user {user_id}. Last stop_reason: {last_reason}. Messages len: {len(messages)}"
+            f"_run_loop exhausted for user {user_id}. Last stop_reason: {last_reason}. Messages len: {len(messages)}"
         )
-        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": history}
+        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._strip_image_data(messages[-40:])}
+
+    async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
+        if history is None:
+            history = []
+        try:
+            user_summary = get_summary(user_id)
+        except Exception:
+            user_summary = ""
+        return await self._run_loop(text, user_id, history, user_summary)
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
         lines = []
@@ -1421,8 +1444,16 @@ class UnifiedAgent:
             content = m["content"] if isinstance(m["content"], str) else "[tool exchange]"
             lines.append(f"{role}: {content[:300]}")
 
+        # Split off any PREFERENCES block — compression must never touch it
+        pref_marker = "\n\nPREFERENCES:\n"
+        if pref_marker in (existing_summary or ""):
+            summary_body, pref_block = existing_summary.split(pref_marker, 1)
+        else:
+            summary_body = existing_summary or ""
+            pref_block = None
+
         prompt = f"""Existing summary:
-{existing_summary or "(none yet)"}
+{summary_body or "(none yet)"}
 
 Recent conversation:
 {chr(10).join(lines)}
@@ -1434,7 +1465,7 @@ Update the summary to capture:
 - Personal context they've shared (family, pets, work, interests)
 - How they like to use this assistant
 
-Be concise (under 300 words). Write in third person. This will be loaded as context at the start of every future conversation."""
+Be concise (under 300 words). Write in third person. Output the summary text only — no headers, no PREFERENCES section."""
 
         try:
             response = await self.client.messages.create(
@@ -1442,12 +1473,35 @@ Be concise (under 300 words). Write in third person. This will be loaded as cont
                 max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
-            save_summary(user_id, response.content[0].text, message_count)
+            new_summary = response.content[0].text
+            if pref_block is not None:
+                new_summary = new_summary + pref_marker + pref_block
+            save_summary(user_id, new_summary, message_count)
         except Exception:
             pass  # compression failure is non-critical
 
     async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
-        result = await self._wedding.handle_image(image_bytes=image_bytes, caption=caption, history=history or [])
+        if history is None:
+            history = []
+        try:
+            user_summary = get_summary(user_id)
+        except Exception:
+            user_summary = ""
+
+        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        user_content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+            {"type": "text", "text": caption if caption else "What's in this screenshot? Log it if it's wedding-related, act on it if it needs action."},
+        ]
+        result, payment = await asyncio.gather(
+            self._run_loop(user_content, user_id, history, user_summary),
+            self._wedding._extract_payment(image_bytes, caption),
+        )
+        if payment:
+            try:
+                add_payment(payment)
+            except Exception:
+                pass
         return result
 
     # Command methods — delegate to existing agents

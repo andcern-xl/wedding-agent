@@ -15,7 +15,6 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from agent import UnifiedAgent
 from categories import CATEGORIES
-from tools.log import drop
 from tools.notifications import get_pending_notifications, mark_notification_sent
 
 load_dotenv()
@@ -156,13 +155,9 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             photo_bytes = await photo_file.download_as_bytearray()
             caption = update.message.caption or ""
 
-            await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption)
             result = await agent.handle_image(image_bytes=bytes(photo_bytes), caption=caption, user_id=user_id, history=history)
-            try:
-                log_content = f"[screenshot] {caption + ' — ' if caption else ''}{result['text']}"
-                drop(result.get("detected_category"), "image", log_content, user_id)
-            except Exception:
-                logger.exception("Failed to log image drop")
+            if result.get("notify_partner"):
+                await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption)
 
         else:
             text = update.message.text or ""
