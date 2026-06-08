@@ -87,10 +87,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _reminders_keyboard(tasks: list[dict]) -> InlineKeyboardMarkup | None:
+    from datetime import date
+    today_str = date.today().isoformat()
+    # Only put buttons on urgent tasks — overdue and due today
+    urgent = [t for t in tasks if t.get("due_date") and t["due_date"] <= today_str]
+    # If nothing urgent, show first 5 undated/upcoming so there's always something tappable
+    targets = urgent or tasks[:5]
     rows = []
-    for t in tasks:
-        label = t.get("task", "")
-        label = label[:28] + "…" if len(label) > 28 else label
+    for t in targets:
+        raw = t.get("task", "").strip().lstrip("TASK:").strip()
+        label = raw[:35] + "…" if len(raw) > 35 else raw
         rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{t['id']}")])
     return InlineKeyboardMarkup(rows) if rows else None
 

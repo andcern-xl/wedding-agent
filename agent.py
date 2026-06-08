@@ -1603,9 +1603,16 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                         personal[owner].append(t)
 
         def _is_junk(t: dict) -> bool:
-            """Filter out FYIs accidentally stored as tasks."""
-            raw = (t.get("task") or "").strip()
-            return raw.lower().startswith("fyi") or raw.lower().startswith("• fyi")
+            """Filter out FYIs and other non-tasks accidentally stored as tasks."""
+            raw = (t.get("task") or "").strip().lower()
+            return (
+                raw.startswith("fyi")
+                or raw.startswith("• fyi")
+                or raw.startswith("ansen deposited")
+                or raw.startswith("jess deposited")
+                or raw.startswith("ansen paid")
+                or raw.startswith("jess paid")
+            )
 
         def _sort(tasks: list[dict]) -> list[dict]:
             urgency = {"overdue": 0, "today": 1, "upcoming": 2, "none": 3}
@@ -1623,6 +1630,9 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
         def _fmt(t: dict) -> str:
             due = t.get("due_date")
             name = (t.get("task") or "").strip()
+            # Strip accidental "TASK:" prefix from old bad data
+            if name.upper().startswith("TASK:"):
+                name = name[5:].strip()
             if not due:
                 return f"• {name}"
             elif due < today_str:
