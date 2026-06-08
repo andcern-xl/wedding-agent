@@ -2,6 +2,11 @@ from datetime import date, datetime, timezone
 from tools.db import get_client
 
 
+def get_task_by_id(task_id: str) -> dict | None:
+    rows = get_client().table("daily_tasks").select("*").eq("id", task_id).execute().data
+    return rows[0] if rows else None
+
+
 def add_task(
     user_id: int,
     task: str,

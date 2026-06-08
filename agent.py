@@ -8,7 +8,7 @@ from tools.memory import get_all_memory, get_category_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops, drop
 from tools.payments import add_payment, summary as payment_summary
-from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today
+from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today, complete_task, get_task_by_id
 from tools.notifications import schedule_notification as _sched_notif, list_notifications as _list_notifs, cancel_notification as _cancel_notif
 from tools.fyis import log_fyi, get_fyis, get_fyis_today
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
@@ -1200,6 +1200,17 @@ TOOLS = [
         },
     },
     {
+        "name": "mark_task_done",
+        "description": "Mark an open task as completed. Use this proactively: after booking a calendar event, paying a vendor, or taking any action that fulfills an open task — call read_daily_tasks, find the matching task by ID, then call mark_task_done. Also use when the user says 'I did X', 'done', 'I've booked X', 'I paid X' and there's a matching open task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "The task ID from read_daily_tasks"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
         "name": "save_preference",
         "description": "Persist a user preference or behavioural instruction that should apply in all future conversations. Use when someone says 'going forward always do X', 'from now on X', 'remember that I prefer X', 'never ask me to confirm X', etc. This is permanent — it will be loaded every session.",
         "input_schema": {
@@ -1370,6 +1381,16 @@ class UnifiedAgent:
             flags["summary_updated"] = True
             return {"status": "saved", "preference": pref}
 
+        if name == "mark_task_done":
+            task_id = inputs.get("task_id", "")
+            task = get_task_by_id(task_id)
+            task_name = task["task"] if task else task_id
+            success = complete_task(task_id, user_id)
+            if success:
+                flags.setdefault("completed_tasks", []).append(task_name)
+                return {"status": "done", "task": task_name}
+            return {"status": "not_found_or_not_allowed", "task_id": task_id}
+
         if name == "save_shared_context":
             content = inputs["content"].strip()
             append_shared_summary(content)
@@ -1397,7 +1418,7 @@ class UnifiedAgent:
 
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "") -> dict:
         import logging as _logging
-        flags = {"wedding_drop": False, "fyi": False, "summary_updated": False}
+        flags = {"wedding_drop": False, "fyi": False, "summary_updated": False, "completed_tasks": []}
         messages = history + [{"role": "user", "content": user_content}]
         system_prompt = self._build_system(user_summary, shared_summary)
         last_response = None
@@ -1433,7 +1454,7 @@ class UnifiedAgent:
                 except Exception:
                     pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"]}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"], "completed_tasks": flags["completed_tasks"]}
 
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")

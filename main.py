@@ -240,6 +240,20 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         conversations[chat_id] = result.get("history", history)
         await update.message.reply_text(result["text"], parse_mode="HTML")
 
+        # Notify partner when tasks are marked done by the agent
+        for task_name in result.get("completed_tasks", []):
+            sender = update.effective_user.first_name or "Your partner"
+            for uid in ALLOWED_IDS:
+                if uid != user_id:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=uid,
+                            text=f"✅ {sender} checked off: <i>{task_name}</i>",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+
     except Exception as e:
         logger.exception(f"Error handling message: {e}")
         err_type = type(e).__name__
