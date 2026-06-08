@@ -86,16 +86,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+_JUNK_PREFIXES = ("fyi", "• fyi", "ansen deposited", "jess deposited", "ansen paid", "jess paid")
+
+def _is_task(t: dict) -> bool:
+    raw = (t.get("task") or "").strip().lower()
+    return not any(raw.startswith(p) for p in _JUNK_PREFIXES)
+
 def _reminders_keyboard(tasks: list[dict]) -> InlineKeyboardMarkup | None:
     from datetime import date
     today_str = date.today().isoformat()
-    # Only put buttons on urgent tasks — overdue and due today
-    urgent = [t for t in tasks if t.get("due_date") and t["due_date"] <= today_str]
-    # If nothing urgent, show first 5 undated/upcoming so there's always something tappable
-    targets = urgent or tasks[:5]
+    real_tasks = [t for t in tasks if _is_task(t)]
+    # Buttons only for overdue + today
+    urgent = [t for t in real_tasks if t.get("due_date") and t["due_date"] <= today_str]
+    targets = urgent or real_tasks[:5]
     rows = []
     for t in targets:
-        raw = t.get("task", "").strip().lstrip("TASK:").strip()
+        raw = (t.get("task") or "").strip()
+        if raw.upper().startswith("TASK:"):
+            raw = raw[5:].strip()
         label = raw[:35] + "…" if len(raw) > 35 else raw
         rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{t['id']}")])
     return InlineKeyboardMarkup(rows) if rows else None

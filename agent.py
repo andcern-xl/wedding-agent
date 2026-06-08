@@ -1592,12 +1592,20 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
         for uid, tasks in per_person.items():
             for t in tasks:
                 tid = t.get("id")
-                if t.get("visibility") == "shared":
+                assigned = t.get("assigned_to")
+                # Tasks assigned to a specific person always go in their section
+                if assigned and assigned in personal:
+                    if tid not in seen_personal:
+                        seen_personal.add(tid)
+                        personal[assigned].append(t)
+                # Shared with no specific assignee → shared section
+                elif t.get("visibility") == "shared":
                     if tid not in seen_shared:
                         seen_shared.add(tid)
                         shared.append(t)
+                # Private → creator's section
                 else:
-                    owner = t.get("assigned_to") or t.get("user_id")
+                    owner = t.get("user_id")
                     if owner in personal and tid not in seen_personal:
                         seen_personal.add(tid)
                         personal[owner].append(t)
