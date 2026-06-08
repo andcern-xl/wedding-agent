@@ -968,7 +968,7 @@ HOW TO USE TOOLS
 - Reminder with a specific time ("at 3pm", "in 2 hours", "tonight at 8", "tomorrow at noon") → schedule_notification — fires as a Telegram push at that exact moment. NEVER use add_daily_task for these.
 - Budget/spending → read_payments + read_wedding_drops("budget")
 - "what should I do" / "what's on" → call both read_wedding_drops and read_daily_tasks, synthesise one answer
-- Adding a task about a wedding vendor → read relevant drops first, bake context into the task description
+- Adding a task about a wedding vendor → read relevant drops first, bake context into the task description. Always set category="wedding" so it stays out of the daily reminders list.
 - New category request → add_custom_category
 - Decisions / confirmed bookings → read_memory
 - "what's on the calendar" / "what's happening this week" → read_calendar
@@ -1611,8 +1611,10 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                         personal[owner].append(t)
 
         def _is_junk(t: dict) -> bool:
-            """Filter out FYIs and other non-tasks accidentally stored as tasks."""
+            """Filter out FYIs, wedding tasks, and non-tasks stored as daily tasks."""
             raw = (t.get("task") or "").strip().lower()
+            if t.get("category") == "wedding":
+                return True
             return (
                 raw.startswith("fyi")
                 or raw.startswith("• fyi")
