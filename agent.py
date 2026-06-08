@@ -1635,12 +1635,15 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 return (2, due)
             return sorted(tasks, key=key)
 
-        def _fmt(t: dict) -> str:
+        SEP = "───────────────"
+
+        def _fmt(t: dict, limit: int = 120) -> str:
             due = t.get("due_date")
             name = (t.get("task") or "").strip()
-            # Strip accidental "TASK:" prefix from old bad data
             if name.upper().startswith("TASK:"):
                 name = name[5:].strip()
+            if len(name) > limit:
+                name = name[:limit].rsplit(" ", 1)[0] + "…"
             if not due:
                 return f"• {name}"
             elif due < today_str:
@@ -1662,9 +1665,12 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
         lines: list[str] = ["<b>📋 Reminders</b>"]
         ordered_tasks: list[dict] = []
 
-        for uid in user_ids:
+        for i, uid in enumerate(user_ids):
             person_name = user_names.get(uid, str(uid))
             tasks = _sort([t for t in personal.get(uid, []) if not _is_junk(t)])
+            if i > 0:
+                lines.append("")
+                lines.append(SEP)
             lines.append("")
             lines.append(f"<b>{person_name}</b>")
             if tasks:
@@ -1685,6 +1691,8 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                 seen_text.add(key)
                 clean_shared.append(t)
 
+        lines.append("")
+        lines.append(SEP)
         lines.append("")
         lines.append("<b>👥 Shared</b>")
 
