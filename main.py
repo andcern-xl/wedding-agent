@@ -92,15 +92,19 @@ def _is_task(t: dict) -> bool:
     raw = (t.get("task") or "").strip().lower()
     return not any(raw.startswith(p) for p in _JUNK_PREFIXES)
 
-def _reminders_keyboard(tasks: list[dict]) -> InlineKeyboardMarkup | None:
-    from datetime import date
-    today_str = date.today().isoformat()
-    real_tasks = [t for t in tasks if _is_task(t)]
-    # Buttons only for overdue + today
-    urgent = [t for t in real_tasks if t.get("due_date") and t["due_date"] <= today_str]
-    targets = urgent or real_tasks[:5]
+def _can_complete(t: dict, user_id: int) -> bool:
+    """Only show a Done button for tasks this user is responsible for."""
+    assigned = t.get("assigned_to")
+    if assigned:
+        return assigned == user_id  # assigned task — only the assignee
+    if t.get("visibility") == "shared":
+        return True  # shared with no specific assignee — anyone can do it
+    return t.get("user_id") == user_id  # private — only the creator
+
+def _reminders_keyboard(tasks: list[dict], user_id: int) -> InlineKeyboardMarkup | None:
+    mine = [t for t in tasks if _is_task(t) and _can_complete(t, user_id)]
     rows = []
-    for t in targets:
+    for t in mine[:12]:
         raw = (t.get("task") or "").strip()
         if raw.upper().startswith("TASK:"):
             raw = raw[5:].strip()
@@ -323,7 +327,7 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_names = await _fetch_user_names(context)
         text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-        keyboard = _reminders_keyboard(tasks)
+        keyboard = _reminders_keyboard(tasks, update.effective_user.id)
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_tasks failed")
@@ -337,7 +341,7 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_names = await _fetch_user_names(context)
         text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
-        keyboard = _reminders_keyboard(tasks)
+        keyboard = _reminders_keyboard(tasks, update.effective_user.id)
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_reminders failed")
@@ -425,8 +429,8 @@ async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
     try:
         user_names = await _fetch_user_names(context)
         text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-        keyboard = _reminders_keyboard(tasks)
         for uid in ALLOWED_IDS:
+            keyboard = _reminders_keyboard(tasks, uid)
             await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML", reply_markup=keyboard)
     except Exception:
         logger.exception("Error sending combined daily brief")
