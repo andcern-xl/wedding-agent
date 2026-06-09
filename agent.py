@@ -1018,9 +1018,10 @@ TASK QUALITY RULES — enforce these strictly:
   RIGHT: "Look into OCBC credit card for points"
 - Social events / dinners with a confirmed date and time → create_calendar_event, NOT add_daily_task
 - Package trackers / running balances ("10 manicure sessions, 7 remaining") → save to personal summary via save_preference, NOT add_daily_task
-- Notes about the other person's preferences ("Jess likes kaya waffle") → log_fyi, NOT add_daily_task
+- Facts or preferences about either person ("Jess likes kaya waffle", "Ansen prefers window seats", "Jess is allergic to X") → save_preference for that person, NEVER add_daily_task or log_fyi. These are memory, not tasks.
 - Items someone already owns or knows about ("AirPods are in the car") → log_fyi, NOT add_daily_task
 - NEVER create a task that starts with "FYI" — that is always a log_fyi call
+- If a statement describes a fact, trait, or preference about Ansen or Jess with no action required → save_preference, full stop. Do not create a task.
 
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
@@ -1214,7 +1215,7 @@ TOOLS = [
     },
     {
         "name": "save_preference",
-        "description": "Persist a user preference or behavioural instruction that should apply in all future conversations. Use when someone says 'going forward always do X', 'from now on X', 'remember that I prefer X', 'never ask me to confirm X', etc. This is permanent — it will be loaded every session.",
+        "description": "Persist a fact, preference, or behavioural instruction about either person to their personal memory. Use for: (1) assistant instructions — 'going forward always do X', 'from now on X'; (2) personal facts — 'Jess likes kaya waffle', 'Ansen prefers window seats', 'Jess is allergic to X', 'Ansen's gym is X'. Anything describing a person's traits, preferences, or habits goes here — NOT into tasks or FYIs. This is permanent memory, loaded every session.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1649,19 +1650,35 @@ Be concise (under 300 words). Write in third person. Output the summary text onl
                         seen_personal.add(tid)
                         personal[owner].append(t)
 
+        _PREFERENCE_VERBS = (
+            " likes ", " like ", " loves ", " prefers ", " prefer ",
+            " hates ", " hate ", " dislikes ", " dislike ",
+            " is allergic", " are allergic",
+            " enjoys ", " enjoy ", " wants ", " want ",
+        )
+
         def _is_junk(t: dict) -> bool:
             """Filter out FYIs, wedding tasks, and non-tasks stored as daily tasks."""
             raw = (t.get("task") or "").strip().lower()
             if t.get("category") == "wedding":
                 return True
-            return (
+            # Obvious junk prefixes
+            if (
                 raw.startswith("fyi")
                 or raw.startswith("• fyi")
                 or raw.startswith("ansen deposited")
                 or raw.startswith("jess deposited")
                 or raw.startswith("ansen paid")
                 or raw.startswith("jess paid")
-            )
+            ):
+                return True
+            # Preference/fact statements masquerading as tasks
+            # e.g. "Jess likes kaya waffle", "Ansen prefers window seats"
+            names = ("jess ", "jessica ", "ansen ")
+            if any(raw.startswith(n) for n in names):
+                if any(verb in raw for verb in _PREFERENCE_VERBS):
+                    return True
+            return False
 
         def _sort(tasks: list[dict]) -> list[dict]:
             urgency = {"overdue": 0, "today": 1, "upcoming": 2, "none": 3}
