@@ -980,6 +980,7 @@ HOW TO USE TOOLS
 - Shared update / past-tense info / "FYI" / "just so you know" / "heads up" / completed action → log_fyi (not add_daily_task)
 - "any FYIs?" / "what did we share recently?" → read_fyis
 - "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
+- "search for", "look up", "find X", "what's the weather", "what is X", "who is X", any real-time or internet question → search_web first, then answer with real results. NEVER say you can't search — you have the search_web tool.
 - Vendor recommendations / price research / "find X in Y" / "what does X cost" / any question needing current market info → search_web first, then answer with real results
 - Couple-level decision or fact that both should always know ("we're going with X vendor", "we decided on Y", "Jess rescheduled the venue tour") → save_shared_context — this lives in both their prompts every message, not just queryable on demand
 
