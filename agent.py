@@ -14,6 +14,7 @@ from tools.fyis import log_fyi, get_fyis, get_fyis_today
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
 from tools.user_memory import get_summary, save_summary, get_message_count, get_shared_summary, append_shared_summary
 from tools.gcal import get_events, create_event, delete_event
+from tools.search import web_search
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -979,6 +980,7 @@ HOW TO USE TOOLS
 - Shared update / past-tense info / "FYI" / "just so you know" / "heads up" / completed action → log_fyi (not add_daily_task)
 - "any FYIs?" / "what did we share recently?" → read_fyis
 - "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
+- Vendor recommendations / price research / "find X in Y" / "what does X cost" / any question needing current market info → search_web first, then answer with real results
 - Couple-level decision or fact that both should always know ("we're going with X vendor", "we decided on Y", "Jess rescheduled the venue tour") → save_shared_context — this lives in both their prompts every message, not just queryable on demand
 
 TOOL ERRORS — BE HONEST
@@ -1222,6 +1224,18 @@ TOOLS = [
         },
     },
     {
+        "name": "search_web",
+        "description": "Search the internet for current information. Use automatically when the user asks about vendors, prices, options, availability, or anything that would benefit from up-to-date information — e.g. 'find photographers in Singapore', 'what's a reasonable budget for catering', 'florists near KL'. Also use when answering wedding planning questions that benefit from current market info.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query — be specific, include location and price range where relevant"},
+                "num_results": {"type": "integer", "description": "Number of results. Default 5, max 10."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "save_shared_context",
         "description": "Save a confirmed fact or decision to the shared brain — injected into BOTH Ansen's and Jess's prompts every single message. Use ONLY for confirmed/decided things: 'we booked X', 'venue confirmed', 'guest cap agreed at N', 'going with vendor Y'. Do NOT use for quotes, maybes, or info that's only useful if asked — those go in log_wedding_drop instead. Keep it to one clear sentence. This should be called IN ADDITION TO log_wedding_drop for wedding decisions, not instead of it.",
         "input_schema": {
@@ -1390,6 +1404,10 @@ class UnifiedAgent:
                 flags.setdefault("completed_tasks", []).append(task_name)
                 return {"status": "done", "task": task_name}
             return {"status": "not_found_or_not_allowed", "task_id": task_id}
+
+        if name == "search_web":
+            results = await asyncio.to_thread(web_search, inputs["query"], inputs.get("num_results", 5))
+            return results
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
