@@ -946,10 +946,15 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 TODAY'S DATE: {today}
 CURRENT TIMEZONE: {timezone}
 
-WHAT YOU KNOW ABOUT THIS PERSON AND THEIR PREFERENCES
+WHAT YOU KNOW ABOUT THIS PERSON
 {user_summary}
 
-If the above contains a PREFERENCES section, follow those instructions on every message — they are standing orders, not suggestions.
+Read this before every response. Use it to:
+- Match their communication style (length, tone, formality)
+- Reference things they've shared without them having to repeat themselves
+- Anticipate what they probably want based on their patterns
+- Skip explanations they don't need
+If it contains a PREFERENCES section, follow those as standing orders.
 
 SHARED BRAIN — what Ansen and Jess have told you together (visible in both their conversations):
 {shared_summary}
@@ -1466,7 +1471,7 @@ class UnifiedAgent:
 
                 try:
                     msg_count = get_message_count(user_id) + 1
-                    if msg_count % 6 == 0:
+                    if msg_count % 4 == 0:
                         asyncio.create_task(
                             self._compress_and_save(user_id, updated_history, user_summary, msg_count)
                         )
@@ -1526,13 +1531,24 @@ class UnifiedAgent:
         return await self._run_loop(text, user_id, history, user_summary, shared_summary)
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
+        # Build readable transcript — include tool exchanges so patterns in tool use are visible
         lines = []
-        for m in messages[-20:]:
+        for m in messages[-30:]:
             role = m["role"]
-            content = m["content"] if isinstance(m["content"], str) else "[tool exchange]"
-            lines.append(f"{role}: {content[:300]}")
+            content = m["content"]
+            if isinstance(content, str):
+                lines.append(f"{role}: {content[:400]}")
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            lines.append(f"{role}: {block['text'][:400]}")
+                        elif block.get("type") == "tool_use":
+                            lines.append(f"{role} [tool: {block.get('name')}]: {json.dumps(block.get('input', {}))[:200]}")
+                        elif block.get("type") == "tool_result":
+                            lines.append(f"tool_result: {str(block.get('content', ''))[:200]}")
 
-        # Split off any PREFERENCES block — compression must never touch it
+        # Split off PREFERENCES block — never overwrite explicit user instructions
         pref_marker = "\n\nPREFERENCES:\n"
         if pref_marker in (existing_summary or ""):
             summary_body, pref_block = existing_summary.split(pref_marker, 1)
@@ -1540,25 +1556,51 @@ class UnifiedAgent:
             summary_body = existing_summary or ""
             pref_block = None
 
-        prompt = f"""Existing summary:
-{summary_body or "(none yet)"}
+        name = self._USER_NAMES.get(user_id, "this person")
 
-Recent conversation:
+        prompt = f"""You are updating the persistent memory profile for {name}, a user of a personal assistant Telegram bot shared with their partner.
+
+EXISTING PROFILE:
+{summary_body or "(none yet — build from scratch)"}
+
+RECENT CONVERSATION (oldest first):
 {chr(10).join(lines)}
 
-Update the summary to capture:
-- How this person communicates (style, tone, directness, preferences)
-- What they're currently focused on or working through
-- Recurring topics, habits, or concerns
-- Personal context they've shared (family, pets, work, interests)
-- How they like to use this assistant
+---
 
-Be concise (under 300 words). Write in third person. Output the summary text only — no headers, no PREFERENCES section."""
+Produce an updated profile using EXACTLY these section headers. For each section: merge existing observations with new ones, keep what's still true, update what's changed, add what's new. Be specific and behavioural — infer from what you observe, not just what they stated.
+
+## Identity
+1-2 sentences: who they are, what they do, their life context, relationship to the other user.
+
+## Communication style
+How they write — length, tone, directness, formality, emoji use. What kind of responses land well with them (short/detailed, casual/structured). Anything inferred from how they react to the assistant's replies.
+
+## Current focus
+What they're actively working on or preoccupied with right now. This is the most volatile section — update aggressively.
+
+## Habits & patterns
+Specific recurring behaviours observed across conversations. Topics they return to repeatedly. Things they keep deferring or worrying about. Any timing patterns. Things they tend to ask right after other things. Be concrete: "asks about X every few sessions" not "interested in X".
+
+## Important facts
+Specific facts that matter: job, living situation, relationships, upcoming events, finances, health, any significant personal context. Facts only — not interpretations.
+
+## What works / what to avoid
+Response styles, formats, or approaches this person responds well to — even if never explicitly stated (infer from engagement). Things to avoid. Anything they've corrected the assistant on.
+
+---
+
+Rules:
+- Specific beats generic. "Procrastinates on vendor outreach, brings it up then changes subject" beats "interested in vendors".
+- Infer patterns from repeated behaviour across the conversation history.
+- Under 550 words total.
+- Third person throughout.
+- Output the profile only — no preamble, no extra commentary, no PREFERENCES section."""
 
         try:
             response = await self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=400,
+                model="claude-sonnet-4-6",
+                max_tokens=700,
                 messages=[{"role": "user", "content": prompt}],
             )
             new_summary = response.content[0].text
