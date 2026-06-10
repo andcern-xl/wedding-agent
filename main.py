@@ -2,7 +2,7 @@ import asyncio
 import io
 import logging
 import os
-from datetime import time as dtime
+from datetime import time as dtime, date as ddate
 from zoneinfo import ZoneInfo
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -30,6 +30,8 @@ except Exception:
 REMINDER_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
 _evening_hour = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
 EVENING_TIME = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
+_proactive_hour = int(os.getenv("PROACTIVE_HOUR", "14"))
+PROACTIVE_TIME = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -472,6 +474,20 @@ async def send_evening_brief(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error sending evening brief")
 
 
+async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
+    if not ALLOWED_IDS:
+        return
+    USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
+    for uid in ALLOWED_IDS:
+        name = USER_NAMES.get(uid, str(uid))
+        try:
+            msg = await agent.proactive_check(uid, name)
+            if msg:
+                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="HTML")
+        except Exception:
+            logger.exception(f"proactive_check failed for {uid}")
+
+
 def main():
     import asyncio
     asyncio.set_event_loop(asyncio.new_event_loop())
@@ -524,6 +540,8 @@ def main():
         app.job_queue.run_daily(send_daily_brief, time=REMINDER_TIME)
         # Evening recap — every day at EVENING_BRIEF_HOUR (default 9pm)
         app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
+        # Proactive intelligence check — daily at PROACTIVE_HOUR (default 2pm)
+        app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:

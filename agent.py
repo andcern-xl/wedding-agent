@@ -1618,6 +1618,148 @@ Rules:
         except Exception:
             pass  # compression failure is non-critical
 
+    async def proactive_check(self, user_id: int, user_name: str) -> str | None:
+        """Survey current state for this user and return a message if something is genuinely worth flagging, else None."""
+        import os
+        from datetime import date as _date, datetime as _datetime, timezone as _tz
+
+        today = _date.today()
+        today_str = today.isoformat()
+        other_name = next((n for uid, n in self._USER_NAMES.items() if uid != user_id), "partner")
+
+        # --- Gather data ---
+        try:
+            profile = get_summary(user_id)
+        except Exception:
+            profile = ""
+
+        try:
+            shared = get_shared_summary()
+        except Exception:
+            shared = ""
+
+        # Open tasks — compute staleness
+        try:
+            raw_tasks = get_tasks(user_id, include_done=False)
+        except Exception:
+            raw_tasks = []
+
+        task_lines = []
+        for t in raw_tasks:
+            created = (t.get("created_at") or today_str)[:10]
+            try:
+                age_days = (today - _date.fromisoformat(created)).days
+            except ValueError:
+                age_days = 0
+            due = t.get("due_date") or "no date"
+            overdue = due != "no date" and due < today_str
+            stale = age_days >= 7
+            flags = []
+            if overdue:
+                flags.append("OVERDUE")
+            if stale:
+                flags.append(f"open {age_days}d")
+            flag_str = f" [{', '.join(flags)}]" if flags else ""
+            vis = "shared" if t.get("visibility") == "shared" else "private"
+            task_lines.append(f"  • {t['task']} (due: {due}, {vis}){flag_str}")
+
+        tasks_block = ("OPEN TASKS:\n" + "\n".join(task_lines)) if task_lines else "OPEN TASKS: none"
+
+        # Wedding drops — last activity per category
+        try:
+            all_drops = get_recent_drops(limit=200)
+        except Exception:
+            all_drops = []
+
+        last_drop_by_cat: dict[str, str] = {}
+        for d in all_drops:
+            cat = d.get("category") or "general"
+            if cat not in last_drop_by_cat:
+                last_drop_by_cat[cat] = d["ts"][:10]
+
+        wedding_lines = []
+        for cat_key, cat_info in CATEGORIES.items():
+            last = last_drop_by_cat.get(cat_key)
+            if last:
+                try:
+                    days_ago = (today - _date.fromisoformat(last)).days
+                    wedding_lines.append(f"  • {cat_info['name']}: last activity {days_ago}d ago ({last})")
+                except ValueError:
+                    wedding_lines.append(f"  • {cat_info['name']}: last activity {last}")
+            else:
+                wedding_lines.append(f"  • {cat_info['name']}: NO ACTIVITY YET")
+
+        wedding_block = "WEDDING PLANNING ACTIVITY BY CATEGORY:\n" + "\n".join(wedding_lines)
+
+        # Calendar — next 14 days
+        try:
+            cal_events = await asyncio.to_thread(get_events, 14)
+            cal_lines = []
+            for e in cal_events[:10]:
+                start = e["start"]
+                if "T" in start:
+                    try:
+                        start = _datetime.fromisoformat(start).strftime("%-d %b %H:%M")
+                    except ValueError:
+                        pass
+                cal_lines.append(f"  • {start} — {e['title']}")
+            cal_block = ("CALENDAR (next 14 days):\n" + "\n".join(cal_lines)) if cal_lines else "CALENDAR: no events"
+        except Exception:
+            cal_block = "CALENDAR: unavailable"
+
+        tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
+
+        prompt = f"""You are a proactive personal assistant for {user_name}. Today is {today_str} ({tz_name}).
+
+Their wedding is on 7 November 2026 — {((_date(2026, 11, 7) - today).days)} days away.
+
+THEIR PROFILE:
+{profile or "(no profile yet)"}
+
+SHARED BRAIN (confirmed couple decisions):
+{shared or "(empty)"}
+
+{tasks_block}
+
+{wedding_block}
+
+{cal_block}
+
+---
+
+Your job: decide if there is anything GENUINELY worth sending {user_name} an unprompted message about right now.
+
+Things worth flagging (be selective — only flag if there's real urgency or a real pattern):
+- A wedding category with NO activity that is time-sensitive (venue, photographer, catering book out fast)
+- A task that has been open for 2+ weeks with no progress — worth a nudge or a "is this still relevant?"
+- An overdue task that hasn't been cleared
+- A calendar event in the next 3 days that likely needs prep
+- A pattern from their profile that suggests something is being avoided or forgotten
+- A deadline or booking window that's closing (e.g. "venue deposits usually required 12 months out")
+
+Things NOT worth flagging:
+- Anything already covered in the morning daily brief (today's due tasks, upcoming tasks)
+- Generic wedding advice with no personal specificity
+- Things that are going fine
+- More than 3 bullets — if you have too much to say, pick the top 2-3
+
+If there IS something worth saying, write a short, casual, specific Telegram message to {user_name}. Use Telegram HTML. Max 4 bullets. Sound like a sharp friend, not a notification bot.
+
+If there is NOTHING genuinely worth flagging right now, respond with exactly the word: NOTHING"""
+
+        try:
+            response = await self.client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = response.content[0].text.strip()
+            if result.upper() == "NOTHING" or result.upper().startswith("NOTHING"):
+                return None
+            return result
+        except Exception:
+            return None
+
     async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
             history = []
