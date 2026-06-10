@@ -1257,17 +1257,22 @@ class UnifiedAgent:
         self._wedding = WeddingAgent()
         self._daily = DailyAgent()
 
-    def _build_system(self, user_summary: str = "", shared_summary: str = "") -> str:
+    _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
+
+    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0) -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
         )
         import os
+        current_name = self._USER_NAMES.get(user_id, "the user")
+        other_name = next((n for uid, n in self._USER_NAMES.items() if uid != user_id), "the other person")
+        current_user_line = f"CURRENT USER: You are talking to {current_name}. Address them as \"you\". Never refer to them in third person. The other person is {other_name}."
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
             today=date.today().isoformat(),
             timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
-            user_summary=user_summary or "Nothing yet — this is the start of our history together.",
+            user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=shared_summary or "Nothing shared yet.",
         )
 
@@ -1440,7 +1445,7 @@ class UnifiedAgent:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "summary_updated": False, "completed_tasks": []}
         messages = history + [{"role": "user", "content": user_content}]
-        system_prompt = self._build_system(user_summary, shared_summary)
+        system_prompt = self._build_system(user_summary, shared_summary, user_id)
         last_response = None
 
         for _ in range(10):
