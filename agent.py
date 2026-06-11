@@ -605,6 +605,10 @@ class DailyAgent:
         data = get_all_tasks_for_brief(user_id)
         cats = get_all_categories()
 
+        data["overdue"].sort(key=lambda t: t.get("due_date", ""))
+        data["upcoming"].sort(key=lambda t: t.get("due_date", ""))
+        data["no_date"].sort(key=lambda t: t["task"].lower())
+
         all_tasks = data["overdue"] + data["due_today"] + data["upcoming"] + data["no_date"]
         if not all_tasks:
             return "✅ Nothing on your task list. Add tasks by just telling me — \"remind me to X on Friday\"."
@@ -688,10 +692,10 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
                     t["_owner"] = names.get(uid, str(uid))
                 merged.append(t)
 
-        overdue = [t for t in merged if t.get("due_date") and t["due_date"] < today_str]
+        overdue = sorted([t for t in merged if t.get("due_date") and t["due_date"] < today_str], key=lambda t: t["due_date"])
         due_today = [t for t in merged if t.get("due_date") == today_str]
-        upcoming = [t for t in merged if t.get("due_date") and t["due_date"] > today_str]
-        no_date = [t for t in merged if not t.get("due_date")]
+        upcoming = sorted([t for t in merged if t.get("due_date") and t["due_date"] > today_str], key=lambda t: t["due_date"])
+        no_date = sorted([t for t in merged if not t.get("due_date")], key=lambda t: t["task"].lower())
 
         # Google Calendar events
         try:
@@ -1045,6 +1049,12 @@ HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
 - Cross-reference both brains naturally — no need to label responses as "Wedding Brain" or "Daily Brain"
 - Sound like a sharp friend who knows everything they've told you
+
+ORDERING
+- Calendar events: always list chronologically (soonest first)
+- Tasks with dates: chronological (earliest first)
+- Tasks/items without dates: alphabetical by name
+- When creating multiple events in one response, confirm them in date order
 
 FORMATTING — THIS IS CRITICAL
 Telegram uses parse_mode=HTML. **Asterisks and underscores are NOT rendered** — they show up as literal characters. You MUST use HTML tags.
