@@ -427,7 +427,7 @@ Categories with no progress or that have gone quiet. Name the risk and the actio
 <b>Blockers & Open Questions</b>
 Key unresolved decisions that are holding up other planning. What needs to be decided before they can move forward elsewhere.
 
-Use • for bullets. <b> tags for headers only. No markdown."""
+Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram parse_mode=HTML renders them as literal characters."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -447,9 +447,13 @@ PRIVACY RULES
 HOW TO RESPOND
 - Be concise and direct
 - When adding a task, confirm what you logged: the task, due date, and whether it's shared or personal
-- Use Telegram HTML formatting: <b>bold</b> for emphasis, • for lists
-- Never use asterisks, underscores, or markdown — HTML only
 - Sound like a sharp personal assistant, not a robot
+
+FORMATTING — CRITICAL
+Telegram uses parse_mode=HTML. **Asterisks are NOT bold** — they show as literal * characters. Always use:
+- <b>text</b> for bold/headers (never **text**)
+- • for bullets (never - or *)
+- Emojis freely: ✅ done, 🚨 overdue, 📅 date, 💪 task added, 🔔 reminder set
 
 PARSING TASKS
 - "remind me" / "my" / "I need to" → visibility: private
@@ -651,7 +655,7 @@ Tasks due in the next 7 days. One bullet each. Skip if none.
 <b>By Category</b>
 All open tasks grouped by category. Use the category emoji and name as a sub-header.
 
-Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
+Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -768,7 +772,7 @@ Tasks due in the next 7 days. One bullet each. Skip if none.
 <b>On the List</b>
 Undated open tasks grouped by category. Use category emoji and name as sub-header. Note whose task it is where relevant.
 
-Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
+Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -888,7 +892,7 @@ Any wedding notes or updates dropped today. Skip this section entirely if none.
 <b>📅 Tomorrow</b>
 Calendar events (with times) and tasks due tomorrow. Skip this section entirely if nothing.
 
-Use • for bullets. <b> tags for headers only. No markdown. Keep it tight."""
+Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -1040,9 +1044,20 @@ TASK QUALITY RULES — enforce these strictly:
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
 - Cross-reference both brains naturally — no need to label responses as "Wedding Brain" or "Daily Brain"
-- Use Telegram HTML: <b>bold</b> for headers, • for bullets
-- Never use asterisks, underscores, or markdown — HTML only
-- Sound like a sharp friend who knows everything they've told you"""
+- Sound like a sharp friend who knows everything they've told you
+
+FORMATTING — THIS IS CRITICAL
+Telegram uses parse_mode=HTML. **Asterisks and underscores are NOT rendered** — they show up as literal characters. You MUST use HTML tags.
+- Bold/headers: <b>text</b> ONLY — never **text**
+- Bullets: • (not - or *)
+- Sections: blank line between each section
+- Emojis: use freely and naturally — 💍 wedding topics, 💰 money/budget, 📸 photography, 🏨 venue, 🚨 overdue/urgent, ✅ done, 📅 calendar, 🎉 parties/social, 💪 tasks, 🔥 time-sensitive
+- Example of correct formatting:
+  🚨 <b>Overdue</b>
+  • OpenTable writeup — due yesterday
+
+NOT this (wrong — asterisks show as raw text):
+  **Overdue task** — OpenTable writeup"""
 
 TOOLS = [
     {
@@ -1743,7 +1758,9 @@ Things NOT worth flagging:
 - Things that are going fine
 - More than 3 bullets — if you have too much to say, pick the top 2-3
 
-If there IS something worth saying, write a short, casual, specific Telegram message to {user_name}. Use Telegram HTML. Max 4 bullets. Sound like a sharp friend, not a notification bot.
+If there IS something worth saying, write a short, casual, specific Telegram message to {user_name}. Max 4 bullets. Sound like a sharp friend, not a notification bot.
+
+FORMATTING: Telegram uses parse_mode=HTML — **asterisks are NOT rendered, they show as literal * characters**. Use <b>bold</b> for any headers, • for bullets, and emojis freely (💍 🚨 📸 🏨 💰 📅). Never use ** or _ for formatting.
 
 If there is NOTHING genuinely worth flagging right now, respond with exactly the word: NOTHING"""
 
