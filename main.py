@@ -32,6 +32,8 @@ _evening_hour = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
 EVENING_TIME = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
 _proactive_hour = int(os.getenv("PROACTIVE_HOUR", "14"))
 PROACTIVE_TIME = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
+_stocks_hour = int(os.getenv("STOCKS_BRIEF_HOUR", "9"))
+STOCKS_TIME = dtime(hour=_stocks_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("/reminders — to-dos for both of you")
     lines.append("/fyis — recent shared FYIs")
     lines.append("/shared — shared brain (confirmed decisions)")
+    lines.append("/stocks — newsletter digest + buy/hold/skip analysis")
     lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
 
@@ -265,6 +268,39 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         err_type = type(e).__name__
         err_msg = str(e)[:300]
         await update.message.reply_text(f"[DEBUG] {err_type}: {err_msg}")
+
+
+async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    msg = await update.message.reply_text("📰 Reading newsletters and running analysis...")
+    try:
+        brief = await agent.stocks_brief()
+        sections = _split_sections(brief)
+        await msg.edit_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_stocks failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
+    if not ALLOWED_IDS:
+        return
+    try:
+        brief = await agent.stocks_brief()
+        sections = _split_sections(brief)
+        for uid in ALLOWED_IDS:
+            await context.bot.send_message(
+                chat_id=uid,
+                text="📊 <b>Weekly Stocks & Crypto Brief</b>",
+                parse_mode="HTML",
+            )
+            for section in sections:
+                await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+    except Exception:
+        logger.exception("Error sending stocks brief")
 
 
 async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
@@ -526,6 +562,7 @@ def main():
     app.add_handler(CommandHandler("shared", cmd_shared))
     app.add_handler(CommandHandler("fyis", cmd_fyis))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
+    app.add_handler(CommandHandler("stocks", cmd_stocks))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
@@ -542,6 +579,8 @@ def main():
         app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
         # Proactive intelligence check — daily at PROACTIVE_HOUR (default 2pm)
         app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
+        # Weekly stocks & crypto brief — Sundays at STOCKS_BRIEF_HOUR (default 9am)
+        app.job_queue.run_daily(send_stocks_brief, time=STOCKS_TIME, days=(6,))
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:

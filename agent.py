@@ -15,6 +15,7 @@ from tools.daily_categories import get_all_categories, add_custom_category, dete
 from tools.user_memory import get_summary, save_summary, get_message_count, get_shared_summary, append_shared_summary
 from tools.gcal import get_events, create_event, delete_event
 from tools.search import web_search
+from tools.gmail import get_emails
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -1549,6 +1550,109 @@ class UnifiedAgent:
             f"_run_loop exhausted for user {user_id}. Last stop_reason: {last_reason}. Messages len: {len(messages)}"
         )
         return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._strip_image_data(messages[-40:])}
+
+    async def stocks_brief(self) -> str:
+        """Read whitelisted newsletters from the past 7 days, extract investment ideas,
+        analyse each with web search, and return a formatted buy/hold/skip brief."""
+        today = date.today()
+        tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
+
+        # 1. Fetch emails (run in thread — blocking I/O)
+        try:
+            emails = await asyncio.to_thread(get_emails, None, 20)
+        except Exception as e:
+            return f"⚠️ Could not read newsletters: {e}"
+
+        if not emails:
+            return "📭 No newsletter emails found."
+
+        # Condensed digest — subject + first 2000 chars of body per email
+        digest_parts = []
+        for em in emails:
+            snippet = em["body"][:2000].strip()
+            digest_parts.append(
+                f"FROM: {em['from']}\nDATE: {em['date']}\nSUBJECT: {em['subject']}\n\n{snippet}"
+            )
+        digest = "\n\n---\n\n".join(digest_parts)
+
+        # 2. Extract investment ideas
+        extraction_prompt = f"""You are reading finance and crypto newsletters. Today is {today} ({tz_name}).
+
+NEWSLETTERS:
+{digest[:15000]}
+
+Extract every stock ticker, crypto asset, company, or specific investment idea mentioned.
+For each return JSON: {{"assets": [{{"name": "...", "ticker": "...", "type": "stock|crypto|other", "thesis": "one sentence on what the newsletter said about it"}}]}}
+Only include assets the newsletter is actually bullish or noteworthy about. Skip generic mentions.
+Return only valid JSON, no other text."""
+
+        extraction_resp = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": extraction_prompt}],
+        )
+        extraction_text = extraction_resp.content[0].text.strip()
+
+        try:
+            clean = extraction_text.strip("` \n")
+            if clean.startswith("json"):
+                clean = clean[4:].strip()
+            assets = json.loads(clean).get("assets", [])
+        except Exception:
+            assets = []
+
+        if not assets:
+            return "📰 Read the newsletters but found no specific investment ideas to analyse."
+
+        # 3. Web-search each asset for current data (cap at 8)
+        asset_analyses = []
+        for asset in assets[:8]:
+            name = asset.get("name", "")
+            ticker = asset.get("ticker", "")
+            kind = asset.get("type", "")
+            query = f"{name} {ticker} {kind} price analysis buy sell 2026".strip()
+            try:
+                search_results = await asyncio.to_thread(web_search, query, 4)
+                search_text = json.dumps(search_results, default=str)[:3000]
+            except Exception:
+                search_text = "Search unavailable."
+            asset_analyses.append({"asset": asset, "search": search_text})
+
+        # 4. Generate the final brief
+        analyses_text = ""
+        for item in asset_analyses:
+            a = item["asset"]
+            analyses_text += (
+                f"\n\nASSET: {a.get('name')} ({a.get('ticker', '')}) — {a.get('type', '')}\n"
+                f"NEWSLETTER THESIS: {a.get('thesis', '')}\n"
+                f"CURRENT DATA:\n{item['search']}"
+            )
+
+        brief_prompt = f"""Today is {today}. You are a sharp investment analyst reviewing newsletter picks for Ansen and Jess.
+
+ASSETS TO ANALYSE:{analyses_text}
+
+Write a concise investment brief in Telegram HTML. For each asset:
+- Clear BUY / HOLD / SKIP signal
+- 2-3 lines of reasoning referencing current price/sentiment/news
+- Key risk in one line
+
+End with a short "🔥 Highest conviction this week" section naming the top 1-2 picks.
+
+FORMATTING — CRITICAL:
+Telegram uses parse_mode=HTML. NEVER use **asterisks** — they show as literal * characters.
+- Headers: <b>Asset Name (TICKER)</b>
+- Signal: 🟢 BUY / 🟡 HOLD / 🔴 SKIP
+- Bullets: •
+- Emojis welcome: 📈 📉 💰 ⚠️ 🔥
+- Blank line between each asset"""
+
+        brief_resp = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": brief_prompt}],
+        )
+        return brief_resp.content[0].text
 
     async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
