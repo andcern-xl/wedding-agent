@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+from html import escape
 from datetime import time as dtime, date as ddate
 from zoneinfo import ZoneInfo
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -282,7 +283,7 @@ async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_stocks failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"⚠️ {escape(str(e)[:300])}", parse_mode="HTML")
 
 
 async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):

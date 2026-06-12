@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+from html import escape as _html_escape
 from datetime import datetime, date, timezone, timedelta
 from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
@@ -1562,7 +1563,7 @@ class UnifiedAgent:
         try:
             emails = await asyncio.to_thread(get_emails, None, 20)
         except Exception as e:
-            return f"⚠️ Could not read newsletters: {e}"
+            return f"⚠️ Could not read newsletters: {_html_escape(str(e))}"
 
         if not emails:
             return "📭 No newsletter emails found."
