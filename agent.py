@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 from datetime import datetime, date, timezone, timedelta
 from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
