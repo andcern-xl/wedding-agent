@@ -5,7 +5,10 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.readonly",
+]
 
 _creds = None
 _service = None

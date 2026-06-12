@@ -579,8 +579,8 @@ def main():
         app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
         # Proactive intelligence check — daily at PROACTIVE_HOUR (default 2pm)
         app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
-        # Weekly stocks & crypto brief — Sundays at STOCKS_BRIEF_HOUR (default 9am)
-        app.job_queue.run_daily(send_stocks_brief, time=STOCKS_TIME, days=(6,))
+        # Daily stocks & crypto brief — every day at STOCKS_BRIEF_HOUR (default 9am)
+        app.job_queue.run_daily(send_stocks_brief, time=STOCKS_TIME)
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:
