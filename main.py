@@ -546,6 +546,7 @@ def main():
             BotCommand("reminders", "To-dos split by person"),
             BotCommand("fyis", "Recent shared FYIs"),
             BotCommand("shared", "Shared brain — confirmed decisions"),
+            BotCommand("stocks", "📊 Newsletter digest + buy/hold/skip"),
         ]
         for key, cat in CATEGORIES.items():
             commands.append(BotCommand(key, f"{cat['emoji']} {cat['name']} status"))
