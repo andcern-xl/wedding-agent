@@ -281,6 +281,20 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         await update.message.reply_text(f"[DEBUG] {err_type}: {err_msg}")
 
 
+async def _safe_send(msg, text: str, update: Update = None):
+    """Send text with HTML parse_mode; fall back to plain text if Telegram rejects the HTML."""
+    import re as _re
+    try:
+        await msg.edit_text(text, parse_mode="HTML")
+    except Exception:
+        # Strip all HTML tags and retry as plain text
+        plain = _re.sub(r"<[^>]+>", "", text)
+        try:
+            await msg.edit_text(plain)
+        except Exception:
+            await msg.edit_text(plain[:4000])
+
+
 async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
@@ -288,9 +302,13 @@ async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         brief = await agent.stocks_brief()
         sections = _split_sections(brief)
-        await msg.edit_text(sections[0], parse_mode="HTML")
+        await _safe_send(msg, sections[0])
         for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
+            try:
+                await update.message.reply_text(section, parse_mode="HTML")
+            except Exception:
+                import re as _re
+                await update.message.reply_text(_re.sub(r"<[^>]+>", "", section))
     except Exception as e:
         logger.exception("cmd_stocks failed")
         await msg.edit_text(f"⚠️ {escape(str(e)[:300])}", parse_mode="HTML")

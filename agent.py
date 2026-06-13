@@ -20,14 +20,25 @@ from tools.gcal import get_events, create_event, delete_event
 from tools.search import web_search
 from tools.gmail import get_emails
 
+_TELEGRAM_ALLOWED_TAGS = re.compile(
+    r'<(?!/?(b|i|u|s|code|pre|a)(?:\s[^>]*)?>)',
+    re.IGNORECASE,
+)
+
+
 def _fix_md(text: str) -> str:
-    """Convert any stray markdown to Telegram HTML. Runs on all agent output."""
+    """Convert stray markdown to Telegram HTML and strip non-Telegram tags."""
     # **bold** → <b>bold</b>
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     # __bold__ → <b>bold</b>
     text = re.sub(r'__(.+?)__', r'<b>\1</b>', text, flags=re.DOTALL)
-    # _italic_ → <i>italic</i>  (only single underscores)
+    # _italic_ → <i>italic</i>
     text = re.sub(r'(?<!\w)_([^_\n]+?)_(?!\w)', r'<i>\1</i>', text)
+    # Strip any HTML tags that Telegram doesn't support (e.g. <zen:*>, <div>, <p>, <br>)
+    # Strategy: escape < that starts an unsupported tag into &lt;
+    def _escape_bad_tag(m: re.Match) -> str:
+        return '&lt;' + m.group(0)[1:]
+    text = re.sub(r'<(?!/?(b|i|u|s|code|pre|a)(\s[^>]*)?>)(?=[^>]*>)', _escape_bad_tag, text, flags=re.IGNORECASE)
     return text
 
 
