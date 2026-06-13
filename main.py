@@ -323,11 +323,15 @@ async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
         for uid in ALLOWED_IDS:
             await context.bot.send_message(
                 chat_id=uid,
-                text="📊 <b>Weekly Stocks & Crypto Brief</b>",
+                text="📊 <b>Daily Stocks & Crypto Brief</b>",
                 parse_mode="HTML",
             )
             for section in sections:
-                await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+                try:
+                    await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+                except Exception:
+                    import re as _re
+                    await context.bot.send_message(chat_id=uid, text=_re.sub(r"<[^>]+>", "", section))
     except Exception:
         logger.exception("Error sending stocks brief")
 
