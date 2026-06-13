@@ -238,7 +238,16 @@ def _extract_body(payload: dict) -> str:
         data = payload.get("body", {}).get("data", "")
         if data:
             raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-            return re.sub(r"<[^>]+>", " ", raw)
+            # Remove scripts, styles, and their content first
+            raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
+            # Replace block-level tags with newlines to preserve structure
+            raw = re.sub(r"<(br|p|div|li|h[1-6]|tr)[^>]*>", "\n", raw, flags=re.IGNORECASE)
+            # Strip remaining tags
+            raw = re.sub(r"<[^>]+>", "", raw)
+            # Collapse whitespace but preserve line breaks
+            raw = re.sub(r"[ \t]+", " ", raw)
+            raw = re.sub(r"\n\s*\n+", "\n\n", raw)
+            return raw.strip()
 
     for part in payload.get("parts", []):
         text = _extract_body(part)
