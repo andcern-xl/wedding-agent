@@ -1598,18 +1598,68 @@ class UnifiedAgent:
         if not emails:
             return "📭 No newsletter emails in the last 14 days."
 
-        # 2. Build digest — always include subject line prominently as a signal source.
-        #    Many newsletters (Milkroad/Beehiiv) render article body as images, so the
-        #    subject line is often the only reliable text signal. Body supplements it.
+        # 1b. For image-heavy newsletters (Beehiiv/Milkroad), use Claude Vision
+        #     to read newsletter images when body text is thin.
+        async def _read_newsletter_images(image_urls: list[str]) -> str:
+            """Download up to 3 content images and extract text via Claude Vision."""
+            if not image_urls:
+                return ""
+            try:
+                import httpx
+                extracted_parts = []
+                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                    for url in image_urls[:3]:
+                        try:
+                            resp = await client.get(url)
+                            if resp.status_code != 200:
+                                continue
+                            content_type = resp.headers.get("content-type", "image/jpeg")
+                            if not content_type.startswith("image/"):
+                                continue
+                            img_b64 = base64.standard_b64encode(resp.content).decode()
+                            vision_resp = await self.client.messages.create(
+                                model="claude-sonnet-4-6",
+                                max_tokens=600,
+                                messages=[{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": img_b64}},
+                                        {"type": "text", "text": "This is a section of a financial newsletter. Extract ALL visible text, headlines, asset names, prices, and investment commentary. Output plain text only."},
+                                    ],
+                                }],
+                            )
+                            text = vision_resp.content[0].text.strip()
+                            if text:
+                                extracted_parts.append(text)
+                        except Exception:
+                            continue
+                return "\n\n".join(extracted_parts)
+            except Exception:
+                return ""
+
+        # Enrich image-heavy emails with vision-extracted text
+        async def _enrich_email_body(em: dict) -> dict:
+            body = em.get("body", "").strip()
+            real_words = len([w for w in body.split() if not w.startswith("http")])
+            image_urls = em.get("image_urls", [])
+            # If body is thin and we have image URLs, supplement with vision
+            if real_words < 200 and image_urls:
+                vision_text = await _read_newsletter_images(image_urls)
+                if vision_text:
+                    return {**em, "body": body + "\n\n[VISION EXTRACTED]\n" + vision_text}
+            return em
+
+        emails = await asyncio.gather(*[_enrich_email_body(em) for em in emails])
+
+        # 2. Build digest — subject lines + enriched body (vision text included where available)
         unique_sources: set = set()
         digest_parts = []
         for em in emails:
             label = _source_label(em["from"])
             unique_sources.add(label)
             body = em["body"].strip()
-            # Quality check: if body is dominated by URLs/noise, truncate aggressively
             real_lines = [l for l in body.splitlines() if l.strip() and not l.strip().startswith("http")]
-            body_quality = "\n".join(real_lines[:80])  # up to 80 real lines
+            body_quality = "\n".join(real_lines[:80])
             digest_parts.append(
                 f"=== SOURCE: {label} | DATE: {em['date'][:10]} ===\n"
                 f"SUBJECT: {em['subject']}\n\n"

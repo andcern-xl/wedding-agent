@@ -218,13 +218,16 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: 
         subject = headers.get("Subject", "(no subject)")
         date = headers.get("Date", "")
         body = _extract_body(detail["payload"])
+        raw_html = _extract_raw_html(detail["payload"])
+        image_urls = extract_content_image_urls(raw_html) if raw_html else []
 
         emails.append({
             "id": msg["id"],
             "subject": subject,
             "from": sender,
             "date": date,
-            "body": body[:30000],  # full newsletter content
+            "body": body[:30000],
+            "image_urls": image_urls,  # content images for vision fallback
         })
 
     return emails
@@ -232,11 +235,52 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: 
 
 # ── Body extraction ────────────────────────────────────────────────────────────
 
+_SKIP_IMG_PATTERNS = re.compile(
+    r"(logo|icon|avatar|pixel|track|transparent|spacer|badge|button|arrow|chevron)",
+    re.IGNORECASE,
+)
+
+
+def extract_content_image_urls(html: str) -> list[str]:
+    """Return URLs of content images in a newsletter HTML email.
+
+    Filters out tracking pixels, logos, icons, and tiny images.
+    Only returns https URLs. Capped at 6 images.
+    """
+    urls = []
+    for m in re.finditer(r"<img\b[^>]*>", html, re.IGNORECASE):
+        tag = m.group(0)
+        # Extract src
+        src_m = re.search(r'\bsrc=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if not src_m:
+            continue
+        src = src_m.group(1)
+        if not src.startswith("https://"):
+            continue
+        # Skip data URIs, tracking pixels, obvious decorative images
+        if _SKIP_IMG_PATTERNS.search(src):
+            continue
+        # Skip known 1×1 tracking domains
+        if re.search(r"(pixel|track|beacon|open)\.", src, re.IGNORECASE):
+            continue
+        # Skip explicitly small images by width/height attributes
+        w_m = re.search(r'\bwidth=["\']?(\d+)["\']?', tag, re.IGNORECASE)
+        h_m = re.search(r'\bheight=["\']?(\d+)["\']?', tag, re.IGNORECASE)
+        if w_m and int(w_m.group(1)) < 80:
+            continue
+        if h_m and int(h_m.group(1)) < 80:
+            continue
+        urls.append(src)
+        if len(urls) >= 6:
+            break
+    return urls
+
+
 def _clean_html(raw: str) -> str:
     """Convert HTML email body to clean readable text."""
     # Remove entire script/style/head blocks
     raw = re.sub(r"<(script|style|head)[^>]*>.*?</\1>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
-    # Remove img tags entirely
+    # Remove img tags entirely (use extract_content_image_urls() separately to get URLs)
     raw = re.sub(r"<img[^>]*>", " ", raw, flags=re.IGNORECASE)
     # Keep hyperlink visible text, drop URL
     raw = re.sub(r"<a\s[^>]*>(.*?)</a>", r" \1 ", raw, flags=re.DOTALL | re.IGNORECASE)
@@ -311,3 +355,27 @@ def _extract_body(payload: dict) -> str:
         if len(text) > len(best):
             best = text
     return best
+
+
+def _extract_raw_html(payload: dict) -> str:
+    """Return raw HTML string from a Gmail message payload — no cleaning applied.
+    Used to extract image URLs before they get stripped by _clean_html().
+    """
+    mime = payload.get("mimeType", "")
+    if mime == "text/html":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+    parts = payload.get("parts", [])
+    for part in parts:
+        part_mime = part.get("mimeType", "")
+        if part_mime == "text/html":
+            data = part.get("body", {}).get("data", "")
+            if data:
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+        # Recurse into nested multipart
+        if part_mime.startswith("multipart/"):
+            result = _extract_raw_html(part)
+            if result:
+                return result
+    return ""
