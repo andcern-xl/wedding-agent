@@ -46,11 +46,17 @@ BUILT_IN_CATEGORIES = {
 }
 
 
+def _fetch_custom() -> list:
+    try:
+        return get_client().table("daily_categories").select("*").execute().data or []
+    except Exception:
+        return []
+
+
 def get_all_categories() -> dict:
     """Return built-ins merged with custom categories from DB."""
-    custom_rows = get_client().table("daily_categories").select("*").execute().data or []
     result = dict(BUILT_IN_CATEGORIES)
-    for row in custom_rows:
+    for row in _fetch_custom():
         result[row["slug"]] = {
             "name": row["name"],
             "emoji": row["emoji"],
@@ -70,7 +76,10 @@ def add_custom_category(name: str, emoji: str, created_by: int, description: str
         "description": description,
         "created_by": created_by,
     }
-    return get_client().table("daily_categories").insert(row).execute().data[0]
+    try:
+        return get_client().table("daily_categories").insert(row).execute().data[0]
+    except Exception:
+        return {"slug": slug, "name": name.strip().title(), "emoji": emoji}
 
 
 def detect_daily_category(text: str) -> str | None:
@@ -80,9 +89,7 @@ def detect_daily_category(text: str) -> str | None:
         score = sum(1 for kw in cat["keywords"] if kw in text_lower)
         if score > 0:
             scores[key] = score
-    # Also check custom categories from DB (slug/name match)
-    custom_rows = get_client().table("daily_categories").select("slug,name").execute().data or []
-    for row in custom_rows:
+    for row in _fetch_custom():
         if row["slug"] in text_lower or row["name"].lower() in text_lower:
             scores[row["slug"]] = scores.get(row["slug"], 0) + 2
     if not scores:

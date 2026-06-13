@@ -23,8 +23,7 @@ Deployed on Railway (auto-deploys on push to `main`).
 ## Database (Supabase)
 Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `notifications`
 
-`daily_tasks` columns: `id, user_id, task, due_date, repeat, visibility, done, created_at, completed_at, assigned_to`
-> ⚠️ No `category` column in DB — the category field in add_task() silently no-ops (error is caught and row is inserted without it)
+`daily_tasks` columns: `id, user_id, task, due_date, repeat, visibility, done, created_at, completed_at, assigned_to, category`
 
 `user_summaries`: stores per-user compressed memory. `user_id=0` = shared brain (visible to both users).
 

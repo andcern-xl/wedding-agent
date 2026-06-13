@@ -29,13 +29,7 @@ def add_task(
         row["category"] = category
     if assigned_to:
         row["assigned_to"] = assigned_to
-    try:
-        return get_client().table("daily_tasks").insert(row).execute().data[0]
-    except Exception as e:
-        if "category" in str(e) and category:
-            row.pop("category")
-            return get_client().table("daily_tasks").insert(row).execute().data[0]
-        raise
+    return get_client().table("daily_tasks").insert(row).execute().data[0]
 
 
 def get_tasks(user_id: int, include_done: bool = False) -> list[dict]:
