@@ -1767,64 +1767,71 @@ Return JSON only:
             assets = []
             weekly_theme = ""
 
-        # 4. Fallback: subject lines → web search → asset identification
-        #    Never give up — even with no body text, subjects contain investment signals.
+        # 4. Fallback: subjects are shown DIRECTLY to Claude — no JSON, no web search needed.
+        #    The subjects themselves contain the investment signals. Extract directly.
         if not assets:
             subjects = [em["subject"] for em in emails if em.get("subject")]
-            if not subjects:
-                subject_list = [f"{_source_label(em['from'])}: {em['subject']}" for em in emails[:10]]
-                return (
-                    f"📭 No investment ideas found. Newsletters read:\n"
-                    + "\n".join(f"• {s}" for s in subject_list)
+            if subjects:
+                subj_lines = "\n".join(f"- {s}" for s in subjects)
+
+                # Optionally supplement with web search (best-effort, not required)
+                async def _search_subject(subject: str) -> str:
+                    try:
+                        results = await asyncio.to_thread(web_search, subject + " 2026", 2)
+                        snippets = " | ".join(
+                            r.get("content", "")[:150] for r in results if isinstance(r, dict) and r.get("content")
+                        )
+                        return snippets
+                    except Exception:
+                        return ""
+
+                search_hits = await asyncio.gather(*[_search_subject(s) for s in subjects[:5]], return_exceptions=True)
+                search_block = ""
+                for s, hit in zip(subjects[:5], search_hits):
+                    if isinstance(hit, str) and hit.strip():
+                        search_block += f"\n{s}: {hit}"
+
+                fallback_prompt = f"""Today is {today}. Extract investment assets from these newsletter subject lines.
+
+SUBJECT LINES:
+{subj_lines}
+
+ADDITIONAL CONTEXT (web search snippets, may be empty):
+{search_block.strip() or "(none)"}
+
+RULES:
+- ALWAYS extract company/asset names directly from the subject text
+- "I'm not buying SpaceX, Anthropic, or OpenAI" → extract SpaceX, Anthropic, OpenAI (sentiment: bearish)
+- "AI now trades for you on Coinbase" → extract Coinbase, AI sector (sentiment: bullish)
+- "Trade Alert" → extract as a signal even without specifics
+- Every company name, crypto token, ETF, or ticker mentioned counts
+- Minimum: extract at least 1 asset if ANY company or product name appears
+
+Return JSON only — no other text:
+{{"weekly_theme":"...","assets":[{{"name":"...","ticker":"...","type":"stock|crypto|etf|other","thesis":"...","sources":["Milkroad"],"sentiment":"bullish|bearish|neutral|mixed"}}]}}"""
+
+                fallback_resp = await self.client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1000,
+                    messages=[{"role": "user", "content": fallback_prompt}],
                 )
-
-            # Search each subject directly — bypass the need for ticker extraction
-            async def _search_subject(subject: str) -> str:
                 try:
-                    results = await asyncio.to_thread(web_search, subject + " investment analysis 2026", 3)
-                    snippets = " | ".join(
-                        r.get("content", "")[:200] for r in results if isinstance(r, dict)
-                    )
-                    return f"SUBJECT: {subject}\nSEARCH: {snippets}"
+                    raw2 = fallback_resp.content[0].text.strip().strip("` \n")
+                    if raw2.startswith("json"):
+                        raw2 = raw2[4:].strip()
+                    parsed2 = json.loads(raw2)
+                    assets = parsed2.get("assets", [])
+                    weekly_theme = parsed2.get("weekly_theme", weekly_theme)
                 except Exception:
-                    return f"SUBJECT: {subject}"
+                    pass
 
-            search_results = await asyncio.gather(*[_search_subject(s) for s in subjects[:6]])
-            search_block = "\n\n".join(r for r in search_results if r)
-
-            # Ask Claude to identify assets from search results
-            fallback_prompt = f"""Today is {today}. These are newsletter subject lines + web search results about them.
-
-{search_block}
-
-From this data, extract every stock, crypto, ETF, or company being discussed as an investment topic.
-Even vague references count — if a subject says "I'm not buying X", X is worth analysing.
-
-Return JSON only:
-{{"weekly_theme":"...","assets":[{{"name":"...","ticker":"...","type":"stock|crypto|etf|other","thesis":"what the newsletter/web says about it","sources":[],"sentiment":"bullish|bearish|neutral|mixed"}}]}}"""
-
-            fallback_resp = await self.client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1200,
-                messages=[{"role": "user", "content": fallback_prompt}],
-            )
-            try:
-                raw2 = fallback_resp.content[0].text.strip().strip("` \n")
-                if raw2.startswith("json"):
-                    raw2 = raw2[4:].strip()
-                parsed2 = json.loads(raw2)
-                assets = parsed2.get("assets", [])
-                weekly_theme = parsed2.get("weekly_theme", weekly_theme)
-            except Exception:
-                pass
-
-        # Nuclear fallback: still nothing — return what subjects were found
+        # Nuclear fallback — should almost never happen
         if not assets:
             subject_list = [f"• {_source_label(em['from'])}: {em['subject']}" for em in emails[:10]]
             return (
                 "<b>📰 Newsletters read this week</b>\n\n"
                 + "\n".join(subject_list)
-                + "\n\n<i>Could not extract investment topics from these subjects.</i>"
+                + "\n\n<i>Could not identify investment topics.</i>"
             )
 
         # 5. Sort by conviction, cap at 8, enrich with dual web searches
