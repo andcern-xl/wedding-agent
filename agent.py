@@ -1572,14 +1572,14 @@ class UnifiedAgent:
         today = date.today()
         tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
 
-        # 1. Fetch emails
+        # 1. Fetch emails from the last 14 days
         try:
-            emails = await asyncio.to_thread(get_emails, None, 20)
+            emails = await asyncio.to_thread(get_emails, None, 20, 14)
         except Exception as e:
             return f"⚠️ Could not read newsletters: {_html_escape(str(e))}"
 
         if not emails:
-            return "📭 No newsletter emails found in the whitelisted senders."
+            return "📭 No newsletter emails found in the last 14 days from whitelisted senders."
 
         # 2. Build per-source digest (labelled so Claude can track which source said what)
         _DOMAIN_LABELS = {
@@ -1657,7 +1657,17 @@ Return JSON only — no other text:
             weekly_theme = ""
 
         if not assets:
-            return "📰 Read the newsletters but couldn't extract any specific investment ideas — the content may be non-financial this week."
+            # Debug: show what was actually read so we can diagnose
+            email_summary = "\n".join(
+                f"• {_source_label(em['from'])} — {em['date'][:16]} — {em['subject'][:60]}\n"
+                f"  Body preview: {em['body'][:200].strip()[:150]}"
+                for em in emails[:5]
+            )
+            return (
+                f"📰 Read {len(emails)} newsletter(s) but found no investment ideas.\n\n"
+                f"<b>What was fetched:</b>\n{_html_escape(email_summary)}\n\n"
+                f"<i>If the body previews look like garbled HTML or are empty, the email format needs adjustment.</i>"
+            )
 
         # 4. Sort by cross-newsletter conviction (most mentioned first), cap at 8
         assets_sorted = sorted(assets, key=lambda a: len(a.get("sources", [])), reverse=True)

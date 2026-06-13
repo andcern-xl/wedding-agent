@@ -128,13 +128,11 @@ def _get_service() -> _GuardedGmail:
 
 # ── Query builder ──────────────────────────────────────────────────────────────
 
-def _safe_query(sender_hint: str | None = None) -> str:
+def _safe_query(sender_hint: str | None = None, days_back: int | None = None) -> str:
     """Build a Gmail search query restricted to whitelisted senders.
 
-    sender_hint: optional substring to filter within the whitelist
-                 (e.g. "milkroad" → only milkroad senders).
-                 None → all whitelisted senders.
-    Raises ValueError if hint matches nothing in the whitelist.
+    sender_hint: optional substring to filter within the whitelist.
+    days_back: if set, only fetch emails from the last N days.
     """
     if sender_hint:
         hint = sender_hint.lower()
@@ -149,7 +147,14 @@ def _safe_query(sender_hint: str | None = None) -> str:
         senders = ALLOWED_SENDERS
 
     from_clause = " OR ".join(f"from:{s}" for s in sorted(senders))
-    return f"({from_clause})"
+    query = f"({from_clause})"
+
+    if days_back:
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=days_back)).strftime("%Y/%m/%d")
+        query += f" after:{cutoff}"
+
+    return query
 
 
 # ── Sender validation ──────────────────────────────────────────────────────────
@@ -172,15 +177,16 @@ def _assert_sender_allowed(from_header: str):
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def get_emails(sender_hint: str | None = None, max_results: int = 5) -> list[dict]:
+def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: int | None = None) -> list[dict]:
     """Fetch recent emails from whitelisted senders.
 
     sender_hint: optional filter within the whitelist (e.g. "milkroad").
     max_results: max emails to return (capped at 20).
+    days_back: if set, only fetch emails from the last N days.
     """
     max_results = min(max_results, 20)  # hard cap
     svc = _get_service()
-    query = _safe_query(sender_hint)
+    query = _safe_query(sender_hint, days_back=days_back)
 
     result = svc.messages().list(
         userId="me",
