@@ -1567,21 +1567,11 @@ class UnifiedAgent:
         return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._strip_image_data(messages[-40:])}
 
     async def stocks_brief(self) -> str:
-        """Read whitelisted newsletters, cross-reference mentions, enrich with web search,
-        return a themed buy/hold/skip brief, and save a digest to the shared brain."""
+        """Agentic investment brief: reads newsletters, extracts topics from subjects+body,
+        enriches each with web research, produces TradingAgents 4-dimension analysis."""
         today = date.today()
         tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
 
-        # 1. Fetch emails from the last 14 days
-        try:
-            emails = await asyncio.to_thread(get_emails, None, 20, 14)
-        except Exception as e:
-            return f"⚠️ Could not read newsletters: {_html_escape(str(e))}"
-
-        if not emails:
-            return "📭 No newsletter emails found in the last 14 days from whitelisted senders."
-
-        # 2. Build per-source digest (labelled so Claude can track which source said what)
         _DOMAIN_LABELS = {
             "milkroad.com": "Milkroad",
             "tldrnewsletter.com": "TLDR",
@@ -1594,38 +1584,58 @@ class UnifiedAgent:
             for domain, name in _DOMAIN_LABELS.items():
                 if domain in lower:
                     return name
-            # substack: use the local part e.g. zendaily, notboring
             if "substack.com" in lower:
                 local = lower.split("@")[0]
                 return local.replace("daily", "").replace("newsletter", "").strip("-").title() or "Substack"
             return from_addr.split("@")[-1].split(".")[0].title()
 
-        digest_parts = []
+        # 1. Fetch emails — last 14 days
+        try:
+            emails = await asyncio.to_thread(get_emails, None, 20, 14)
+        except Exception as e:
+            return f"⚠️ Could not read newsletters: {_html_escape(str(e))}"
+
+        if not emails:
+            return "📭 No newsletter emails in the last 14 days."
+
+        # 2. Build digest — always include subject line prominently as a signal source.
+        #    Many newsletters (Milkroad/Beehiiv) render article body as images, so the
+        #    subject line is often the only reliable text signal. Body supplements it.
         unique_sources: set = set()
+        digest_parts = []
         for em in emails:
             label = _source_label(em["from"])
             unique_sources.add(label)
-            snippet = em["body"][:6000].strip()
+            body = em["body"].strip()
+            # Quality check: if body is dominated by URLs/noise, truncate aggressively
+            real_lines = [l for l in body.splitlines() if l.strip() and not l.strip().startswith("http")]
+            body_quality = "\n".join(real_lines[:80])  # up to 80 real lines
             digest_parts.append(
-                f"=== SOURCE: {label} ===\n"
-                f"DATE: {em['date']}\nSUBJECT: {em['subject']}\n\n{snippet}"
+                f"=== SOURCE: {label} | DATE: {em['date'][:10]} ===\n"
+                f"SUBJECT: {em['subject']}\n\n"
+                f"{body_quality[:4000]}"
             )
         digest = "\n\n".join(digest_parts)
         total_sources = len(unique_sources)
 
-        # 3. Extract assets with source tracking + weekly theme
-        extraction_prompt = f"""You are reading finance and crypto newsletters. Today is {today} ({tz_name}).
+        # 3. Extract investment topics — explicitly instruct to use subject lines as signals
+        extraction_prompt = f"""You are reading finance, crypto, and tech investment newsletters. Today is {today} ({tz_name}).
 
-NEWSLETTERS (each marked with === SOURCE: Name ===):
+NEWSLETTERS (each marked === SOURCE: Name ===):
 {digest[:40000]}
 
-Tasks:
-1. Write a 1-2 sentence "weekly_theme" synthesising the dominant investment narrative across all newsletters.
-2. Extract every stock, crypto, ETF, or named company mentioned in any financial context.
-   - If the SAME asset appears in multiple sources, merge into one entry and list ALL sources.
-   - Capture the overall sentiment across all mentions.
+IMPORTANT: Many newsletters render article body as images — when the body looks empty or noisy,
+use the SUBJECT LINE as the primary signal. Subject lines like "I'm not buying SpaceX, Anthropic,
+or OpenAI" or "AI now trades for you on Coinbase" or "Trade Alert: M0xt sold $5KV" are strong
+investment signals even without body text.
 
-Return JSON only — no other text:
+Extract:
+1. A 1-2 sentence "weekly_theme" across all newsletters combined.
+2. Every asset, company, token, or investment idea mentioned — from BOTH subject lines AND body text.
+   Include: stocks, crypto, ETFs, private companies being discussed, IPOs, sectors.
+   Merge same asset from multiple sources. Note sentiment per asset.
+
+Return JSON only:
 {{
   "weekly_theme": "...",
   "assets": [
@@ -1633,8 +1643,8 @@ Return JSON only — no other text:
       "name": "full name",
       "ticker": "symbol or empty string",
       "type": "stock|crypto|etf|other",
-      "thesis": "what the newsletter(s) said — catalysts, price targets, risks, overall view",
-      "sources": ["Source1", "Source2"],
+      "thesis": "combined view from all sources — what's the story, why is it interesting or not",
+      "sources": ["Source1"],
       "sentiment": "bullish|bearish|neutral|mixed"
     }}
   ]
@@ -1656,93 +1666,125 @@ Return JSON only — no other text:
             assets = []
             weekly_theme = ""
 
+        # 4. Fallback: if still no assets, synthesise a search-only brief from subjects
         if not assets:
-            email_lines = []
-            for em in emails[:6]:
-                label = _source_label(em["from"])
-                preview = em["body"][:300].strip().replace("\n", " ")[:200]
-                email_lines.append(
-                    f"• <b>{_html_escape(label)}</b> — {_html_escape(em['subject'][:50])}\n"
-                    f"  <i>{_html_escape(preview)}</i>"
-                )
-            return (
-                f"📰 <b>Read {len(emails)} newsletter(s) — no investment ideas extracted</b>\n\n"
-                + "\n\n".join(email_lines)
+            subjects = [f"{_source_label(em['from'])}: {em['subject']}" for em in emails[:10]]
+            subj_text = "\n".join(subjects)
+            fallback_extract = await self.client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=800,
+                messages=[{"role": "user", "content": f"""These are newsletter subject lines from today ({today}).
+Extract every investable asset, company, or topic mentioned. Return JSON:
+{{"weekly_theme":"...","assets":[{{"name":"...","ticker":"...","type":"stock|crypto|etf|other","thesis":"...","sources":[],"sentiment":"bullish|bearish|neutral"}}]}}
+
+SUBJECTS:
+{subj_text}
+
+Return JSON only."""}],
             )
+            try:
+                raw2 = fallback_extract.content[0].text.strip().strip("` \n")
+                if raw2.startswith("json"):
+                    raw2 = raw2[4:].strip()
+                parsed2 = json.loads(raw2)
+                assets = parsed2.get("assets", [])
+                weekly_theme = parsed2.get("weekly_theme", weekly_theme)
+            except Exception:
+                pass
 
-        # 4. Sort by cross-newsletter conviction (most mentioned first), cap at 8
-        assets_sorted = sorted(assets, key=lambda a: len(a.get("sources", [])), reverse=True)
-        top_assets = assets_sorted[:8]
+        if not assets:
+            return "📭 Newsletters this week had no identifiable investment topics."
 
-        # 5. Enrich each with current web data
-        asset_analyses = []
-        for asset in top_assets:
+        # 5. Sort by conviction, cap at 8, enrich with dual web searches
+        top_assets = sorted(assets, key=lambda a: len(a.get("sources", [])), reverse=True)[:8]
+
+        async def _enrich(asset: dict) -> dict:
             name = asset.get("name", "")
             ticker = asset.get("ticker", "")
-            query = f"{name} {ticker} price analysis outlook 2026".strip()
-            try:
-                results = await asyncio.to_thread(web_search, query, 4)
-                search_text = json.dumps(results, default=str)[:3000]
-            except Exception:
-                search_text = "Search unavailable."
-            asset_analyses.append({"asset": asset, "search": search_text})
-
-        # 6. Generate the formatted brief
-        analyses_block = ""
-        for item in asset_analyses:
-            a = item["asset"]
-            src_count = len(a.get("sources", []))
-            src_names = ", ".join(a.get("sources", []))
-            conviction = "🔥 HIGH" if src_count >= 3 else ("📌 MEDIUM" if src_count == 2 else "· LOW")
-            analyses_block += (
-                f"\n\nASSET: {a.get('name')} ({a.get('ticker', '')}) — {a.get('type', '')}\n"
-                f"CONVICTION: {conviction} — {src_count}/{total_sources} newsletters ({src_names})\n"
-                f"NEWSLETTER VIEW: {a.get('sentiment', '?').upper()} — {a.get('thesis', '')}\n"
-                f"MARKET DATA:\n{item['search']}"
+            kind = asset.get("type", "stock")
+            q_price = f"{name} {ticker} price today June 2026 trend".strip()
+            q_fund = (
+                f"{name} {ticker} on-chain metrics market cap TVL 2026".strip()
+                if kind == "crypto"
+                else f"{name} {ticker} revenue earnings growth 2026 valuation".strip()
             )
+            try:
+                r1, r2 = await asyncio.gather(
+                    asyncio.to_thread(web_search, q_price, 3),
+                    asyncio.to_thread(web_search, q_fund, 3),
+                )
+                # Extract only the content field from results — no URLs
+                def _extract_content(results):
+                    return " | ".join(
+                        r.get("content", r.get("error", ""))[:300]
+                        for r in results if isinstance(r, dict)
+                    )[:1500]
+                return {**asset, "price_data": _extract_content(r1), "fund_data": _extract_content(r2)}
+            except Exception:
+                return {**asset, "price_data": "", "fund_data": ""}
 
-        brief_prompt = f"""Today is {today}. Sharp investment analyst reviewing newsletter picks for Ansen and Jess. {total_sources} newsletter sources were read.
+        enriched = await asyncio.gather(*[_enrich(a) for a in top_assets])
 
-WEEKLY THEME: {weekly_theme}
+        # 6. Build analysis context — clean, no URLs, just facts
+        analysis_block = ""
+        for a in enriched:
+            src_count = len(a.get("sources", []))
+            src_names = ", ".join(a.get("sources", [])) or "newsletter subjects"
+            analysis_block += f"""
+---
+{a.get('name')} ({a.get('ticker', '')}) | {a.get('type', '')} | {src_count}/{total_sources} sources ({src_names})
+Newsletter view ({a.get('sentiment','?')}): {a.get('thesis','')}
+Price/momentum data: {a.get('price_data','n/a')}
+Fundamentals/on-chain: {a.get('fund_data','n/a')}"""
 
-ASSETS (sorted by cross-newsletter conviction — higher = more sources mentioned it):{analyses_block}
+        # 7. Generate the brief using TradingAgents 4-dimension framework
+        brief_prompt = f"""You are a financial analyst. Today is {today}. {total_sources} newsletter sources read.
 
-Write a concise Telegram HTML brief.
+MACRO THEME: {weekly_theme}
 
-STRUCTURE:
+ASSET RESEARCH DATA:
+{analysis_block}
 
-<b>📰 This week's narrative</b>
-Expand on the weekly theme in 2-3 lines. What's the macro/market story?
+Write a clean investment brief for Telegram. For EACH asset apply the TradingAgents framework — analyse all 4 dimensions, then give a signal:
 
-Then one block per asset — format exactly like this:
+FORMAT (Telegram HTML, no markdown, no URLs):
 
-<b>[conviction emoji] Asset Name (TICKER)</b>
-🟢 BUY / 🟡 HOLD / 🔴 SKIP — one-line reason combining newsletter view + current data
-• 📰 <i>X/{total_sources} newsletters</i> — what they said
-• 📊 Market now: current price action / sentiment
-• ⚠️ Risk: key downside
+<b>📊 This week's macro</b>
+2-3 lines on the dominant story this week.
 
-Conviction emojis: 🔥 = 3+ sources, 📌 = 2 sources, · = 1 source
+[then one block per asset:]
 
-Finish with:
+<b>[type emoji] Asset Name (TICKER) — 🟢 BUY / 🟡 HOLD / 🔴 SKIP</b>
+<i>[X/{total_sources} newsletters | HIGH/MEDIUM/LOW conviction]</i>
+📰 <b>Story:</b> what newsletters say, why it's being discussed
+📈 <b>Momentum:</b> current price action, recent trend (use actual numbers if available)
+🏗 <b>Fundamentals:</b> revenue/growth for stocks, on-chain metrics/TVL for crypto
+⚠️ <b>Risk:</b> the main bear case, one line
 
-<b>🔥 Highest conviction</b>
-Top 1-2 picks. Why these specifically.
+[blank line between assets]
 
-RULES: Telegram HTML only. <b>bold</b> not **bold**. Bullets •. Blank line between assets."""
+<b>🔥 Highest conviction this week</b>
+Top 1-2 picks with a clear reason.
+
+RULES:
+• Use <b></b> for bold — NEVER **asterisks**
+• Bullets are • not - or *
+• No URLs anywhere in the output
+• Be specific with numbers: "$63k not near highs" not "price has moved"
+• Stocks and crypto treated equally
+• Use emojis: 💰 stocks, ₿ Bitcoin, Ξ Ethereum, 🤖 AI, 🏦 finance"""
 
         brief_resp = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2000,
+            max_tokens=3000,
             messages=[{"role": "user", "content": brief_prompt}],
         )
         brief_text = _fix_md(brief_resp.content[0].text)
 
-        # 7. Save a condensed digest to shared brain for ongoing visibility
+        # 8. Save condensed signals to shared brain for longitudinal tracking
         try:
             signals = []
-            for item in asset_analyses[:5]:
-                a = item["asset"]
+            for a in enriched[:5]:
                 sent = a.get("sentiment", "?")
                 icon = "🟢" if sent == "bullish" else ("🔴" if sent == "bearish" else "🟡")
                 src = len(a.get("sources", []))
