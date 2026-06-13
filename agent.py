@@ -2099,9 +2099,35 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
             shared_summary = ""
 
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        img_block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
+
+        # Always extract all visible text from the image first.
+        # This gives the agent clean text to reason over rather than relying
+        # purely on visual understanding — critical for screenshots, newsletters, charts.
+        try:
+            ocr_resp = await self.client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1500,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        img_block,
+                        {"type": "text", "text": "Extract ALL visible text from this image verbatim. Include every word, number, label, price, ticker, headline, and caption you can see. Output plain text only — no commentary, no formatting."},
+                    ],
+                }],
+            )
+            extracted_text = ocr_resp.content[0].text.strip()
+        except Exception:
+            extracted_text = ""
+
+        # Build the user content: image + extracted text + caption context
+        instruction = caption if caption else "Analyse this image. Use the extracted text below to understand the content."
+        if extracted_text:
+            instruction += f"\n\n[TEXT EXTRACTED FROM IMAGE]\n{extracted_text}"
+
         user_content = [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-            {"type": "text", "text": caption if caption else "What's in this screenshot? Log it if it's wedding-related, act on it if it needs action."},
+            img_block,
+            {"type": "text", "text": instruction},
         ]
         result, payment = await asyncio.gather(
             self._run_loop(user_content, user_id, history, user_summary, shared_summary),
