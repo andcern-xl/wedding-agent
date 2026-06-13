@@ -1724,18 +1724,27 @@ FORMAT (Telegram HTML — no markdown):
 <b>📊 This week</b>
 2 sentences on the macro theme.
 
-[per asset — blank line between each:]
+[per asset — use this EXACT spacing, blank line between EVERY element:]
+
 <b>[emoji] Name (TICKER) — 🟢 BUY / 🟡 HOLD / 🔴 SKIP</b>
+
 <i>[newsletter signal in 5 words]</i>
+
 📰 <b>Thesis:</b> Why this, why now. Specific numbers. 2-3 sentences.
+
 📈 <b>Momentum:</b> Price level and trend. One line with numbers.
+
 🏗 <b>Fundamentals:</b> Key metric. One line.
+
 ⚠️ <b>Risk:</b> #1 downside. One line.
+
+[blank line here before next asset]
 
 <b>🔥 Best pick this week</b>
 One asset, one reason.
 
-RULES: <b>bold</b> only (no **), bullets •, no URLs, numbers required."""}],
+RULES: <b>bold</b> only (no **), bullets •, no URLs, numbers required.
+SPACING: blank line between every single element — signal, thesis, momentum, fundamentals, risk. Mobile readability is critical."""}],
         )
         brief_text = _fix_md(brief_resp.content[0].text)
         log.info("stocks_brief: brief generated successfully")
