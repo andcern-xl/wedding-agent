@@ -48,7 +48,7 @@ def allowed(update: Update) -> bool:
     return not ALLOWED_IDS or update.effective_user.id in ALLOWED_IDS
 
 
-async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, text: str = None, photo_bytes: bytes = None, caption: str = None):
+async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, text: str = None, photo_bytes: bytes = None, caption: str = None, analysis: str = None):
     sender_name = update.effective_user.first_name or "Partner"
     partner_ids = [uid for uid in ALLOWED_IDS if uid != update.effective_user.id]
     for uid in partner_ids:
@@ -59,8 +59,18 @@ async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, tex
                     photo=io.BytesIO(photo_bytes),
                     caption=f"📨 {sender_name}: {caption}" if caption else f"📨 {sender_name} sent a photo",
                 )
+                if analysis:
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=f"<i>({sender_name}'s drop)</i> {analysis}",
+                        parse_mode="HTML",
+                    )
             elif text:
-                await context.bot.send_message(chat_id=uid, text=f"📨 {sender_name}: {text}")
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📨 <b>{sender_name}:</b> {escape(text)}\n\n<i>{analysis}</i>" if analysis else f"📨 {sender_name}: {escape(text)}",
+                    parse_mode="HTML",
+                )
         except Exception as e:
             logger.error(f"notify_partner failed for uid {uid}: {e}")
 
@@ -235,7 +245,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
             result = await agent.handle_image(image_bytes=bytes(photo_bytes), caption=caption, user_id=user_id, history=history)
             if result.get("notify_partner"):
-                await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption)
+                await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption, analysis=result.get("text"))
 
         else:
             text = update.message.text or ""
@@ -245,7 +255,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             result = await agent.handle_message(text=text, user_id=user_id, history=history)
 
             if result.get("notify_partner"):
-                await notify_partner(context, update, text=text)
+                await notify_partner(context, update, text=text, analysis=result.get("text"))
 
         conversations[chat_id] = result.get("history", history)
         await update.message.reply_text(result["text"], parse_mode="HTML")
