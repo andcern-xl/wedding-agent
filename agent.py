@@ -1841,81 +1841,89 @@ Return JSON only — no other text:
             name = asset.get("name", "")
             ticker = asset.get("ticker", "")
             kind = asset.get("type", "stock")
-            q_price = f"{name} {ticker} price today June 2026 trend".strip()
+            # Three searches: price action, fundamentals, and analyst/news opinion
+            q_price = f"{name} {ticker} price June 2026 all time high recent performance".strip()
             q_fund = (
-                f"{name} {ticker} on-chain metrics market cap TVL 2026".strip()
+                f"{name} {ticker} market cap TVL on-chain active users 2026".strip()
                 if kind == "crypto"
-                else f"{name} {ticker} revenue earnings growth 2026 valuation".strip()
+                else f"{name} {ticker} revenue valuation earnings IPO 2026".strip()
             )
+            q_news = f"{name} {ticker} investment thesis bull bear case analyst opinion 2026".strip()
             try:
-                r1, r2 = await asyncio.gather(
+                r1, r2, r3 = await asyncio.gather(
                     asyncio.to_thread(web_search, q_price, 3),
                     asyncio.to_thread(web_search, q_fund, 3),
+                    asyncio.to_thread(web_search, q_news, 3),
                 )
-                # Extract only the content field from results — no URLs
-                def _extract_content(results):
+                def _snip(results):
                     return " | ".join(
-                        r.get("content", r.get("error", ""))[:300]
-                        for r in results if isinstance(r, dict)
-                    )[:1500]
-                return {**asset, "price_data": _extract_content(r1), "fund_data": _extract_content(r2)}
+                        r.get("content", "")[:350]
+                        for r in results if isinstance(r, dict) and r.get("content")
+                    )[:2000]
+                return {**asset, "price_data": _snip(r1), "fund_data": _snip(r2), "news_data": _snip(r3)}
             except Exception:
-                return {**asset, "price_data": "", "fund_data": ""}
+                return {**asset, "price_data": "", "fund_data": "", "news_data": ""}
 
         enriched = await asyncio.gather(*[_enrich(a) for a in top_assets])
 
-        # 6. Build analysis context — clean, no URLs, just facts
+        # 6. Build analysis block — web research is the primary thesis source
         analysis_block = ""
         for a in enriched:
             src_count = len(a.get("sources", []))
             src_names = ", ".join(a.get("sources", [])) or "newsletter subjects"
+            newsletter_note = a.get("thesis", "")
             analysis_block += f"""
----
-{a.get('name')} ({a.get('ticker', '')}) | {a.get('type', '')} | {src_count}/{total_sources} sources ({src_names})
-Newsletter view ({a.get('sentiment','?')}): {a.get('thesis','')}
-Price/momentum data: {a.get('price_data','n/a')}
-Fundamentals/on-chain: {a.get('fund_data','n/a')}"""
+━━━
+{a.get('name')} ({a.get('ticker', '')}) | {a.get('type', '')}
+Newsletter signal ({a.get('sentiment','?')} via {src_names}): {newsletter_note}
+Price & momentum: {a.get('price_data') or 'no data'}
+Fundamentals: {a.get('fund_data') or 'no data'}
+Analyst & news: {a.get('news_data') or 'no data'}"""
 
-        # 7. Generate the brief using TradingAgents 4-dimension framework
-        brief_prompt = f"""You are a financial analyst. Today is {today}. {total_sources} newsletter sources read.
+        # 7. Generate the brief — web research drives the thesis, newsletter is the trigger
+        brief_prompt = f"""You are a sharp financial analyst writing for a retail investor. Today is {today}.
 
-MACRO THEME: {weekly_theme}
+MACRO THIS WEEK: {weekly_theme or "Mixed signals across risk assets"}
 
-ASSET RESEARCH DATA:
+RESEARCH DATA (web-sourced, 3 searches per asset):
 {analysis_block}
 
-Write a clean investment brief for Telegram. For EACH asset apply the TradingAgents framework — analyse all 4 dimensions, then give a signal:
+Write a punchy investment brief for Telegram. Be an actual analyst — give real opinions backed by the data above.
 
-FORMAT (Telegram HTML, no markdown, no URLs):
+For EACH asset:
+1. Read all the research data carefully
+2. Form a view — is the price action strong or weak? Are fundamentals healthy? What's the real risk?
+3. Give a clear BUY / HOLD / SKIP signal with conviction
 
-<b>📊 This week's macro</b>
-2-3 lines on the dominant story this week.
+OUTPUT FORMAT (Telegram HTML only — no markdown):
 
-[then one block per asset:]
+<b>📊 Macro this week</b>
+2 sentences. What's the dominant theme driving markets right now?
 
-<b>[type emoji] Asset Name (TICKER) — 🟢 BUY / 🟡 HOLD / 🔴 SKIP</b>
-<i>[X/{total_sources} newsletters | HIGH/MEDIUM/LOW conviction]</i>
-📰 <b>Story:</b> what newsletters say, why it's being discussed
-📈 <b>Momentum:</b> current price action, recent trend (use actual numbers if available)
-🏗 <b>Fundamentals:</b> revenue/growth for stocks, on-chain metrics/TVL for crypto
-⚠️ <b>Risk:</b> the main bear case, one line
+[one block per asset, blank line between each:]
 
-[blank line between assets]
+<b>[emoji] Name (TICKER) — 🟢 BUY / 🟡 HOLD / 🔴 SKIP</b>
+<i>Newsletter signal: [what the newsletter said in one phrase]</i>
 
-<b>🔥 Highest conviction this week</b>
-Top 1-2 picks with a clear reason.
+📰 <b>Thesis:</b> 2-3 sentences. What's the actual investment case? Why does this matter now? Use specific numbers, catalysts, comparables.
+📈 <b>Momentum:</b> One line. Price level, trend direction, whether it's near highs/lows. Specific numbers required.
+🏗 <b>Fundamentals:</b> One line. The most important metric — revenue growth, P/E, TVL, market cap vs peers.
+⚠️ <b>Risk:</b> One line. The #1 reason this could go wrong.
 
-RULES:
-• Use <b></b> for bold — NEVER **asterisks**
-• Bullets are • not - or *
-• No URLs anywhere in the output
-• Be specific with numbers: "$63k not near highs" not "price has moved"
-• Stocks and crypto treated equally
-• Use emojis: 💰 stocks, ₿ Bitcoin, Ξ Ethereum, 🤖 AI, 🏦 finance"""
+<b>🔥 Top pick this week</b>
+The single best risk/reward. One sentence on why this specifically.
+
+HARD RULES:
+• <b>bold</b> only — NEVER use ** or __
+• Bullets: • not - or *
+• No URLs
+• Numbers everywhere: "$2.3B revenue" not "strong revenue", "up 40% YTD" not "performed well"
+• If data is missing for an asset, say so honestly but still give a signal based on what you know
+• Crypto and stocks treated equally — no bias"""
 
         brief_resp = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=3000,
+            max_tokens=3500,
             messages=[{"role": "user", "content": brief_prompt}],
         )
         brief_text = _fix_md(brief_resp.content[0].text)
