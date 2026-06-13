@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 from html import escape as _html_escape
 from datetime import datetime, date, timezone, timedelta
 from anthropic import AsyncAnthropic
@@ -18,6 +19,17 @@ from tools.user_memory import get_summary, save_summary, get_message_count, get_
 from tools.gcal import get_events, create_event, delete_event
 from tools.search import web_search
 from tools.gmail import get_emails
+
+def _fix_md(text: str) -> str:
+    """Convert any stray markdown to Telegram HTML. Runs on all agent output."""
+    # **bold** → <b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    # __bold__ → <b>bold</b>
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text, flags=re.DOTALL)
+    # _italic_ → <i>italic</i>  (only single underscores)
+    text = re.sub(r'(?<!\w)_([^_\n]+?)_(?!\w)', r'<i>\1</i>', text)
+    return text
+
 
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
@@ -278,7 +290,7 @@ Use Telegram HTML formatting. <b> for headers only. No markdown."""
             messages=[{"role": "user", "content": prompt}],
         )
         header = f"{cat['emoji']} <b>{cat['name'].upper()}</b>"
-        return f"{header}\n\n{response.content[0].text}"
+        return f"{header}\n\n{_fix_md(response.content[0].text)}"
 
     async def bring_me_up_to_speed(self) -> str:
         all_drops = get_recent_drops(limit=100)
@@ -337,7 +349,7 @@ Use Telegram HTML formatting. <b> for headers only. No markdown."""
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        return _fix_md(response.content[0].text)
 
     async def priority_brief(self) -> str:
         all_drops = get_recent_drops(limit=150)
@@ -438,7 +450,7 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        return _fix_md(response.content[0].text)
 
 
 DAILY_SYSTEM_PROMPT = """You are a personal assistant managing tasks and reminders for a couple (Ansen and Jess). You handle their day-to-day tasks — both shared and personal.
@@ -670,7 +682,7 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        return _fix_md(response.content[0].text)
 
     async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Generate one combined daily brief for all users, sent to both.
@@ -787,7 +799,7 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text, merged
+        return _fix_md(response.content[0].text), merged
 
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         """End-of-day recap: what was done today, what's coming tomorrow."""
@@ -907,7 +919,7 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        return _fix_md(response.content[0].text)
 
 
 DAILY_KEYWORDS = {
@@ -1502,6 +1514,7 @@ class UnifiedAgent:
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "")
                 if not reply:
                     reply = "Got it."
+                reply = _fix_md(reply)
                 messages.append({"role": "assistant", "content": reply})
                 updated_history = self._strip_image_data(messages[-40:])
 
@@ -1654,7 +1667,7 @@ Telegram uses parse_mode=HTML. NEVER use **asterisks** — they show as literal 
             max_tokens=2000,
             messages=[{"role": "user", "content": brief_prompt}],
         )
-        return brief_resp.content[0].text
+        return _fix_md(brief_resp.content[0].text)
 
     async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
@@ -1874,7 +1887,9 @@ Things NOT worth flagging:
 - Things that are going fine
 - More than 3 bullets — if you have too much to say, pick the top 2-3
 
-If there IS something worth saying, write a short, casual, specific Telegram message to {user_name}. Max 4 bullets. Sound like a sharp friend, not a notification bot.
+If there IS something worth saying, write ONLY the Telegram message itself — no preamble, no "here are my top picks", no analysis. Just the message, starting immediately with the first line of content.
+
+Max 4 bullets. Sound like a sharp friend, not a notification bot.
 
 FORMATTING: Telegram uses parse_mode=HTML — **asterisks are NOT rendered, they show as literal * characters**. Use <b>bold</b> for any headers, • for bullets, and emojis freely (💍 🚨 📸 🏨 💰 📅). Never use ** or _ for formatting.
 
@@ -1889,7 +1904,7 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
             result = response.content[0].text.strip()
             if result.upper() == "NOTHING" or result.upper().startswith("NOTHING"):
                 return None
-            return result
+            return _fix_md(result)
         except Exception:
             return None
 
