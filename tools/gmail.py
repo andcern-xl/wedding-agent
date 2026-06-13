@@ -194,7 +194,7 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5) -> list[dic
     for msg in messages:
         detail = svc.messages().get(
             userId="me",
-            messageId=msg["id"],
+            id=msg["id"],
             format="full",
         ).execute()
 
