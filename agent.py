@@ -1589,94 +1589,88 @@ class UnifiedAgent:
                 return local.replace("daily", "").replace("newsletter", "").strip("-").title() or "Substack"
             return from_addr.split("@")[-1].split(".")[0].title()
 
-        # 1. Fetch emails — last 14 days
+        # 1. Fetch emails — last 14 days, cap at 7 (more = too slow)
         try:
-            emails = await asyncio.to_thread(get_emails, None, 20, 14)
+            emails = await asyncio.to_thread(get_emails, None, 7, 14)
         except Exception as e:
             return f"⚠️ Could not read newsletters: {_html_escape(str(e))}"
 
         if not emails:
             return "📭 No newsletter emails in the last 14 days."
 
-        # 1b. For image-heavy newsletters (Beehiiv/Milkroad), use Claude Vision
-        #     to read newsletter images when body text is thin.
-        async def _read_newsletter_images(image_urls: list[str]) -> str:
-            """Download up to 3 content images and extract text via Claude Vision."""
-            if not image_urls:
-                return ""
-            try:
-                import httpx
-                extracted_parts = []
-                async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                    for url in image_urls[:3]:
-                        try:
-                            resp = await client.get(url)
-                            if resp.status_code != 200:
-                                continue
-                            content_type = resp.headers.get("content-type", "image/jpeg")
-                            if not content_type.startswith("image/"):
-                                continue
-                            img_b64 = base64.standard_b64encode(resp.content).decode()
-                            vision_resp = await self.client.messages.create(
-                                model="claude-sonnet-4-6",
-                                max_tokens=600,
-                                messages=[{
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": img_b64}},
-                                        {"type": "text", "text": "This is a section of a financial newsletter. Extract ALL visible text, headlines, asset names, prices, and investment commentary. Output plain text only."},
-                                    ],
-                                }],
-                            )
-                            text = vision_resp.content[0].text.strip()
-                            if text:
-                                extracted_parts.append(text)
-                        except Exception:
-                            continue
-                return "\n\n".join(extracted_parts)
-            except Exception:
-                return ""
+        # 1b. Enrich each email: vision-read images + fetch one article link.
+        #     Hard time limit: 25s total for ALL emails combined — best-effort.
+        import httpx
+        from html import unescape as _unescape
 
-        async def _fetch_article_text(url: str, client) -> str:
-            """Fetch an article URL and extract its readable text."""
+        async def _fetch_article_text(url: str) -> str:
             try:
-                resp = await client.get(url, follow_redirects=True, timeout=10)
+                async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                    resp = await client.get(url)
                 if resp.status_code != 200:
                     return ""
                 html = resp.text
-                # Strip script/style/nav/footer blocks
                 html = re.sub(r"<(script|style|nav|footer|header)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
-                # Extract text
                 html = re.sub(r"<[^>]+>", " ", html)
-                from html import unescape as _unescape
                 html = _unescape(html)
-                lines = [l.strip() for l in html.splitlines() if l.strip() and len(l.strip()) > 30]
-                return "\n".join(lines[:120])[:5000]
+                lines = [l.strip() for l in html.splitlines() if l.strip() and len(l.strip()) > 40]
+                return "\n".join(lines[:80])[:3000]
             except Exception:
                 return ""
 
-        async def _noop() -> str:
-            return ""
+        async def _vision_read_image(url: str) -> str:
+            try:
+                async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                    resp = await client.get(url)
+                if resp.status_code != 200:
+                    return ""
+                ct = resp.headers.get("content-type", "image/jpeg")
+                if not ct.startswith("image/"):
+                    return ""
+                img_b64 = base64.standard_b64encode(resp.content).decode()
+                r = await self.client.messages.create(
+                    model="claude-haiku-4-5-20251001",  # haiku: faster + cheaper for OCR
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": ct, "data": img_b64}},
+                        {"type": "text", "text": "Extract all visible text from this newsletter image. Names, prices, tickers, headlines only. Plain text."},
+                    ]}],
+                )
+                return r.content[0].text.strip()
+            except Exception:
+                return ""
 
-        # Enrich each email: images via vision + article links via HTTP fetch
         async def _enrich_email_body(em: dict) -> dict:
-            import httpx
             body = em.get("body", "").strip()
             real_words = len([w for w in body.split() if not w.startswith("http")])
             additions = []
 
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                # Vision: read content images if body is thin
-                vision_coro = (
-                    _read_newsletter_images(em["image_urls"])
-                    if real_words < 300 and em.get("image_urls")
-                    else _noop()
-                )
-                # Article fetch: follow up to 3 article links
-                article_urls = em.get("article_urls", [])[:3]
-                article_coros = [_fetch_article_text(u, client) for u in article_urls]
+            tasks = []
+            # Vision: only 1 image, only when body is thin
+            if real_words < 200 and em.get("image_urls"):
+                tasks.append(_vision_read_image(em["image_urls"][0]))
+            # Article: only 1 link
+            if em.get("article_urls"):
+                tasks.append(_fetch_article_text(em["article_urls"][0]))
 
-                results = await asyncio.gather(vision_coro, *article_coros)
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, str) and r.strip():
+                        additions.append(r)
+
+            if additions:
+                return {**em, "body": body + "\n\n[EXTRACTED]\n" + "\n\n".join(additions)}
+            return em
+
+        try:
+            enriched_results = await asyncio.wait_for(
+                asyncio.gather(*[_enrich_email_body(em) for em in emails], return_exceptions=True),
+                timeout=25,
+            )
+            emails = [e for e in enriched_results if isinstance(e, dict)]
+        except asyncio.TimeoutError:
+            pass  # use emails as-is, enrichment timed out
 
             vision_text = results[0]
             article_texts = results[1:]
