@@ -220,6 +220,7 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: 
         body = _extract_body(detail["payload"])
         raw_html = _extract_raw_html(detail["payload"])
         image_urls = extract_content_image_urls(raw_html) if raw_html else []
+        article_urls = extract_article_urls(raw_html, sender) if raw_html else []
 
         emails.append({
             "id": msg["id"],
@@ -227,7 +228,8 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: 
             "from": sender,
             "date": date,
             "body": body[:30000],
-            "image_urls": image_urls,  # content images for vision fallback
+            "image_urls": image_urls,    # content images → vision extraction
+            "article_urls": article_urls,  # article links → fetch full text
         })
 
     return emails
@@ -241,37 +243,90 @@ _SKIP_IMG_PATTERNS = re.compile(
 )
 
 
+_NEWSLETTER_DOMAINS = {
+    "milkroad.com", "beehiiv.com",
+    "substack.com",
+    "tldrnewsletter.com",
+    "coinbase.com",
+    "weeklywizdom.com",
+}
+
+_SKIP_URL_PATTERNS = re.compile(
+    r"(unsubscribe|manage|preferences|optout|opt-out|"
+    r"twitter\.com|x\.com|linkedin\.com|facebook\.com|instagram\.com|"
+    r"apple\.com/app|play\.google\.com|"
+    r"forward|referral|refer-a-friend|sponsor|advertise)",
+    re.IGNORECASE,
+)
+
+
 def extract_content_image_urls(html: str) -> list[str]:
     """Return URLs of content images in a newsletter HTML email.
-
-    Filters out tracking pixels, logos, icons, and tiny images.
-    Only returns https URLs. Capped at 6 images.
+    Filters out tracking pixels, logos, icons, tiny images. Capped at 6.
     """
     urls = []
+    seen = set()
     for m in re.finditer(r"<img\b[^>]*>", html, re.IGNORECASE):
         tag = m.group(0)
-        # Extract src
         src_m = re.search(r'\bsrc=["\']([^"\']+)["\']', tag, re.IGNORECASE)
         if not src_m:
             continue
         src = src_m.group(1)
-        if not src.startswith("https://"):
+        if not src.startswith("https://") or src in seen:
             continue
-        # Skip data URIs, tracking pixels, obvious decorative images
         if _SKIP_IMG_PATTERNS.search(src):
             continue
-        # Skip known 1×1 tracking domains
         if re.search(r"(pixel|track|beacon|open)\.", src, re.IGNORECASE):
             continue
-        # Skip explicitly small images by width/height attributes
         w_m = re.search(r'\bwidth=["\']?(\d+)["\']?', tag, re.IGNORECASE)
         h_m = re.search(r'\bheight=["\']?(\d+)["\']?', tag, re.IGNORECASE)
         if w_m and int(w_m.group(1)) < 80:
             continue
         if h_m and int(h_m.group(1)) < 80:
             continue
+        seen.add(src)
         urls.append(src)
         if len(urls) >= 6:
+            break
+    return urls
+
+
+def extract_article_urls(html: str, from_addr: str) -> list[str]:
+    """Return article/post URLs linked from a newsletter email.
+
+    Only follows links to the sender's own domain (e.g. milkroad.com links
+    in a Milkroad email). Skips unsubscribe, social, tracking links.
+    Capped at 4 URLs.
+    """
+    # Determine sender domain
+    sender_domain = ""
+    for domain in _NEWSLETTER_DOMAINS:
+        if domain in from_addr.lower():
+            sender_domain = domain
+            break
+    if not sender_domain:
+        return []
+
+    urls = []
+    seen = set()
+    for m in re.finditer(r'<a\b[^>]*\bhref=["\']([^"\']+)["\']', html, re.IGNORECASE):
+        href = m.group(1)
+        if not href.startswith("https://"):
+            continue
+        if sender_domain not in href:
+            continue
+        if _SKIP_URL_PATTERNS.search(href):
+            continue
+        # Must look like an article path (has slug or /p/ or /issues/)
+        path = href.split("?")[0]
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 2:
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        urls.append(href)
+        if len(urls) >= 4:
             break
     return urls
 

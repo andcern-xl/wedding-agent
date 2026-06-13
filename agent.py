@@ -1637,19 +1637,61 @@ class UnifiedAgent:
             except Exception:
                 return ""
 
-        # Enrich image-heavy emails with vision-extracted text
+        async def _fetch_article_text(url: str, client) -> str:
+            """Fetch an article URL and extract its readable text."""
+            try:
+                resp = await client.get(url, follow_redirects=True, timeout=10)
+                if resp.status_code != 200:
+                    return ""
+                html = resp.text
+                # Strip script/style/nav/footer blocks
+                html = re.sub(r"<(script|style|nav|footer|header)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+                # Extract text
+                html = re.sub(r"<[^>]+>", " ", html)
+                from html import unescape as _unescape
+                html = _unescape(html)
+                lines = [l.strip() for l in html.splitlines() if l.strip() and len(l.strip()) > 30]
+                return "\n".join(lines[:120])[:5000]
+            except Exception:
+                return ""
+
+        async def _noop() -> str:
+            return ""
+
+        # Enrich each email: images via vision + article links via HTTP fetch
         async def _enrich_email_body(em: dict) -> dict:
+            import httpx
             body = em.get("body", "").strip()
             real_words = len([w for w in body.split() if not w.startswith("http")])
-            image_urls = em.get("image_urls", [])
-            # If body is thin and we have image URLs, supplement with vision
-            if real_words < 200 and image_urls:
-                vision_text = await _read_newsletter_images(image_urls)
-                if vision_text:
-                    return {**em, "body": body + "\n\n[VISION EXTRACTED]\n" + vision_text}
+            additions = []
+
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                # Vision: read content images if body is thin
+                vision_coro = (
+                    _read_newsletter_images(em["image_urls"])
+                    if real_words < 300 and em.get("image_urls")
+                    else _noop()
+                )
+                # Article fetch: follow up to 3 article links
+                article_urls = em.get("article_urls", [])[:3]
+                article_coros = [_fetch_article_text(u, client) for u in article_urls]
+
+                results = await asyncio.gather(vision_coro, *article_coros)
+
+            vision_text = results[0]
+            article_texts = results[1:]
+
+            if vision_text:
+                additions.append("[NEWSLETTER IMAGES — VISION READ]\n" + vision_text)
+            for i, text in enumerate(article_texts):
+                if text:
+                    additions.append(f"[ARTICLE {i+1} FULL TEXT]\n" + text)
+
+            if additions:
+                return {**em, "body": body + "\n\n" + "\n\n".join(additions)}
             return em
 
-        emails = await asyncio.gather(*[_enrich_email_body(em) for em in emails])
+        emails = list(await asyncio.gather(*[_enrich_email_body(em) for em in emails]))
 
         # 2. Build digest — subject lines + enriched body (vision text included where available)
         unique_sources: set = set()
