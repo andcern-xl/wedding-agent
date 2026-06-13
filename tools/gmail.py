@@ -2,6 +2,7 @@ import os
 import re
 import base64
 import logging
+from html import unescape as _html_unescape
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -223,7 +224,7 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: 
             "subject": subject,
             "from": sender,
             "date": date,
-            "body": body[:8000],  # cap per email
+            "body": body[:30000],  # full newsletter content
         })
 
     return emails
@@ -231,8 +232,41 @@ def get_emails(sender_hint: str | None = None, max_results: int = 5, days_back: 
 
 # ── Body extraction ────────────────────────────────────────────────────────────
 
+def _clean_html(raw: str) -> str:
+    """Convert HTML email body to clean readable text."""
+    # Remove entire script/style/head blocks
+    raw = re.sub(r"<(script|style|head)[^>]*>.*?</\1>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
+    # Remove img tags entirely
+    raw = re.sub(r"<img[^>]*>", " ", raw, flags=re.IGNORECASE)
+    # Keep hyperlink visible text, drop URL
+    raw = re.sub(r"<a\s[^>]*>(.*?)</a>", r" \1 ", raw, flags=re.DOTALL | re.IGNORECASE)
+    # Block-level tags → newlines
+    raw = re.sub(r"<(br|p|div|li|h[1-6]|tr|td|table|section|article)[^>]*>", "\n", raw, flags=re.IGNORECASE)
+    # Strip all remaining tags
+    raw = re.sub(r"<[^>]+>", "", raw)
+    # Decode HTML entities
+    raw = _html_unescape(raw)
+    # Clean lines
+    clean_lines = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r'^https?://\S+$', stripped):
+            continue
+        if re.match(r'^(view|read|open|unsubscribe|click here|update preferences|manage|copyright|all rights)', stripped, re.IGNORECASE):
+            continue
+        clean_lines.append(stripped)
+    result = "\n".join(clean_lines)
+    return re.sub(r"\n{3,}", "\n\n", result).strip()
+
+
 def _extract_body(payload: dict) -> str:
-    """Recursively extract plain text from a Gmail message payload."""
+    """Recursively extract the best readable text from a Gmail message payload.
+
+    For multipart/alternative (newsletters), prefers HTML over plain text
+    because the plain text version is usually just 'View in browser...'
+    """
     mime = payload.get("mimeType", "")
 
     if mime == "text/plain":
@@ -244,20 +278,36 @@ def _extract_body(payload: dict) -> str:
         data = payload.get("body", {}).get("data", "")
         if data:
             raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-            # Remove scripts, styles, and their content first
-            raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.DOTALL | re.IGNORECASE)
-            # Replace block-level tags with newlines to preserve structure
-            raw = re.sub(r"<(br|p|div|li|h[1-6]|tr)[^>]*>", "\n", raw, flags=re.IGNORECASE)
-            # Strip remaining tags
-            raw = re.sub(r"<[^>]+>", "", raw)
-            # Collapse whitespace but preserve line breaks
-            raw = re.sub(r"[ \t]+", " ", raw)
-            raw = re.sub(r"\n\s*\n+", "\n\n", raw)
-            return raw.strip()
+            return _clean_html(raw)
 
-    for part in payload.get("parts", []):
+    parts = payload.get("parts", [])
+    if not parts:
+        return ""
+
+    # For multipart/alternative, collect both plain and HTML, prefer whichever is richer
+    if mime == "multipart/alternative":
+        plain_text = ""
+        html_text = ""
+        for part in parts:
+            part_mime = part.get("mimeType", "")
+            if part_mime == "text/plain":
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    plain_text = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+            elif part_mime == "text/html":
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+                    html_text = _clean_html(raw)
+        # Prefer HTML if it's substantially richer than plain text
+        if len(html_text) > len(plain_text) * 1.5 or len(plain_text) < 200:
+            return html_text or plain_text
+        return plain_text or html_text
+
+    # For other multipart types, recurse and return the richest part
+    best = ""
+    for part in parts:
         text = _extract_body(part)
-        if text.strip():
-            return text
-
-    return ""
+        if len(text) > len(best):
+            best = text
+    return best

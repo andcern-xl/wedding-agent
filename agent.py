@@ -1605,7 +1605,7 @@ class UnifiedAgent:
         for em in emails:
             label = _source_label(em["from"])
             unique_sources.add(label)
-            snippet = em["body"][:3000].strip()
+            snippet = em["body"][:6000].strip()
             digest_parts.append(
                 f"=== SOURCE: {label} ===\n"
                 f"DATE: {em['date']}\nSUBJECT: {em['subject']}\n\n{snippet}"
@@ -1617,7 +1617,7 @@ class UnifiedAgent:
         extraction_prompt = f"""You are reading finance and crypto newsletters. Today is {today} ({tz_name}).
 
 NEWSLETTERS (each marked with === SOURCE: Name ===):
-{digest[:20000]}
+{digest[:40000]}
 
 Tasks:
 1. Write a 1-2 sentence "weekly_theme" synthesising the dominant investment narrative across all newsletters.
@@ -1657,16 +1657,17 @@ Return JSON only — no other text:
             weekly_theme = ""
 
         if not assets:
-            # Debug: show what was actually read so we can diagnose
-            email_summary = "\n".join(
-                f"• {_source_label(em['from'])} — {em['date'][:16]} — {em['subject'][:60]}\n"
-                f"  Body preview: {em['body'][:200].strip()[:150]}"
-                for em in emails[:5]
-            )
+            email_lines = []
+            for em in emails[:6]:
+                label = _source_label(em["from"])
+                preview = em["body"][:300].strip().replace("\n", " ")[:200]
+                email_lines.append(
+                    f"• <b>{_html_escape(label)}</b> — {_html_escape(em['subject'][:50])}\n"
+                    f"  <i>{_html_escape(preview)}</i>"
+                )
             return (
-                f"📰 Read {len(emails)} newsletter(s) but found no investment ideas.\n\n"
-                f"<b>What was fetched:</b>\n{_html_escape(email_summary)}\n\n"
-                f"<i>If the body previews look like garbled HTML or are empty, the email format needs adjustment.</i>"
+                f"📰 <b>Read {len(emails)} newsletter(s) — no investment ideas extracted</b>\n\n"
+                + "\n\n".join(email_lines)
             )
 
         # 4. Sort by cross-newsletter conviction (most mentioned first), cap at 8
