@@ -105,6 +105,7 @@ def _shared_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("📨 FYIs", callback_data="shared_fyis")],
         [InlineKeyboardButton("✅ Tasks", callback_data="shared_tasks"),
          InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
+        [InlineKeyboardButton("💰 Budget", callback_data="shared_budget")],
     ])
 
 
@@ -626,6 +627,48 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "budget":
+        try:
+            from tools.shared_budget import summary as shared_budget_summary
+            from tools.baby_budget import summary as baby_budget_summary
+            data = shared_budget_summary()
+            baby = baby_budget_summary()
+
+            STATUS_EMOJI = {"owing": "🔴", "paid": "✅", "pending": "⏳", "quoted": "💬"}
+            CAT_EMOJI = {"home": "🏠", "travel": "✈️", "food": "🍽️", "subscriptions": "📱",
+                         "transport": "🚗", "medical": "🏥", "other": "📦"}
+
+            lines = ["💰 <b>Shared Budget</b>\n"]
+
+            # Life / shared
+            lines.append(f"🏠 <b>Life & Shared</b>")
+            lines.append(f"Owing: <b>SGD {data['total_owing']:,.0f}</b>  •  Paid: <b>SGD {data['total_paid']:,.0f}</b>\n")
+            for cat, items in sorted(data["by_category"].items()):
+                emoji = CAT_EMOJI.get(cat, "📦")
+                lines.append(f"{emoji} <b>{cat.title()}</b>")
+                for i in items:
+                    status_icon = STATUS_EMOJI.get(i.get("status", "owing"), "•")
+                    amt = f" — SGD {i['amount']:,.0f}" if i.get("amount") else ""
+                    lines.append(f"{status_icon} {i['item']}{amt}")
+                lines.append("")
+
+            # Baby
+            lines.append(f"\n👶 <b>Baby</b>")
+            lines.append(f"Spent: <b>SGD {baby['total_spent']:,.0f}</b>  •  Planned: <b>SGD {baby['total_planned']:,.0f}</b>")
+
+            total_owing = data["total_owing"] + baby["total_planned"]
+            total_paid = data["total_paid"] + baby["total_spent"]
+            lines.append(f"\n📊 <b>Total picture</b>")
+            lines.append(f"Outstanding: <b>SGD {total_owing:,.0f}</b>")
+            lines.append(f"Settled: <b>SGD {total_paid:,.0f}</b>")
+
+            text = "\n".join(lines)
+            sections = _split_sections(text)
+            for section in sections:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def _handle_wedding_callback(query, context, action: str, user_id: int):

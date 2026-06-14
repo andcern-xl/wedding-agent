@@ -22,6 +22,7 @@ from tools.gmail import get_emails
 from tools.baby import pregnancy_summary, upcoming_milestones
 from tools.baby_knowledge import save_entry as save_baby_entry, get_entries as get_baby_entries, search_entries as search_baby_entries
 from tools.baby_budget import add_item as add_baby_budget_item, summary as baby_budget_summary
+from tools.shared_budget import add_item as add_shared_budget_item, summary as shared_budget_summary
 
 _TELEGRAM_ALLOWED_TAGS = re.compile(
     r'<(?!/?(b|i|u|s|code|pre|a)(?:\s[^>]*)?>)',
@@ -1093,12 +1094,18 @@ CONTENT CLASSIFICATION — DO THIS BEFORE FILING ANYTHING
 When someone drops a note, link, screenshot, or update, scan it for domain signals before choosing a tool:
 
 🔑 Strong signals → file confidently without asking:
-• pregnancy / birth / trimester / scan / OB / midwife / epidural / breastfeeding / newborn / postpartum / motherhood / parenting / baby sleep / formula / pram / nursery → save_baby_knowledge
-• venue / caterer / florist / photographer / wedding dress / guest list / RSVP / seating plan / honeymoon → log_wedding_drop
-• price / cost / SGD / invoice / deposit / bought / ordered / subscription → log_baby_expense (if baby-related) or log_fyi with category="finance"
-• travel / flight / hotel / itinerary / airport / booking ref → log_fyi with category="travel"
+• pregnancy / birth / trimester / scan / OB / midwife / epidural / breastfeeding / newborn / postpartum / motherhood / parenting / baby sleep / formula / pram / nursery → save_baby_knowledge (knowledge) or log_baby_expense (if a purchase/cost)
+• venue / caterer / florist / photographer / wedding dress / guest list / RSVP / seating plan / honeymoon → log_wedding_drop; if it's a cost/payment → also log via wedding_payments tool
+• travel / flight / hotel / itinerary / airport / booking ref → log_fyi with category="travel"; if it's a cost → log_shared_expense with category="travel"
 • restaurant / food / café / reservation / dinner → log_fyi with category="social" or "food"
-• home / lease / renovation / moving / landlord → log_fyi with category="home"
+• home / lease / renovation / moving / landlord / cleaning → log_fyi with category="home"; if it's a cost → log_shared_expense with category="home"
+
+BUDGET ROUTING — three buckets, mutually exclusive:
+• Wedding cost (venue, catering, photography, DJ, flowers, attire, transport for guests, honeymoon) → wedding budget via existing wedding_payments
+• Baby cost (pram, car seat, crib, scans, hospital package, vitamins, maternity clothes) → log_baby_expense
+• Everything else financial (rent, cleaning, Airbnb, subscriptions, utilities, car, dining, travel) → log_shared_expense
+
+When someone mentions money/costs: classify which bucket first, then log to the right one. Never put life expenses in wedding budget. Never put wedding costs in shared budget.
 
 ⚠️ Ambiguous signals → ask before filing:
 If content could fit more than one domain, or the signal is weak, ask:
@@ -1454,6 +1461,27 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "log_shared_expense",
+        "description": "Log a shared life expense — anything financial that is NOT wedding-specific or baby-specific. Examples: rent, cleaning, Airbnb accommodation, subscriptions, utilities, restaurant bills, home repairs, travel costs, car expenses.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "What the expense is (e.g. 'Instant Cleaning', 'Airbnb TML 3 rooms', 'Netflix subscription')"},
+                "amount": {"type": "number", "description": "Amount in SGD (or leave out if unknown)"},
+                "currency": {"type": "string", "description": "Currency code, default SGD"},
+                "category": {"type": "string", "description": "One of: home, travel, food, subscriptions, transport, medical, other"},
+                "status": {"type": "string", "enum": ["owing", "paid", "pending", "quoted"], "description": "owing = still to pay, paid = settled, pending = awaiting invoice, quoted = got a price"},
+                "notes": {"type": "string", "description": "Any extra context"},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "read_shared_budget",
+        "description": "Read the shared life budget — all logged non-wedding, non-baby expenses with totals by category.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "search_baby_knowledge",
         "description": "Search the baby knowledge base for saved tips, advice, and resources. Use when someone asks what they know about a pregnancy/baby topic, or asks a question that might be answered by something they've previously saved.",
         "input_schema": {
@@ -1663,6 +1691,20 @@ class UnifiedAgent:
 
         if name == "read_baby_budget":
             return baby_budget_summary()
+
+        if name == "log_shared_expense":
+            add_shared_budget_item(
+                item=inputs["item"],
+                amount=inputs.get("amount"),
+                category=inputs.get("category"),
+                status=inputs.get("status", "owing"),
+                currency=inputs.get("currency", "SGD"),
+                notes=inputs.get("notes"),
+            )
+            return {"status": "saved", "item": inputs["item"], "amount": inputs.get("amount")}
+
+        if name == "read_shared_budget":
+            return shared_budget_summary()
 
         if name == "search_baby_knowledge":
             results = search_baby_entries(inputs["query"])
@@ -2460,15 +2502,39 @@ If nothing new: output []"""
         return facts
 
     async def brain_synthesis(self) -> str:
-        """Synthesise shared brain + recent FYIs into a coherent couple knowledge base."""
+        """Synthesise shared brain + all budget buckets + recent FYIs into a unified knowledge base."""
         from tools.fyis import get_fyis as _get_fyis
+        from tools.baby_budget import summary as _baby_budget
         shared = get_shared_summary() or ""
         fyis = _get_fyis(limit=50)
 
         fyi_text = "\n".join(
             f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
             for f in fyis
-        ) if fyis else ""
+        ) if fyis else "None."
+
+        # Budget snapshot across all three buckets
+        try:
+            baby_b = _baby_budget()
+            baby_budget_lines = [f"Baby — Spent: SGD {baby_b['total_spent']:,.0f} | Planned: SGD {baby_b['total_planned']:,.0f}"]
+            for cat, items in baby_b.get("by_category", {}).items():
+                for i in items:
+                    amt = f" SGD {i['amount']:,.0f}" if i.get("amount") else ""
+                    baby_budget_lines.append(f"  • [{i.get('status','?')}] {i['item']}{amt}")
+            baby_budget_text = "\n".join(baby_budget_lines)
+        except Exception:
+            baby_budget_text = "Baby budget: unavailable."
+
+        try:
+            shared_b = shared_budget_summary()
+            shared_budget_lines = [f"Life — Owing: SGD {shared_b['total_owing']:,.0f} | Paid: SGD {shared_b['total_paid']:,.0f}"]
+            for cat, items in shared_b.get("by_category", {}).items():
+                for i in items:
+                    amt = f" SGD {i['amount']:,.0f}" if i.get("amount") else ""
+                    shared_budget_lines.append(f"  • [{i.get('status','?')}] {i['item']}{amt}")
+            shared_budget_text = "\n".join(shared_budget_lines)
+        except Exception:
+            shared_budget_text = "Life budget: unavailable."
 
         if not shared.strip() and not fyis:
             return (
@@ -2478,22 +2544,30 @@ If nothing new: output []"""
 
         prompt = f"""You are building a shared knowledge base for Ansen and Jess — a couple planning a wedding and expecting their first baby.
 
-PERMANENT MEMORIES (confirmed decisions, standing facts):
+PERMANENT MEMORIES:
 {shared or "Nothing yet."}
 
-RECENT NOTES (last 30 days of FYIs):
-{fyi_text or "None."}
+RECENT FYIs (last 30 days):
+{fyi_text}
 
-Synthesise everything into a clear, organised knowledge base about this couple. Group by theme — only include themes that actually have content:
+BABY BUDGET:
+{baby_budget_text}
+
+LIFE / SHARED BUDGET:
+{shared_budget_text}
+
+Synthesise everything into a clear, organised knowledge base. Group by theme — only include themes that have content:
 🧑‍🤝‍🧑 About Us, 💒 Wedding, 👶 Baby, 🏠 Home & Life, ✈️ Travel & Plans, 💰 Money & Finance, 🍽️ Food & Preferences, 🐾 Pets, 💼 Work
 
-For each theme, write 2-5 concise bullets of what you know. Write as facts, not as quotes from notes. Make it feel like a living document about this couple — not a list of raw messages.
+For 💰 Money & Finance: give a holistic picture across wedding, baby, and life budgets — total outstanding, what's paid, what's coming. Make it feel like a family finance snapshot.
 
-Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between sections. Emoji section headers. No asterisks."""
+For each other theme, write 2-5 concise bullets of facts. Make it feel like a living document about this couple — not a list of raw messages.
+
+Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between sections. Emoji headers. No asterisks."""
 
         resp = await self.client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1800,
+            max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.content[0].text.strip()
