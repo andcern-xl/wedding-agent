@@ -81,28 +81,57 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [
         "👋 Two brains, one bot.\n",
-        "💒 WEDDING BRAIN",
-        "Drop notes, screenshots, quotes — anything wedding related. I'll sort it, track it, and keep you both across it.\n",
-        "Wedding category shortcuts:",
+        "/wedding — planning, tasks, reminders, categories",
+        "/baby — pregnancy updates, milestones, knowledge base",
+        "/stocks — newsletter digest + buy/hold/skip\n",
+        "Or just talk — drop a note, screenshot, or question.",
     ]
-    for key, cat in CATEGORIES.items():
-        lines.append(f"  {cat['emoji']} /{key}")
-    lines.append("\n/bringmeuptospeed — full wedding overview")
-    lines.append("/plan — wedding priorities this week\n")
-    lines.append("🗓 DAILY BRAIN")
-    lines.append("Reminders and tasks for everyday life — personal or shared.")
-    lines.append("  • \"remind me to call the dentist Friday\" → private")
-    lines.append("  • \"remind us to confirm the caterer Monday\" → shared")
-    lines.append("  • \"add a category for Mochi 🐶\" → custom category\n")
-    lines.append("/tasks — your daily brief")
-    lines.append("/reminders — to-dos for both of you")
-    lines.append("/fyis — recent shared FYIs")
-    lines.append("/shared — shared brain (confirmed decisions)")
-    lines.append("/stocks — newsletter digest + buy/hold/skip analysis")
-    lines.append("/baby — weekly pregnancy update + upcoming milestones")
-    lines.append("/babyknowledge — browse or search the baby knowledge base")
-    lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
+
+
+def _wedding_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Catch Up", callback_data="wedding_bringmeuptospeed"),
+         InlineKeyboardButton("📅 Plan", callback_data="wedding_plan")],
+        [InlineKeyboardButton("✅ Tasks", callback_data="wedding_tasks"),
+         InlineKeyboardButton("⏰ Reminders", callback_data="wedding_reminders")],
+        [InlineKeyboardButton("🧠 Shared", callback_data="wedding_shared"),
+         InlineKeyboardButton("📨 FYIs", callback_data="wedding_fyis")],
+        [InlineKeyboardButton("📂 Categories", callback_data="wedding_categories")],
+    ])
+
+
+def _category_menu() -> InlineKeyboardMarkup:
+    cats = list(CATEGORIES.items())
+    rows = []
+    for i in range(0, len(cats), 3):
+        row = [
+            InlineKeyboardButton(
+                f"{v['emoji']} {v['name'].split(' &')[0].split('—')[0].strip()}",
+                callback_data=f"wedding_cat_{k}",
+            )
+            for k, v in cats[i:i+3]
+        ]
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+def _baby_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Weekly Brief", callback_data="baby_brief"),
+         InlineKeyboardButton("📚 Knowledge", callback_data="baby_knowledge")],
+        [InlineKeyboardButton("📅 Milestones", callback_data="baby_milestones")],
+    ])
+
+
+async def cmd_wedding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    await update.message.reply_text(
+        "💒 <b>Wedding</b>",
+        parse_mode="HTML",
+        reply_markup=_wedding_menu(),
+    )
 
 
 _JUNK_PREFIXES = ("fyi", "• fyi", "ansen deposited", "jess deposited", "ansen paid", "jess paid")
@@ -355,20 +384,11 @@ async def cmd_babyknowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_baby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
-    msg = await update.message.reply_text("👶 Checking in on the little one...")
-    try:
-        brief = await agent.baby_brief()
-        sections = _split_sections(brief)
-        await _safe_send(msg, sections[0])
-        for section in sections[1:]:
-            try:
-                await update.message.reply_text(section, parse_mode="HTML")
-            except Exception:
-                import re as _re
-                await update.message.reply_text(_re.sub(r"<[^>]+>", "", section))
-    except Exception as e:
-        logger.exception("cmd_baby failed")
-        await msg.edit_text(f"⚠️ {escape(str(e)[:200])}", parse_mode="HTML")
+    await update.message.reply_text(
+        "👶 <b>Baby</b>",
+        parse_mode="HTML",
+        reply_markup=_baby_menu(),
+    )
 
 
 async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
@@ -510,6 +530,144 @@ async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+async def _handle_wedding_callback(query, context, action: str, user_id: int):
+    chat_id = query.message.chat_id
+
+    if action == "categories":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📂 <b>Categories</b>",
+            parse_mode="HTML",
+            reply_markup=_category_menu(),
+        )
+        return
+
+    if action.startswith("cat_"):
+        cat_key = action[4:]
+        if cat_key not in CATEGORIES:
+            return
+        msg = await context.bot.send_message(chat_id=chat_id, text="Checking...")
+        try:
+            status = await agent.category_status(cat_key)
+            sections = _split_sections(status)
+            await msg.edit_text(sections[0], parse_mode="HTML")
+            for section in sections[1:]:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            logger.exception("category_status callback failed")
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        return
+
+    if action == "bringmeuptospeed":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Pulling everything together...")
+        try:
+            summary = await agent.bring_me_up_to_speed()
+            sections = _split_sections(summary)
+            await msg.edit_text(sections[0], parse_mode="HTML")
+            for section in sections[1:]:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "plan":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Analysing where things stand...")
+        try:
+            brief = await agent.priority_brief()
+            sections = _split_sections(brief)
+            await msg.edit_text(sections[0], parse_mode="HTML")
+            for section in sections[1:]:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "tasks":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Checking your tasks...")
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks, user_id)
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "reminders":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Pulling reminders...")
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks, user_id)
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "shared":
+        try:
+            summary = get_shared_summary()
+            if not summary.strip():
+                await context.bot.send_message(chat_id=chat_id, text="Nothing in the shared brain yet.")
+                return
+            text = "<b>🧠 Shared Brain</b>\n\n" + summary
+            sections = _split_sections(text)
+            for section in sections:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "fyis":
+        try:
+            fyis = get_fyis(limit=20)
+            if not fyis:
+                await context.bot.send_message(chat_id=chat_id, text="No FYIs yet.")
+                return
+            lines = ["<b>📨 Recent FYIs</b>\n"]
+            for f in fyis:
+                when = (f.get("created_at") or "")[:10]
+                cat = f.get("category")
+                cat_tag = f" [{cat}]" if cat else ""
+                lines.append(f"• <i>{when}</i>{cat_tag} — {f['content']}")
+            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def _handle_baby_callback(query, context, action: str):
+    import re as _re
+    chat_id = query.message.chat_id
+
+    if action == "brief":
+        msg = await context.bot.send_message(chat_id=chat_id, text="👶 Checking in on the little one...")
+        try:
+            brief = await agent.baby_brief()
+            sections = _split_sections(brief)
+            await _safe_send(msg, sections[0])
+            for section in sections[1:]:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+                except Exception:
+                    await context.bot.send_message(chat_id=chat_id, text=_re.sub(r"<[^>]+>", "", section))
+        except Exception as e:
+            await msg.edit_text(f"⚠️ {escape(str(e)[:200])}", parse_mode="HTML")
+
+    elif action == "knowledge":
+        msg = await context.bot.send_message(chat_id=chat_id, text="📚 Loading baby knowledge base...")
+        try:
+            text = await agent.baby_knowledge_brief("")
+            await _safe_send(msg, text)
+        except Exception as e:
+            await msg.edit_text(f"⚠️ {escape(str(e)[:200])}", parse_mode="HTML")
+
+    elif action == "milestones":
+        from tools.baby import upcoming_milestones, pregnancy_summary
+        summary = pregnancy_summary()
+        milestones = upcoming_milestones(within_weeks=8)
+        lines = [f"<b>📅 Milestones</b>", f"Week {summary['week']} • due {summary['due_date']}\n"]
+        if milestones:
+            lines += milestones
+        else:
+            lines.append("No milestones in the next 8 weeks.")
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data:
@@ -519,8 +677,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Not authorised.")
         return
 
-    action, _, payload = query.data.partition(":")
-    if action == "done":
+    data = query.data
+
+    if data.startswith("done:"):
+        payload = data[5:]
         try:
             success = complete_task(payload, user_id)
         except Exception:
@@ -529,20 +689,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not success:
             await query.answer("That's not your task to mark done.")
             return
-        # Instant feedback: answer the toast and drop the button immediately — no LLM call
         await query.answer("✅ Done!")
         try:
             current = query.message.reply_markup
             if current:
                 new_rows = [
                     row for row in current.inline_keyboard
-                    if not any(btn.callback_data == query.data for btn in row)
+                    if not any(btn.callback_data == data for btn in row)
                 ]
                 await query.edit_message_reply_markup(
                     reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None
                 )
         except Exception:
             logger.exception("handle_callback button removal failed")
+
+    elif data.startswith("wedding_"):
+        await query.answer()
+        await _handle_wedding_callback(query, context, data[8:], user_id)
+
+    elif data.startswith("baby_"):
+        await query.answer()
+        await _handle_baby_callback(query, context, data[5:])
+
     else:
         await query.answer()
 
@@ -624,23 +792,17 @@ def main():
 
     async def post_init(application: Application) -> None:
         commands = [
-            BotCommand("start", "Intro and help"),
-            BotCommand("commands", "Full command list"),
-            BotCommand("bringmeuptospeed", "Full wedding overview"),
-            BotCommand("plan", "Wedding priorities this week"),
-            BotCommand("tasks", "Daily brief for both"),
-            BotCommand("reminders", "To-dos split by person"),
-            BotCommand("fyis", "Recent shared FYIs"),
-            BotCommand("shared", "Shared brain — confirmed decisions"),
-            BotCommand("stocks", "📊 Newsletter digest + buy/hold/skip"),
+            BotCommand("start", "Help & intro"),
+            BotCommand("wedding", "💒 Wedding planning"),
+            BotCommand("baby", "👶 Baby & pregnancy"),
+            BotCommand("stocks", "📊 Stocks & crypto brief"),
         ]
-        for key, cat in CATEGORIES.items():
-            commands.append(BotCommand(key, f"{cat['emoji']} {cat['name']} status"))
         await application.bot.set_my_commands(commands)
 
     app = Application.builder().token(token).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("wedding", cmd_wedding))
     app.add_handler(CommandHandler("commands", cmd_commands))
     app.add_handler(CommandHandler("bringmeuptospeed", cmd_bringmeuptospeed))
     app.add_handler(CommandHandler("plan", cmd_plan))

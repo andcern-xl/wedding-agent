@@ -55,7 +55,9 @@ HOW TO RESPOND
 - Be concise and practical
 - Reference specific things they've actually dropped — quotes, details, numbers
 - If a screenshot contains a quote, venue, menu, or price — extract and summarise it clearly
-- Use Telegram HTML formatting: <b>Section Title</b> for headers, • for bullet points, blank lines between sections
+- Use Telegram HTML formatting: <b>Section Title</b> for headers, • for bullet points
+- Start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 🎵 entertainment, 🍽️ catering, 💒 ceremony, 🌸 decor, ✅ confirmed, 🔍 in progress, etc.)
+- Put a blank line between each bullet — not just between sections. Dense walls of text are hard to read on mobile.
 - Never use asterisks, underscores, or markdown symbols — HTML tags only
 - Sound like a sharp friend helping them plan, not a robot"""
 
@@ -294,7 +296,10 @@ Key decisions not made yet for this area. One bullet per item using •
 <b>Next Step</b>
 One concrete thing to do next.
 
-Use Telegram HTML formatting. <b> for headers only. No markdown."""
+FORMATTING RULES — follow exactly:
+- Use Telegram HTML. <b> for headers only. No markdown, no **asterisks**.
+- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 party, ✅ confirmed booking, 🔍 still researching
+- Put a blank line between each bullet — not just between sections. This is essential for readability."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -354,7 +359,10 @@ Wedding categories with nothing dropped yet. One bullet per item using •
 <b>One Thing To Do Next</b>
 The single most useful next action right now.
 
-Use Telegram HTML formatting. <b> for headers only. No markdown."""
+FORMATTING RULES — follow exactly:
+- Use Telegram HTML. <b> for headers only. No markdown, no **asterisks**.
+- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, ✅ confirmed, 🔍 in progress, ❌ untouched
+- Put a blank line between each bullet — not just between sections. This is essential for readability in Telegram."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -455,7 +463,10 @@ Categories with no progress or that have gone quiet. Name the risk and the actio
 <b>Blockers & Open Questions</b>
 Key unresolved decisions that are holding up other planning. What needs to be decided before they can move forward elsewhere.
 
-Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram parse_mode=HTML renders them as literal characters."""
+FORMATTING RULES — follow exactly:
+- Use Telegram HTML. <b> for headers only. No markdown, no **asterisks**.
+- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, 🔥 urgent, ✅ going well
+- Put a blank line between each bullet — not just between sections. This is essential for readability in Telegram."""
 
         response = await self.client.messages.create(
             model="claude-sonnet-4-6",
@@ -1096,14 +1107,20 @@ FORMATTING — THIS IS CRITICAL
 Telegram uses parse_mode=HTML. **Asterisks and underscores are NOT rendered** — they show up as literal characters. You MUST use HTML tags.
 - Bold/headers: <b>text</b> ONLY — never **text**
 - Bullets: • (not - or *)
-- Sections: blank line between each section
-- Emojis: use freely and naturally — 💍 wedding topics, 💰 money/budget, 📸 photography, 🏨 venue, 🚨 overdue/urgent, ✅ done, 📅 calendar, 🎉 parties/social, 💪 tasks, 🔥 time-sensitive
+- Blank line between every bullet — not just between sections. Dense walls of text are unreadable on mobile.
+- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🥂 after-party, 🗓️ logistics, 🔥 urgent, ✅ confirmed, 🔍 in progress, ❌ untouched, 📅 calendar, 🎉 social/parties, 💪 task, 🚨 overdue
 - Example of correct formatting:
-  🚨 <b>Overdue</b>
-  • OpenTable writeup — due yesterday
 
-NOT this (wrong — asterisks show as raw text):
-  **Overdue task** — OpenTable writeup"""
+  🚨 <b>Overdue</b>
+
+  • 🏨 Venue — deposit due yesterday
+
+  • 📸 Photographer — contract still unsigned
+
+NOT this (wrong — dense, no emojis per bullet, asterisks show as raw text):
+  **Overdue task**
+  • Venue — deposit due yesterday
+  • Photographer — contract still unsigned"""
 
 TOOLS = [
     {
