@@ -49,9 +49,10 @@ def allowed(update: Update) -> bool:
     return not ALLOWED_IDS or update.effective_user.id in ALLOWED_IDS
 
 
-async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, text: str = None, photo_bytes: bytes = None, caption: str = None, analysis: str = None):
+async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, text: str = None, photo_bytes: bytes = None, caption: str = None, analysis: str = None, is_fyi: bool = False):
+    sender_id = update.effective_user.id
     sender_name = update.effective_user.first_name or "Partner"
-    partner_ids = [uid for uid in ALLOWED_IDS if uid != update.effective_user.id]
+    partner_ids = [uid for uid in ALLOWED_IDS if uid != sender_id]
     for uid in partner_ids:
         try:
             if photo_bytes:
@@ -67,10 +68,18 @@ async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, tex
                         parse_mode="HTML",
                     )
             elif text:
+                msg_text = f"📨 <b>{sender_name}:</b> {escape(text)}\n\n<i>{analysis}</i>" if analysis else f"📨 <b>{sender_name}:</b> {escape(text)}"
+                keyboard = None
+                if is_fyi:
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Got it", callback_data=f"fyi_ack:{sender_id}:{uid}"),
+                        InlineKeyboardButton("📌 Save to my FYIs", callback_data=f"fyi_save:{sender_id}:{uid}"),
+                    ]])
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"📨 <b>{sender_name}:</b> {escape(text)}\n\n<i>{analysis}</i>" if analysis else f"📨 {sender_name}: {escape(text)}",
+                    text=msg_text,
                     parse_mode="HTML",
+                    reply_markup=keyboard,
                 )
         except Exception as e:
             logger.error(f"notify_partner failed for uid {uid}: {e}")
@@ -303,7 +312,12 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             result = await agent.handle_message(text=text, user_id=user_id, history=history)
 
             if result.get("notify_partner"):
-                await notify_partner(context, update, text=text, analysis=result.get("text"))
+                await notify_partner(
+                    context, update,
+                    text=text,
+                    analysis=result.get("text"),
+                    is_fyi=result.get("fyi", False),
+                )
 
         conversations[chat_id] = result.get("history", history)
         await update.message.reply_text(result["text"], parse_mode="HTML")
@@ -926,31 +940,81 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _handle_fyi_callback(query, context, data: str):
-    """Handle keep/promote/archive responses to FYI graduation prompts."""
+    """Handle FYI button responses — graduation (keep/promote/archive) and partner ack/save."""
     chat_id = query.message.chat_id
     if ":" not in data:
         return
-    action, fyi_id = data.split(":", 1)
+    parts = data.split(":", 2)
+    action = parts[0]
 
-    if action == "keep":
-        keep_fyi(fyi_id)
+    # --- Graduation actions (fyi_keep / fyi_promote / fyi_archive) ---
+    if action in ("keep", "promote", "archive"):
+        fyi_id = parts[1]
+        if action == "keep":
+            keep_fyi(fyi_id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(chat_id=chat_id, text="📌 Kept for another 30 days.")
+        elif action == "promote":
+            content = promote_fyi(fyi_id)
+            if content:
+                try:
+                    append_shared_summary(content)
+                except Exception:
+                    pass
+            await query.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(chat_id=chat_id, text="🧠 Promoted to Shared Brain.")
+        elif action == "archive":
+            archive_fyi(fyi_id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(chat_id=chat_id, text="🗑 Archived.")
+
+    # --- Partner ack / save ---
+    elif action in ("ack", "save") and len(parts) >= 3:
+        try:
+            sender_id = int(parts[1])
+            receiver_id = int(parts[2])
+        except ValueError:
+            return
+
+        _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
+        receiver_name = _USER_NAMES.get(receiver_id, "Your partner")
         await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(chat_id=chat_id, text="📌 Kept for another 30 days.")
 
-    elif action == "promote":
-        content = promote_fyi(fyi_id)
-        if content:
+        if action == "ack":
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="✅ Acknowledged.",
+            )
+            await context.bot.send_message(
+                chat_id=sender_id,
+                text=f"✅ <b>{receiver_name}</b> acknowledged your FYI.",
+                parse_mode="HTML",
+            )
+
+        elif action == "save":
+            # Extract original content from the notification message text
+            msg_text = query.message.text or ""
+            # Format is "📨 Name: [content]\n\n[analysis]" — take first block
+            content = msg_text.split("\n\n")[0]
+            # Strip the "📨 Name: " prefix
+            if ": " in content:
+                content = content.split(": ", 1)[1]
+
             try:
-                append_shared_summary(content)
+                from tools.fyis import log_fyi as _log_fyi
+                _log_fyi(receiver_id, content)
             except Exception:
                 pass
-        await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(chat_id=chat_id, text="🧠 Promoted to Shared Brain.")
 
-    elif action == "archive":
-        archive_fyi(fyi_id)
-        await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(chat_id=chat_id, text="🗑 Archived.")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="📌 Saved to your FYIs.",
+            )
+            await context.bot.send_message(
+                chat_id=sender_id,
+                text=f"📌 <b>{receiver_name}</b> saved your FYI to their list.",
+                parse_mode="HTML",
+            )
 
 
 async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
