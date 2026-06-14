@@ -20,6 +20,7 @@ from tools.gcal import get_events, create_event, delete_event
 from tools.search import web_search
 from tools.gmail import get_emails
 from tools.baby import pregnancy_summary, upcoming_milestones
+from tools.baby_knowledge import save_entry as save_baby_entry, get_entries as get_baby_entries, search_entries as search_baby_entries
 
 _TELEGRAM_ALLOWED_TAGS = re.compile(
     r'<(?!/?(b|i|u|s|code|pre|a)(?:\s[^>]*)?>)',
@@ -1032,6 +1033,14 @@ HOW TO USE TOOLS
 - Vendor recommendations / price research / "find X in Y" / "what does X cost" / any question needing current market info → search_web first, then answer with real results
 - Couple-level decision or fact that both should always know ("we're going with X vendor", "we decided on Y", "Jess rescheduled the venue tour") → save_shared_context — this lives in both their prompts every message, not just queryable on demand
 
+BABY KNOWLEDGE BASE
+Any time someone shares something useful about pregnancy, birth, newborns, parenting, symptoms, feeding, sleep, hospital prep, or any advice (typed OR screenshot) → call save_baby_knowledge immediately. This includes:
+- Tips a friend shared ("my friend said epidurals work better if you ask early")
+- Things they read ("I read that iron supplements are better absorbed with vitamin C")
+- Observations ("my sister said the first 3 months are the hardest")
+- Any screenshot text that contains pregnancy/baby advice
+Tag appropriately. The knowledge base is for tacit knowledge they'll want to search later.
+
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
@@ -1313,6 +1322,29 @@ TOOLS = [
             "required": ["content"],
         },
     },
+    {
+        "name": "save_baby_knowledge",
+        "description": "Save a piece of baby/pregnancy knowledge to the knowledge base. Use this when someone shares a screenshot, tip, advice from a friend, article snippet, or any useful info about pregnancy, birth, feeding, newborns, or parenting. Summarise the key point clearly, add relevant tags. This is for tacit knowledge — things you'd want to look up later.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Clear 1-3 sentence summary of the key knowledge. What's the actual advice/insight?",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "2-5 tags from: nutrition, symptoms, nausea, sleep, birth, epidural, hospital, feeding, breastfeeding, mental-health, exercise, medications, scans, trimester-1, trimester-2, trimester-3, newborn, finances, friends-advice",
+                },
+                "raw_text": {
+                    "type": "string",
+                    "description": "The original text extracted from the screenshot or message, if available.",
+                },
+            },
+            "required": ["summary", "tags"],
+        },
+    },
 ]
 
 
@@ -1485,6 +1517,15 @@ class UnifiedAgent:
             content = inputs["content"].strip()
             append_shared_summary(content)
             return {"status": "saved", "content": content}
+
+        if name == "save_baby_knowledge":
+            entry = save_baby_entry(
+                summary=inputs["summary"],
+                tags=inputs.get("tags", []),
+                raw_text=inputs.get("raw_text", ""),
+                user_id=user_id,
+            )
+            return {"status": "saved", "id": entry.get("id"), "tags": inputs.get("tags", [])}
 
         return {"error": f"Unknown tool: {name}"}
 
@@ -2055,6 +2096,26 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
         return result
 
     # Command methods — delegate to existing agents
+    async def baby_knowledge_brief(self, query: str = "") -> str:
+        """Browse or search the baby knowledge base."""
+        entries = search_baby_entries(query) if query else get_baby_entries(limit=20)
+        if not entries:
+            msg = "No baby knowledge saved yet." if not query else f"Nothing found for <b>{_html_escape(query)}</b>."
+            return f"📚 {msg}\n\n<i>Send any tip, advice, or screenshot — I'll save it automatically.</i>"
+
+        lines = [f"<b>📚 Baby Knowledge Base</b>"]
+        if query:
+            lines.append(f"<i>Search: {_html_escape(query)}</i>")
+        lines.append("")
+        for e in entries:
+            tags = " ".join(f"#{t}" for t in (e.get("tags") or []))
+            date_str = (e.get("created_at") or "")[:10]
+            lines.append(f"• {_html_escape(e['summary'])}")
+            if tags:
+                lines.append(f"  <i>{tags} · {date_str}</i>")
+            lines.append("")
+        return "\n".join(lines)
+
     async def baby_brief(self) -> str:
         """Weekly pregnancy update — current week, what's developing, upcoming milestones."""
         info = pregnancy_summary()

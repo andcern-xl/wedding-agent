@@ -100,6 +100,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("/shared — shared brain (confirmed decisions)")
     lines.append("/stocks — newsletter digest + buy/hold/skip analysis")
     lines.append("/baby — weekly pregnancy update + upcoming milestones")
+    lines.append("/babyknowledge — browse or search the baby knowledge base")
     lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
 
@@ -336,6 +337,19 @@ async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=uid, text=_re.sub(r"<[^>]+>", "", section))
     except Exception:
         logger.exception("Error sending stocks brief")
+
+
+async def cmd_babyknowledge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    query = " ".join(context.args) if context.args else ""
+    msg = await update.message.reply_text("📚 Searching baby knowledge base..." if query else "📚 Loading baby knowledge base...")
+    try:
+        text = await agent.baby_knowledge_brief(query)
+        await _safe_send(msg, text)
+    except Exception as e:
+        logger.exception("cmd_babyknowledge failed")
+        await msg.edit_text(f"⚠️ {escape(str(e)[:200])}", parse_mode="HTML")
 
 
 async def cmd_baby(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -637,6 +651,7 @@ def main():
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
     app.add_handler(CommandHandler("stocks", cmd_stocks))
     app.add_handler(CommandHandler("baby", cmd_baby))
+    app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
