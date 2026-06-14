@@ -123,6 +123,7 @@ def _baby_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("📚 Knowledge", callback_data="baby_knowledge")],
         [InlineKeyboardButton("📅 Milestones", callback_data="baby_milestones"),
          InlineKeyboardButton("✅ Reminders", callback_data="baby_reminders")],
+        [InlineKeyboardButton("❓ Questions", callback_data="baby_questions")],
     ])
 
 
@@ -680,6 +681,16 @@ async def _handle_baby_callback(query, context, action: str):
         try:
             user_names = await _fetch_user_names(context)
             text, tasks = await agent.baby_reminders_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks, query.from_user.id)
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "questions":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Loading questions...")
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.baby_questions_brief(ALLOWED_IDS, user_names)
             keyboard = _reminders_keyboard(tasks, query.from_user.id)
             await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:

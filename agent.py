@@ -1060,6 +1060,11 @@ BABY TO-DOS
 Any action item related to pregnancy, birth prep, hospital, scans, appointments, or baby gear → add_daily_task with category="baby" and visibility="shared". Baby tasks are always shared — both need to know.
 Examples: "book viability scan", "research hospitals", "buy prenatal vitamins", "find a paediatrician"
 
+BABY QUESTIONS (for the doctor / OB / midwife)
+Any question they want to ask at an appointment → add_daily_task with category="baby_questions" and visibility="shared".
+Triggered by: "add to OB questions", "ask the doctor", "remind us to ask", "question for the midwife", or any question phrased as something to clarify at an appointment.
+Examples: "ask about iron levels", "check if we need the flu jab", "ask when to start kick counts"
+
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
@@ -2304,6 +2309,34 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             assigned_str = f" → {user_names.get(assigned, str(assigned))}" if assigned else ""
             items.append(f"• {t['task']}{due_str}{assigned_str}")
         return "<b>👶 Baby Reminders</b>\n\n" + "\n\n".join(items), tasks
+
+    async def baby_questions_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
+        """Questions to ask at appointments — tasks tagged category='baby_questions'."""
+        if user_names is None:
+            user_names = {uid: str(uid) for uid in user_ids}
+        seen: set = set()
+        tasks: list[dict] = []
+        for uid in user_ids:
+            try:
+                for t in get_tasks(uid, include_done=False):
+                    tid = t.get("id")
+                    if t.get("category") == "baby_questions" and tid not in seen:
+                        seen.add(tid)
+                        tasks.append(t)
+            except Exception:
+                pass
+
+        if not tasks:
+            return "No questions saved yet.\n\nAdd one by saying <i>\"add to OB questions: ask about iron levels\"</i>", []
+
+        items = []
+        for t in tasks:
+            q = (t.get("task") or "").strip()
+            if q.upper().startswith("TASK:"):
+                q = q[5:].strip()
+            items.append(f"• {q}")
+
+        return "<b>❓ Questions for the Doctor</b>\n\nTap ✅ once asked.\n\n" + "\n\n".join(items), tasks
 
     async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Two-column view: each person's private tasks + a shared section.
