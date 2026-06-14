@@ -540,21 +540,41 @@ async def cmd_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+_CAT_EMOJI = {
+    "health": "🏥", "finance": "💰", "personal": "🙋", "home": "🏠",
+    "social": "🎉", "travel": "✈️", "food": "🍽️", "baby": "👶",
+    "wedding": "💒", "work": "💼",
+}
+
+
+def _format_fyis(fyis: list) -> str:
+    grouped: dict = {}
+    for f in fyis:
+        cat = (f.get("category") or "other").lower()
+        grouped.setdefault(cat, []).append(f)
+    blocks = ["<b>📨 Recent FYIs</b>\n"]
+    for cat, items in grouped.items():
+        emoji = _CAT_EMOJI.get(cat, "📌")
+        blocks.append(f"\n{emoji} <b>{cat.title()}</b>")
+        for f in items:
+            when = (f.get("created_at") or "")[:10]
+            blocks.append(f"• <i>{when}</i> — {f['content']}")
+    return "\n".join(blocks)
+
+
 async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     try:
-        fyis = get_fyis(limit=20)
+        fyis = get_fyis(limit=30)
         if not fyis:
             await update.message.reply_text("No FYIs yet.")
             return
-        lines = ["<b>📨 Recent FYIs</b>\n"]
-        for f in fyis:
-            when = (f.get("created_at") or "")[:10]
-            cat = f.get("category")
-            cat_tag = f" [{cat}]" if cat else ""
-            lines.append(f"• <i>{when}</i>{cat_tag} — {f['content']}")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        text = _format_fyis(fyis)
+        sections = _split_sections(text)
+        await update.message.reply_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_fyis failed")
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -578,17 +598,14 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
 
     elif action == "fyis":
         try:
-            fyis = get_fyis(limit=20)
+            fyis = get_fyis(limit=30)
             if not fyis:
                 await context.bot.send_message(chat_id=chat_id, text="No FYIs yet.")
                 return
-            lines = ["<b>📨 Recent FYIs</b>\n"]
-            for f in fyis:
-                when = (f.get("created_at") or "")[:10]
-                cat = f.get("category")
-                cat_tag = f" [{cat}]" if cat else ""
-                lines.append(f"\n• <i>{when}</i>{cat_tag} — {f['content']}")
-            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+            text = _format_fyis(fyis)
+            sections = _split_sections(text)
+            for section in sections:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
