@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 from agent import UnifiedAgent
 from categories import CATEGORIES
 from tools.notifications import get_pending_notifications, mark_notification_sent
-from tools.user_memory import get_shared_summary
-from tools.fyis import get_fyis
+from tools.user_memory import get_shared_summary, append_shared_summary
+from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi
 from tools.daily import complete_task
 
 load_dotenv()
@@ -584,17 +584,15 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
     chat_id = query.message.chat_id
 
     if action == "brain":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Synthesising your knowledge base...")
         try:
-            summary = get_shared_summary()
-            if not summary.strip():
-                await context.bot.send_message(chat_id=chat_id, text="Nothing in the shared brain yet.")
-                return
-            text = "<b>🧠 Shared Brain</b>\n\n" + summary
+            text = await agent.brain_synthesis()
             sections = _split_sections(text)
-            for section in sections:
+            await msg.edit_text(sections[0], parse_mode="HTML")
+            for section in sections[1:]:
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
     elif action == "fyis":
         try:
@@ -794,6 +792,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await _handle_shared_callback(query, context, data[7:], user_id)
 
+    elif data.startswith("fyi_"):
+        await query.answer()
+        await _handle_fyi_callback(query, context, data[4:])
+
     else:
         await query.answer()
 
@@ -845,6 +847,67 @@ async def send_evening_brief(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
     except Exception:
         logger.exception("Error sending evening brief")
+
+
+async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
+    """Sunday check-in: surface FYIs nearing expiry for keep/promote/archive."""
+    if not ALLOWED_IDS:
+        return
+    try:
+        expiring = get_fyis_expiring(days_threshold=21, limit=10)
+        if not expiring:
+            return
+        for f in expiring:
+            when = (f.get("created_at") or "")[:10]
+            cat = f.get("category") or "misc"
+            fyi_id = f["id"]
+            text = (
+                f"🗂 <b>FYI check-in</b>\n\n"
+                f"<i>{when} · {cat}</i>\n\n"
+                f"{f['content']}\n\n"
+                f"<i>This note is 3 weeks old. Worth keeping?</i>"
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📌 Keep 30 more days", callback_data=f"fyi_keep:{fyi_id}")],
+                [
+                    InlineKeyboardButton("🧠 Promote to Brain", callback_data=f"fyi_promote:{fyi_id}"),
+                    InlineKeyboardButton("🗑 Archive", callback_data=f"fyi_archive:{fyi_id}"),
+                ],
+            ])
+            for uid in ALLOWED_IDS:
+                await context.bot.send_message(
+                    chat_id=uid, text=text, parse_mode="HTML", reply_markup=keyboard
+                )
+    except Exception:
+        logger.exception("send_fyi_graduation failed")
+
+
+async def _handle_fyi_callback(query, context, data: str):
+    """Handle keep/promote/archive responses to FYI graduation prompts."""
+    chat_id = query.message.chat_id
+    if ":" not in data:
+        return
+    action, fyi_id = data.split(":", 1)
+
+    if action == "keep":
+        keep_fyi(fyi_id)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(chat_id=chat_id, text="📌 Kept for another 30 days.")
+
+    elif action == "promote":
+        content = promote_fyi(fyi_id)
+        if content:
+            try:
+                append_shared_summary(content)
+            except Exception:
+                pass
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(chat_id=chat_id, text="🧠 Promoted to Shared Brain.")
+
+    elif action == "archive":
+        archive_fyi(fyi_id)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(chat_id=chat_id, text="🗑 Archived.")
 
 
 async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
@@ -920,6 +983,8 @@ def main():
         app.job_queue.run_daily(send_stocks_brief, time=STOCKS_TIME)
         # Baby weekly update — every Monday at 9am
         app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
+        # FYI graduation check — every Sunday at 9am (surface notes nearing 30-day expiry)
+        app.job_queue.run_daily(send_fyi_graduation, time=REMINDER_TIME, days=(6,))
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:

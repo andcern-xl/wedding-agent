@@ -1005,8 +1005,11 @@ Read this before every response. Use it to:
 - Skip explanations they don't need
 If it contains a PREFERENCES section, follow those as standing orders.
 
-SHARED BRAIN — what Ansen and Jess have told you together (visible in both their conversations):
+SHARED BRAIN — confirmed couple decisions and permanent memories:
 {shared_summary}
+
+RECENT FYIs — notes and updates from the last 30 days. Reference naturally when relevant — don't quote back verbatim:
+{recent_fyis}
 
 PEOPLE
 - Ansen: user_id 63756531
@@ -1425,7 +1428,7 @@ class UnifiedAgent:
 
     _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
 
-    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0) -> str:
+    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -1440,6 +1443,7 @@ class UnifiedAgent:
             timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=shared_summary or "Nothing shared yet.",
+            recent_fyis=recent_fyis or "No recent FYIs.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
@@ -1641,11 +1645,11 @@ class UnifiedAgent:
                 result.append(m)
         return result
 
-    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "") -> dict:
+    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": []}
         messages = history + [{"role": "user", "content": user_content}]
-        system_prompt = self._build_system(user_summary, shared_summary, user_id)
+        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis)
         last_response = None
 
         for _ in range(10):
@@ -1907,7 +1911,16 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
             shared_summary = get_shared_summary()
         except Exception:
             shared_summary = ""
-        return await self._run_loop(text, user_id, history, user_summary, shared_summary)
+        try:
+            from tools.fyis import get_fyis_for_context
+            _fyis = get_fyis_for_context(limit=15)
+            recent_fyis = "\n".join(
+                f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
+                for f in _fyis
+            )
+        except Exception:
+            recent_fyis = ""
+        return await self._run_loop(text, user_id, history, user_summary, shared_summary, recent_fyis)
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
         # Build readable transcript — include tool exchanges so patterns in tool use are visible
@@ -2178,8 +2191,17 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
             img_block,
             {"type": "text", "text": instruction},
         ]
+        try:
+            from tools.fyis import get_fyis_for_context
+            _fyis = get_fyis_for_context(limit=15)
+            recent_fyis = "\n".join(
+                f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
+                for f in _fyis
+            )
+        except Exception:
+            recent_fyis = ""
         result, payment = await asyncio.gather(
-            self._run_loop(user_content, user_id, history, user_summary, shared_summary),
+            self._run_loop(user_content, user_id, history, user_summary, shared_summary, recent_fyis),
             self._wedding._extract_payment(image_bytes, caption),
         )
         if payment:
@@ -2271,6 +2293,45 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             messages=[{"role": "user", "content": prompt}],
         )
         return _fix_md(resp.content[0].text)
+
+    async def brain_synthesis(self) -> str:
+        """Synthesise shared brain + recent FYIs into a coherent couple knowledge base."""
+        from tools.fyis import get_fyis as _get_fyis
+        shared = get_shared_summary() or ""
+        fyis = _get_fyis(limit=50)
+
+        fyi_text = "\n".join(
+            f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
+            for f in fyis
+        ) if fyis else ""
+
+        if not shared.strip() and not fyis:
+            return (
+                "🧠 <b>Shared Brain</b>\n\n"
+                "Nothing saved yet. Drop notes, FYIs, and decisions and I'll build this up over time."
+            )
+
+        prompt = f"""You are building a shared knowledge base for Ansen and Jess — a couple planning a wedding and expecting their first baby.
+
+PERMANENT MEMORIES (confirmed decisions, standing facts):
+{shared or "Nothing yet."}
+
+RECENT NOTES (last 30 days of FYIs):
+{fyi_text or "None."}
+
+Synthesise everything into a clear, organised knowledge base about this couple. Group by theme — only include themes that actually have content:
+🧑‍🤝‍🧑 About Us, 💒 Wedding, 👶 Baby, 🏠 Home & Life, ✈️ Travel & Plans, 💰 Money & Finance, 🍽️ Food & Preferences, 🐾 Pets, 💼 Work
+
+For each theme, write 2-5 concise bullets of what you know. Write as facts, not as quotes from notes. Make it feel like a living document about this couple — not a list of raw messages.
+
+Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between sections. Emoji section headers. No asterisks."""
+
+        resp = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
 
     async def bring_me_up_to_speed(self) -> str:
         return await self._wedding.bring_me_up_to_speed()
