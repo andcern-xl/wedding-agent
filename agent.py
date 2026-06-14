@@ -2061,43 +2061,33 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
         milestones = upcoming_milestones(within_weeks=4)
         milestones_text = "\n".join(milestones) if milestones else "No major milestones in the next 4 weeks."
 
-        prompt = f"""You are a knowledgeable pregnancy guide. Write a weekly update for a couple expecting their first baby.
+        prompt = f"""You are a practical pregnancy advisor. Write a concise weekly check-in for a first-time parent couple.
 
 PREGNANCY DATA:
-• Week {info['week']}, Day {info['day']} (of 40 weeks)
+• Week {info['week']}, Day {info['day']}
 • Trimester: {info['trimester']}
 • Due date: {info['due_date']} ({info['days_until_due']} days away)
-• LMP: {info['lmp']}
 
 UPCOMING MILESTONES (next 4 weeks):
 {milestones_text}
 
-Write a practical, useful weekly update. Focus on:
-1. What is happening with the baby physically this week (size, development)
-2. What Jess may be experiencing — symptoms, body changes, what's normal
-3. What they should actually DO this week (book scan, ask doctor about X, etc.)
-4. The upcoming milestones from the list above — explain what each involves and how to prepare
-
-Be warm but direct — no fluff. Real info a first-time parent needs.
+Focus ONLY on what's practical and actionable. Skip baby size comparisons and development descriptions entirely.
 
 FORMAT (Telegram HTML):
 
-<b>👶 Week {info['week']} — {info['trimester']} Trimester</b>
+<b>👶 Week {info['week']} · {info['trimester']} Trimester</b>
 <i>Due {info['due_date']} · {info['days_until_due']} days to go</i>
 
-<b>🫘 Baby this week</b>
-What's developing. Size comparison. One short paragraph.
+<b>🤰 What Jess may feel this week</b>
+Symptoms typical for this exact week. What's normal vs what needs a doctor call. Be specific — not "nausea is common" but "nausea usually peaks around week 8-9, should ease by week 12". Bullets •
 
-<b>🤰 What Jess may feel</b>
-Key symptoms this week. What's normal, what to flag to doctor. Bullets •
+<b>✅ Actions this week</b>
+Concrete things to do or book RIGHT NOW. e.g. "Book viability scan — call clinic, request week 7-8 slot". Bullets •
 
-<b>✅ This week's actions</b>
-Concrete things to do or book. Bullets •
+<b>📅 Upcoming milestones</b>
+For each milestone in the list: what it is, what it checks for, when to book it. Bullets •
 
-<b>📅 Coming up</b>
-The upcoming milestones — what each is, when to book it.
-
-RULES: <b>bold</b> only, bullets •, no URLs, no asterisks."""
+RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size comparisons."""
 
         resp = await self.client.messages.create(
             model="claude-sonnet-4-6",
