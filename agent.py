@@ -57,7 +57,8 @@ HOW TO RESPOND
 - If a screenshot contains a quote, venue, menu, or price — extract and summarise it clearly
 - Use Telegram HTML formatting: <b>Section Title</b> for headers, • for bullet points
 - Start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 🎵 entertainment, 🍽️ catering, 💒 ceremony, 🌸 decor, ✅ confirmed, 🔍 in progress, etc.)
-- Put a blank line between each bullet — not just between sections. Dense walls of text are hard to read on mobile.
+- Put a blank line between EVERY bullet — never stack bullets with no gap. Dense walls of text are unreadable on mobile.
+- Use emoji as section headers (e.g. 💰 Budget, 📅 This week, ✅ Done, 🔍 In progress) — not plain bold text alone
 - Never use asterisks, underscores, or markdown symbols — HTML tags only
 - Sound like a sharp friend helping them plan, not a robot"""
 
@@ -2241,7 +2242,6 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             raw = (t.get("task") or "").strip()
             if raw.upper().startswith("TASK:"):
                 raw = raw[5:].strip()
-            raw = raw[:90] + "…" if len(raw) > 90 else raw
             if show_date and t.get("due_date"):
                 try:
                     d = _dt.strptime(t["due_date"], "%Y-%m-%d")
@@ -2250,34 +2250,28 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
                     pass
             return raw
 
-        lines = [f"<b>👤 My Tasks{name_str}</b>"]
+        blocks = [f"<b>👤 My Tasks{name_str}</b>"]
         ordered = []
 
         if overdue:
-            lines.append("\n🔴 <b>Overdue</b>")
-            for t in sorted(overdue, key=lambda x: x.get("due_date") or ""):
-                lines.append(f"• {_fmt(t, show_date=True)}")
-                ordered.append(t)
+            items = sorted(overdue, key=lambda x: x.get("due_date") or "")
+            blocks.append("🔴 <b>Overdue</b>\n\n" + "\n\n".join(f"• {_fmt(t, show_date=True)}" for t in items))
+            ordered += items
 
         if today:
-            lines.append("\n📅 <b>Today</b>")
-            for t in today:
-                lines.append(f"• {_fmt(t)}")
-                ordered.append(t)
+            blocks.append("📅 <b>Today</b>\n\n" + "\n\n".join(f"• {_fmt(t)}" for t in today))
+            ordered += today
 
         if upcoming:
-            lines.append("\n📆 <b>Coming up</b>")
-            for t in sorted(upcoming, key=lambda x: x.get("due_date") or ""):
-                lines.append(f"• {_fmt(t, show_date=True)}")
-                ordered.append(t)
+            items = sorted(upcoming, key=lambda x: x.get("due_date") or "")
+            blocks.append("📆 <b>Coming up</b>\n\n" + "\n\n".join(f"• {_fmt(t, show_date=True)}" for t in items))
+            ordered += items
 
         if someday:
-            lines.append("\n• <b>No date</b>")
-            for t in someday:
-                lines.append(f"• {_fmt(t)}")
-                ordered.append(t)
+            blocks.append("🗒 <b>No date</b>\n\n" + "\n\n".join(f"• {_fmt(t)}" for t in someday))
+            ordered += someday
 
-        return "\n".join(lines), ordered
+        return "\n\n".join(blocks), ordered
 
     async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """All open tasks tagged category='baby', sorted by due date."""
@@ -2299,14 +2293,14 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             return "No baby reminders yet.\n\nAdd one by saying something like <i>\"remind us to book the viability scan\"</i>.", []
 
         tasks.sort(key=lambda x: x.get("due_date") or "9999")
-        lines = ["<b>👶 Baby Reminders</b>\n"]
+        items = []
         for t in tasks:
             due = t.get("due_date")
-            due_str = f" — <i>{due}</i>" if due else ""
+            due_str = f" <i>({due})</i>" if due else ""
             assigned = t.get("assigned_to")
             assigned_str = f" → {user_names.get(assigned, str(assigned))}" if assigned else ""
-            lines.append(f"• {t['task']}{due_str}{assigned_str}")
-        return "\n".join(lines), tasks
+            items.append(f"• {t['task']}{due_str}{assigned_str}")
+        return "<b>👶 Baby Reminders</b>\n\n" + "\n\n".join(items), tasks
 
     async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Two-column view: each person's private tasks + a shared section.
