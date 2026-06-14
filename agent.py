@@ -1401,6 +1401,17 @@ TOOLS = [
         "description": "Read the baby budget — all logged expenses and planned purchases with totals.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "search_baby_knowledge",
+        "description": "Search the baby knowledge base for saved tips, advice, and resources. Use when someone asks what they know about a pregnancy/baby topic, or asks a question that might be answered by something they've previously saved.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic or question to search for (e.g. 'epidurals', 'supplements', 'hospital')"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -1598,6 +1609,15 @@ class UnifiedAgent:
 
         if name == "read_baby_budget":
             return baby_budget_summary()
+
+        if name == "search_baby_knowledge":
+            results = search_baby_entries(inputs["query"])
+            if not results:
+                return {"found": 0, "entries": []}
+            return {
+                "found": len(results),
+                "entries": [{"summary": e["summary"], "tags": e.get("tags", [])} for e in results],
+            }
 
         return {"error": f"Unknown tool: {name}"}
 
@@ -2169,24 +2189,45 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
 
     # Command methods — delegate to existing agents
     async def baby_knowledge_brief(self, query: str = "") -> str:
-        """Browse or search the baby knowledge base."""
-        entries = search_baby_entries(query) if query else get_baby_entries(limit=20)
+        """Synthesise baby knowledge base — grouped by topic or answering a specific question."""
+        entries = search_baby_entries(query) if query else get_baby_entries(limit=50)
         if not entries:
-            msg = "No baby knowledge saved yet." if not query else f"Nothing found for <b>{_html_escape(query)}</b>."
+            msg = "No baby knowledge saved yet." if not query else f"Nothing saved matching <b>{_html_escape(query)}</b>."
             return f"📚 {msg}\n\n<i>Send any tip, advice, or screenshot — I'll save it automatically.</i>"
 
-        lines = [f"<b>📚 Baby Knowledge Base</b>"]
+        knowledge_text = "\n\n".join(
+            f"[{i+1}] {e['summary']}" + (f"\nTags: {', '.join(e.get('tags') or [])}" if e.get('tags') else "")
+            for i, e in enumerate(entries)
+        )
+
         if query:
-            lines.append(f"<i>Search: {_html_escape(query)}</i>")
-        lines.append("")
-        for e in entries:
-            tags = " ".join(f"#{t}" for t in (e.get("tags") or []))
-            date_str = (e.get("created_at") or "")[:10]
-            lines.append(f"• {_html_escape(e['summary'])}")
-            if tags:
-                lines.append(f"  <i>{tags} · {date_str}</i>")
-            lines.append("")
-        return "\n".join(lines)
+            prompt = f"""You are a pregnancy knowledge assistant. The couple has saved {len(entries)} pieces of knowledge.
+
+SAVED KNOWLEDGE:
+{knowledge_text}
+
+QUESTION: {query}
+
+Answer the question directly using what they've saved. Synthesise — don't just quote back the entries. If the saved knowledge doesn't fully answer the question, say so clearly.
+Write in a warm, practical tone. Use Telegram HTML: <b>headers</b>, bullet points with blank lines between each. Emoji headers encouraged."""
+        else:
+            prompt = f"""You are a pregnancy knowledge assistant. The couple has saved {len(entries)} pieces of knowledge across various topics.
+
+SAVED KNOWLEDGE:
+{knowledge_text}
+
+Synthesise this into a clear, organised summary. Group by topic (e.g. 🍎 Nutrition, 💊 Supplements, 🏥 Hospital & Birth, 😴 Sleep & Symptoms, 🤱 Feeding, 🧠 Mental Health, etc. — only include topics that have content).
+
+For each topic, write 2-4 sentences of coherent advice drawn from the entries — not a raw list of what was saved. Make it feel like a personal knowledge base they built together.
+
+Format: Telegram HTML only. <b>headers</b>. Blank line between every bullet. Emoji section headers."""
+
+        resp = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
 
     async def baby_brief(self) -> str:
         """Weekly pregnancy update — current week, what's developing, upcoming milestones."""
