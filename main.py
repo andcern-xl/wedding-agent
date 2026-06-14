@@ -196,24 +196,15 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [
         "<b>Commands</b>\n",
-        "<b>Info</b>",
-        "/start — intro",
-        "/commands — this list\n",
-        "<b>Wedding</b>",
+        "💒 /wedding — catch up, plan, tasks, reminders, shared, FYIs, categories",
+        "👶 /baby — weekly brief, knowledge base, milestones",
+        "📊 /stocks — newsletter digest + buy/hold/skip\n",
+        "<b>Shortcuts</b>",
         "/bringmeuptospeed — full wedding overview",
-        "/plan — priorities this week",
+        "/plan /tasks /reminders /shared /fyis",
     ]
     for key, cat in CATEGORIES.items():
-        lines.append(f"{cat['emoji']} /{key} — {cat['name'].lower()} status")
-    lines += [
-        "\n<b>Daily</b>",
-        "/tasks — daily brief for both of you",
-        "/reminders — to-do list split by person",
-        "/fyis — recent FYIs from both of you",
-        "/shared — what's in the shared brain\n",
-        "<b>Debug</b>",
-        "/testnotify — check partner notifications are working",
-    ]
+        lines.append(f"{cat['emoji']} /{key}")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
