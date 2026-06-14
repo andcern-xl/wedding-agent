@@ -479,6 +479,36 @@ FORMATTING RULES — follow exactly:
         return _fix_md(response.content[0].text)
 
 
+_PREFERENCE_VERBS = (
+    " likes ", " like ", " loves ", " prefers ", " prefer ",
+    " hates ", " hate ", " dislikes ", " dislike ",
+    " is allergic", " are allergic",
+    " enjoys ", " enjoy ", " wants ", " want ",
+)
+_JUNK_PREFIXES = (
+    "fyi", "ansen deposited", "jess deposited",
+    "ansen paid", "jess paid", "approved ",
+)
+_PREFERENCE_NAMES = ("jess ", "jessica ", "ansen ")
+
+
+def _is_junk_task(t: dict) -> bool:
+    """Return True if this daily_task entry is not a real actionable task."""
+    raw = (t.get("task") or "").strip().lower()
+    if raw.startswith("• ") or raw.startswith("- "):
+        raw = raw[2:]
+    if t.get("category") == "wedding":
+        return True
+    if any(raw.startswith(p) for p in _JUNK_PREFIXES):
+        return True
+    if len(raw) > 300:
+        return True
+    if any(raw.startswith(n) for n in _PREFERENCE_NAMES):
+        if any(verb in raw for verb in _PREFERENCE_VERBS):
+            return True
+    return False
+
+
 DAILY_SYSTEM_PROMPT = """You are a personal assistant managing tasks and reminders for a couple (Ansen and Jess). You handle their day-to-day tasks — both shared and personal.
 
 PRIVACY RULES
@@ -2494,6 +2524,8 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
             tid = t.get("id")
             if tid in seen:
                 continue
+            if _is_junk_task(t):
+                continue
             cat = t.get("category") or ""
             if cat in ("wedding", "baby"):
                 continue
@@ -2726,41 +2758,7 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
                         seen_personal.add(tid)
                         personal[owner].append(t)
 
-        _PREFERENCE_VERBS = (
-            " likes ", " like ", " loves ", " prefers ", " prefer ",
-            " hates ", " hate ", " dislikes ", " dislike ",
-            " is allergic", " are allergic",
-            " enjoys ", " enjoy ", " wants ", " want ",
-        )
-
-        def _is_junk(t: dict) -> bool:
-            """Filter out FYIs, wedding tasks, and non-tasks stored as daily tasks."""
-            raw = (t.get("task") or "").strip().lower()
-            # Strip leading bullet/dash prefix before checks
-            if raw.startswith("• ") or raw.startswith("- "):
-                raw = raw[2:]
-            if t.get("category") == "wedding":
-                return True
-            # Obvious junk prefixes
-            if (
-                raw.startswith("fyi")
-                or raw.startswith("ansen deposited")
-                or raw.startswith("jess deposited")
-                or raw.startswith("ansen paid")
-                or raw.startswith("jess paid")
-                or raw.startswith("approved ")
-            ):
-                return True
-            # Dump tasks — long lists masquerading as tasks (work docs, tool lists, etc.)
-            if len(raw) > 300:
-                return True
-            # Preference/fact statements masquerading as tasks
-            # e.g. "Jess likes kaya waffle", "Ansen prefers window seats"
-            names = ("jess ", "jessica ", "ansen ")
-            if any(raw.startswith(n) for n in names):
-                if any(verb in raw for verb in _PREFERENCE_VERBS):
-                    return True
-            return False
+        _is_junk = _is_junk_task
 
         def _sort(tasks: list[dict]) -> list[dict]:
             urgency = {"overdue": 0, "today": 1, "upcoming": 2, "none": 3}
