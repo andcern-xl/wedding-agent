@@ -83,7 +83,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Two brains, one bot.\n",
         "/wedding — planning, tasks, reminders, categories",
         "/baby — pregnancy updates, milestones, knowledge base",
-        "/stocks — newsletter digest + buy/hold/skip\n",
+        "/stocks — newsletter digest + buy/hold/skip",
+        "/me — your personal tasks\n",
         "Or just talk — drop a note, screenshot, or question.",
     ]
     await update.message.reply_text("\n".join(lines))
@@ -381,6 +382,21 @@ async def cmd_baby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=_baby_menu(),
     )
+
+
+async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or ""
+    msg = await update.message.reply_text("Loading your tasks...")
+    try:
+        text, tasks = await agent.personal_brief(user_id, user_name)
+        keyboard = _reminders_keyboard(tasks, user_id)
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.exception("cmd_me failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
@@ -798,6 +814,7 @@ def main():
             BotCommand("wedding", "💒 Wedding planning"),
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
+            BotCommand("me", "👤 My personal tasks"),
         ]
         await application.bot.set_my_commands(commands)
 
@@ -805,6 +822,7 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("wedding", cmd_wedding))
+    app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("commands", cmd_commands))
     app.add_handler(CommandHandler("bringmeuptospeed", cmd_bringmeuptospeed))
     app.add_handler(CommandHandler("plan", cmd_plan))

@@ -2197,6 +2197,58 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         return await self._daily.evening_brief(user_ids, user_names)
 
+    async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
+        """Private tasks + tasks assigned to me. Excludes wedding and baby categories."""
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+        try:
+            all_tasks = get_tasks(user_id, include_done=False)
+        except Exception:
+            return "Couldn't load your tasks right now.", []
+
+        mine = []
+        seen: set = set()
+        for t in all_tasks:
+            tid = t.get("id")
+            if tid in seen:
+                continue
+            cat = t.get("category") or ""
+            if cat in ("wedding", "baby"):
+                continue
+            assigned = t.get("assigned_to")
+            is_mine = (assigned == user_id) or (not assigned and t.get("visibility") == "private" and t.get("user_id") == user_id)
+            if is_mine:
+                seen.add(tid)
+                mine.append(t)
+
+        name_str = f" — {user_name}" if user_name else ""
+        if not mine:
+            return f"<b>👤 My Tasks{name_str}</b>\n\nNothing personal on your list.", []
+
+        def _sort_key(t):
+            due = t.get("due_date")
+            if not due: return (3, "")
+            if due < today_str: return (0, due)
+            if due == today_str: return (1, due)
+            return (2, due)
+
+        mine.sort(key=_sort_key)
+        lines = [f"<b>👤 My Tasks{name_str}</b>\n"]
+        for t in mine:
+            due = t.get("due_date")
+            task_text = (t.get("task") or "").strip()
+            if task_text.upper().startswith("TASK:"):
+                task_text = task_text[5:].strip()
+            if not due:
+                lines.append(f"• {task_text}")
+            elif due < today_str:
+                lines.append(f"🔴 {task_text}")
+            elif due == today_str:
+                lines.append(f"📅 {task_text}")
+            else:
+                lines.append(f"• {task_text} — <i>{due}</i>")
+        return "\n".join(lines), mine
+
     async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """All open tasks tagged category='baby', sorted by due date."""
         if user_names is None:
