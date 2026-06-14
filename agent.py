@@ -1109,6 +1109,8 @@ TASK QUALITY RULES — enforce these strictly:
 - Items someone already owns or knows about ("AirPods are in the car") → log_fyi, NOT add_daily_task
 - NEVER create a task that starts with "FYI" — that is always a log_fyi call
 - If a statement describes a fact, trait, or preference about Ansen or Jess with no action required → save_preference, full stop. Do not create a task.
+- Work documents, tool lists, policy docs, email summaries, "approved X list" — these are NEVER tasks. Do not create tasks from them. If anything, log_fyi or save_baby_knowledge if relevant.
+- Never create a task with a body longer than a single clear sentence. If the content is a list or paragraph, it's not a task.
 
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
@@ -2512,7 +2514,11 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
                 or raw.startswith("jess deposited")
                 or raw.startswith("ansen paid")
                 or raw.startswith("jess paid")
+                or raw.startswith("approved ")
             ):
+                return True
+            # Dump tasks — long lists masquerading as tasks (work docs, tool lists, etc.)
+            if len(raw) > 300:
                 return True
             # Preference/fact statements masquerading as tasks
             # e.g. "Jess likes kaya waffle", "Ansen prefers window seats"
