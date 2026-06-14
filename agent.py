@@ -19,6 +19,7 @@ from tools.user_memory import get_summary, save_summary, get_message_count, get_
 from tools.gcal import get_events, create_event, delete_event
 from tools.search import web_search
 from tools.gmail import get_emails
+from tools.baby import pregnancy_summary, upcoming_milestones
 
 _TELEGRAM_ALLOWED_TAGS = re.compile(
     r'<(?!/?(b|i|u|s|code|pre|a)(?:\s[^>]*)?>)',
@@ -2054,6 +2055,57 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
         return result
 
     # Command methods — delegate to existing agents
+    async def baby_brief(self) -> str:
+        """Weekly pregnancy update — current week, what's developing, upcoming milestones."""
+        info = pregnancy_summary()
+        milestones = upcoming_milestones(within_weeks=4)
+        milestones_text = "\n".join(milestones) if milestones else "No major milestones in the next 4 weeks."
+
+        prompt = f"""You are a knowledgeable pregnancy guide. Write a weekly update for a couple expecting their first baby.
+
+PREGNANCY DATA:
+• Week {info['week']}, Day {info['day']} (of 40 weeks)
+• Trimester: {info['trimester']}
+• Due date: {info['due_date']} ({info['days_until_due']} days away)
+• LMP: {info['lmp']}
+
+UPCOMING MILESTONES (next 4 weeks):
+{milestones_text}
+
+Write a practical, useful weekly update. Focus on:
+1. What is happening with the baby physically this week (size, development)
+2. What Jess may be experiencing — symptoms, body changes, what's normal
+3. What they should actually DO this week (book scan, ask doctor about X, etc.)
+4. The upcoming milestones from the list above — explain what each involves and how to prepare
+
+Be warm but direct — no fluff. Real info a first-time parent needs.
+
+FORMAT (Telegram HTML):
+
+<b>👶 Week {info['week']} — {info['trimester']} Trimester</b>
+<i>Due {info['due_date']} · {info['days_until_due']} days to go</i>
+
+<b>🫘 Baby this week</b>
+What's developing. Size comparison. One short paragraph.
+
+<b>🤰 What Jess may feel</b>
+Key symptoms this week. What's normal, what to flag to doctor. Bullets •
+
+<b>✅ This week's actions</b>
+Concrete things to do or book. Bullets •
+
+<b>📅 Coming up</b>
+The upcoming milestones — what each is, when to book it.
+
+RULES: <b>bold</b> only, bullets •, no URLs, no asterisks."""
+
+        resp = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _fix_md(resp.content[0].text)
+
     async def bring_me_up_to_speed(self) -> str:
         return await self._wedding.bring_me_up_to_speed()
 

@@ -35,6 +35,7 @@ _proactive_hour = int(os.getenv("PROACTIVE_HOUR", "14"))
 PROACTIVE_TIME = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
 _stocks_hour = int(os.getenv("STOCKS_BRIEF_HOUR", "9"))
 STOCKS_TIME = dtime(hour=_stocks_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
+BABY_WEEKLY_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)  # Mondays 9am
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("/fyis — recent shared FYIs")
     lines.append("/shared — shared brain (confirmed decisions)")
     lines.append("/stocks — newsletter digest + buy/hold/skip analysis")
+    lines.append("/baby — weekly pregnancy update + upcoming milestones")
     lines.append("/commands — full command list")
     await update.message.reply_text("\n".join(lines))
 
@@ -334,6 +336,43 @@ async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=uid, text=_re.sub(r"<[^>]+>", "", section))
     except Exception:
         logger.exception("Error sending stocks brief")
+
+
+async def cmd_baby(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    msg = await update.message.reply_text("👶 Checking in on the little one...")
+    try:
+        brief = await agent.baby_brief()
+        sections = _split_sections(brief)
+        await _safe_send(msg, sections[0])
+        for section in sections[1:]:
+            try:
+                await update.message.reply_text(section, parse_mode="HTML")
+            except Exception:
+                import re as _re
+                await update.message.reply_text(_re.sub(r"<[^>]+>", "", section))
+    except Exception as e:
+        logger.exception("cmd_baby failed")
+        await msg.edit_text(f"⚠️ {escape(str(e)[:200])}", parse_mode="HTML")
+
+
+async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
+    """Auto-push every Monday morning."""
+    if not ALLOWED_IDS:
+        return
+    try:
+        brief = await agent.baby_brief()
+        sections = _split_sections(brief)
+        for uid in ALLOWED_IDS:
+            for section in sections:
+                try:
+                    await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+                except Exception:
+                    import re as _re
+                    await context.bot.send_message(chat_id=uid, text=_re.sub(r"<[^>]+>", "", section))
+    except Exception:
+        logger.exception("Error sending baby weekly brief")
 
 
 async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
@@ -597,6 +636,7 @@ def main():
     app.add_handler(CommandHandler("fyis", cmd_fyis))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
     app.add_handler(CommandHandler("stocks", cmd_stocks))
+    app.add_handler(CommandHandler("baby", cmd_baby))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
@@ -615,6 +655,8 @@ def main():
         app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
         # Daily stocks & crypto brief — every day at STOCKS_BRIEF_HOUR (default 9am)
         app.job_queue.run_daily(send_stocks_brief, time=STOCKS_TIME)
+        # Baby weekly update — every Monday at 9am
+        app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:
