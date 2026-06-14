@@ -2366,7 +2366,9 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
         return "\n\n".join(blocks), ordered
 
     async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
-        """All open tasks tagged category='baby', sorted by due date."""
+        """All open tasks tagged category='baby', grouped by urgency."""
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
         if user_names is None:
             user_names = {uid: str(uid) for uid in user_ids}
         seen: set = set()
@@ -2384,15 +2386,47 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
         if not tasks:
             return "No baby reminders yet.\n\nAdd one by saying something like <i>\"remind us to book the viability scan\"</i>.", []
 
-        tasks.sort(key=lambda x: x.get("due_date") or "9999")
-        items = []
-        for t in tasks:
-            due = t.get("due_date")
-            due_str = f" <i>({due})</i>" if due else ""
+        def _fmt(t: dict) -> str:
+            name = (t.get("task") or "").strip()
+            if name.upper().startswith("TASK:"):
+                name = name[5:].strip()
             assigned = t.get("assigned_to")
-            assigned_str = f" → {user_names.get(assigned, str(assigned))}" if assigned else ""
-            items.append(f"• {t['task']}{due_str}{assigned_str}")
-        return "<b>👶 Baby Reminders</b>\n\n" + "\n\n".join(items), tasks
+            suffix = f" → <i>{user_names.get(assigned, str(assigned))}</i>" if assigned else ""
+            due = t.get("due_date")
+            if not due:
+                return f"• {name}{suffix}"
+            try:
+                d = _date.fromisoformat(due)
+                due_label = f"{d.day} {d.strftime('%b')}"
+            except ValueError:
+                due_label = due
+            if due < today_str:
+                return f"🔴 {name}{suffix}"
+            elif due == today_str:
+                return f"📅 {name}{suffix}"
+            else:
+                return f"• {name} — {due_label}{suffix}"
+
+        overdue  = sorted([t for t in tasks if t.get("due_date") and t["due_date"] < today_str],  key=lambda x: x["due_date"])
+        today_t  = [t for t in tasks if t.get("due_date") and t["due_date"] == today_str]
+        upcoming = sorted([t for t in tasks if t.get("due_date") and t["due_date"] > today_str],  key=lambda x: x["due_date"])
+        someday  = [t for t in tasks if not t.get("due_date")]
+
+        blocks = ["<b>👶 Baby Reminders</b>"]
+        if overdue:
+            blocks.append("\n🔴 <b>Overdue</b>")
+            blocks += [_fmt(t) for t in overdue]
+        if today_t:
+            blocks.append("\n📅 <b>Today</b>")
+            blocks += [_fmt(t) for t in today_t]
+        if upcoming:
+            blocks.append("\n📆 <b>Upcoming</b>")
+            blocks += [_fmt(t) for t in upcoming]
+        if someday:
+            blocks.append("\n🗒 <b>No date</b>")
+            blocks += [_fmt(t) for t in someday]
+
+        return "\n".join(blocks), tasks
 
     async def baby_questions_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Questions to ask at appointments — tasks tagged category='baby_questions'."""
@@ -2413,14 +2447,23 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
         if not tasks:
             return "No questions saved yet.\n\nAdd one by saying <i>\"add to OB questions: ask about iron levels\"</i>", []
 
-        items = []
+        added_by: dict = {}
         for t in tasks:
-            q = (t.get("task") or "").strip()
-            if q.upper().startswith("TASK:"):
-                q = q[5:].strip()
-            items.append(f"• {q}")
+            uid = t.get("user_id")
+            added_by.setdefault(uid, []).append(t)
 
-        return "<b>❓ Questions for the Doctor</b>\n\nTap ✅ once asked.\n\n" + "\n\n".join(items), tasks
+        blocks = ["<b>❓ Questions for the Doctor</b>", "\n<i>Tap ✅ once asked.</i>"]
+        for uid, qtasks in added_by.items():
+            name = user_names.get(uid, "") if user_names else ""
+            header = f"\n🙋 <b>{name}</b>" if name else "\n🙋 <b>Questions</b>"
+            blocks.append(header)
+            for t in qtasks:
+                q = (t.get("task") or "").strip()
+                if q.upper().startswith("TASK:"):
+                    q = q[5:].strip()
+                blocks.append(f"• {q}")
+
+        return "\n".join(blocks), tasks
 
     async def baby_budget_brief(self) -> str:
         data = baby_budget_summary()
@@ -2543,8 +2586,6 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
                 return (2, due)
             return sorted(tasks, key=key)
 
-        SEP = "───────────────"
-
         def _fmt(t: dict, limit: int = 120) -> str:
             due = t.get("due_date")
             name = (t.get("task") or "").strip()
@@ -2565,30 +2606,41 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
                 except ValueError:
                     return f"• {name} — {due}"
 
-        CAT_EMOJI = {
-            "finance": "💳", "health": "🏥", "home": "🏠", "work": "💼",
-            "social": "🎉", "travel": "✈️", "personal": "🙋", "wedding": "💒",
-        }
+        def _urgency_blocks(tasks: list[dict]) -> list[str]:
+            """Render tasks grouped by urgency with emoji sub-headers."""
+            overdue_t = _sort([t for t in tasks if t.get("due_date") and t["due_date"] < today_str])
+            today_t   = _sort([t for t in tasks if t.get("due_date") and t["due_date"] == today_str])
+            upcoming_t = _sort([t for t in tasks if t.get("due_date") and t["due_date"] > today_str])
+            someday_t  = [t for t in tasks if not t.get("due_date")]
+            out = []
+            if overdue_t:
+                out.append("🔴 <b>Overdue</b>")
+                out += [_fmt(t) for t in overdue_t]
+            if today_t:
+                out.append("\n📅 <b>Today</b>")
+                out += [_fmt(t) for t in today_t]
+            if upcoming_t:
+                out.append("\n📆 <b>Upcoming</b>")
+                out += [_fmt(t) for t in upcoming_t]
+            if someday_t:
+                out.append("\n🗒 <b>No date</b>")
+                out += [_fmt(t) for t in someday_t]
+            return out
 
-        lines: list[str] = ["<b>📋 Reminders</b>"]
+        blocks: list[str] = ["<b>📋 Reminders</b>"]
         ordered_tasks: list[dict] = []
 
-        for i, uid in enumerate(user_ids):
+        for uid in user_ids:
             person_name = user_names.get(uid, str(uid))
             tasks = _sort([t for t in personal.get(uid, []) if not _is_junk(t)])
-            if i > 0:
-                lines.append("")
-                lines.append(SEP)
-            lines.append("")
-            lines.append(f"<b>{person_name}</b>")
+            blocks.append(f"\n👤 <b>{person_name}</b>")
             if tasks:
-                for t in tasks:
-                    lines.append(_fmt(t))
-                    ordered_tasks.append(t)
+                blocks += _urgency_blocks(tasks)
+                ordered_tasks += tasks
             else:
-                lines.append("• Nothing on the list ✓")
+                blocks.append("• Nothing on the list ✓")
 
-        # Shared: dedup by text, filter junk, flat urgency sort
+        # Shared: dedup by text, filter junk, urgency sort
         seen_text: set = set()
         clean_shared = []
         for t in _sort(shared):
@@ -2599,24 +2651,11 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
                 seen_text.add(key)
                 clean_shared.append(t)
 
-        lines.append("")
-        lines.append(SEP)
-        lines.append("")
-        lines.append("<b>👥 Shared</b>")
-
+        blocks.append("\n👥 <b>Shared</b>")
         if clean_shared:
-            # Split into urgency groups and add blank line between them
-            urgent = [t for t in clean_shared if t.get("due_date") and t["due_date"] <= today_str]
-            upcoming = [t for t in clean_shared if t.get("due_date") and t["due_date"] > today_str]
-            no_date = [t for t in clean_shared if not t.get("due_date")]
-
-            for group in [urgent, upcoming, no_date]:
-                if group:
-                    lines.append("")
-                    for t in group:
-                        lines.append(_fmt(t))
-                        ordered_tasks.append(t)
+            blocks += _urgency_blocks(clean_shared)
+            ordered_tasks += clean_shared
         else:
-            lines.append("• Nothing shared ✓")
+            blocks.append("• Nothing shared ✓")
 
-        return "\n".join(lines), ordered_tasks
+        return "\n".join(blocks), ordered_tasks
