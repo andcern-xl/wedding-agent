@@ -138,10 +138,12 @@ async def cmd_wedding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-_JUNK_PREFIXES = ("fyi", "• fyi", "ansen deposited", "jess deposited", "ansen paid", "jess paid", "approved ")
+_JUNK_PREFIXES = ("fyi", "ansen deposited", "jess deposited", "ansen paid", "jess paid", "approved ")
 
 def _is_task(t: dict) -> bool:
     raw = (t.get("task") or "").strip().lower()
+    if raw.startswith("• ") or raw.startswith("- "):
+        raw = raw[2:]
     if len(raw) > 300:
         return False
     return not any(raw.startswith(p) for p in _JUNK_PREFIXES)

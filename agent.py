@@ -2504,12 +2504,14 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
         def _is_junk(t: dict) -> bool:
             """Filter out FYIs, wedding tasks, and non-tasks stored as daily tasks."""
             raw = (t.get("task") or "").strip().lower()
+            # Strip leading bullet/dash prefix before checks
+            if raw.startswith("• ") or raw.startswith("- "):
+                raw = raw[2:]
             if t.get("category") == "wedding":
                 return True
             # Obvious junk prefixes
             if (
                 raw.startswith("fyi")
-                or raw.startswith("• fyi")
                 or raw.startswith("ansen deposited")
                 or raw.startswith("jess deposited")
                 or raw.startswith("ansen paid")
