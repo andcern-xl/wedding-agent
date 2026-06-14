@@ -1011,6 +1011,9 @@ SHARED BRAIN — confirmed couple decisions and permanent memories:
 RECENT FYIs — notes and updates from the last 30 days. Reference naturally when relevant — don't quote back verbatim:
 {recent_fyis}
 
+BABY KNOWLEDGE — what the couple has saved about pregnancy, birth, and parenting. Use when giving advice or answering questions:
+{baby_context}
+
 PEOPLE
 - Ansen: user_id 63756531
 - Jess / Jessica: user_id 6927468999
@@ -1047,7 +1050,14 @@ HOW TO USE TOOLS
 - "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
 - "search for", "look up", "find X", "what's the weather", "what is X", "who is X", any real-time or internet question → search_web first, then answer with real results. NEVER say you can't search — you have the search_web tool.
 - Vendor recommendations / price research / "find X in Y" / "what does X cost" / any question needing current market info → search_web first, then answer with real results
-- Couple-level decision or fact that both should always know ("we're going with X vendor", "we decided on Y", "Jess rescheduled the venue tour") → save_shared_context — this lives in both their prompts every message, not just queryable on demand
+- Anything both people should always know → save_shared_context. This is your long-term memory about this couple — call it proactively for:
+  • Confirmed decisions ("we're going with X venue", "we chose the buffet menu")
+  • Preferences about either person ("Jess wants an unmedicated birth", "Ansen hates formal dress codes")
+  • Facts about their life together ("due date is Feb 2027", "wedding is in Bali", "they want to move before the baby comes")
+  • Cross-domain insights you notice ("wedding is 3 months after the due date — planning is tight")
+  • Patterns you observe ("they tend to decide things quickly once they've both seen the option")
+  • Anything where you'd think "I wish I had known this earlier"
+  The bar is: would this be useful context in 3 months? If yes, save it. Don't wait to be asked.
 
 BABY KNOWLEDGE BASE
 Any time someone shares something useful about pregnancy, birth, newborns, parenting, symptoms, feeding, sleep, hospital prep, or any advice (typed OR screenshot OR link) → call save_baby_knowledge immediately. This includes:
@@ -1428,7 +1438,7 @@ class UnifiedAgent:
 
     _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
 
-    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "") -> str:
+    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -1444,6 +1454,7 @@ class UnifiedAgent:
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=shared_summary or "Nothing shared yet.",
             recent_fyis=recent_fyis or "No recent FYIs.",
+            baby_context=baby_context or "No baby knowledge saved yet.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
@@ -1645,11 +1656,11 @@ class UnifiedAgent:
                 result.append(m)
         return result
 
-    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "") -> dict:
+    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": []}
         messages = history + [{"role": "user", "content": user_content}]
-        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis)
+        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context)
         last_response = None
 
         for _ in range(10):
@@ -1920,7 +1931,16 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
             )
         except Exception:
             recent_fyis = ""
-        return await self._run_loop(text, user_id, history, user_summary, shared_summary, recent_fyis)
+        try:
+            from tools.baby_knowledge import get_entries as _get_baby
+            _baby = _get_baby(limit=10)
+            baby_context = "\n".join(
+                f"[{', '.join(e.get('tags') or [])}] {e['summary']}"
+                for e in _baby
+            )
+        except Exception:
+            baby_context = ""
+        return await self._run_loop(text, user_id, history, user_summary, shared_summary, recent_fyis, baby_context)
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
         # Build readable transcript — include tool exchanges so patterns in tool use are visible
@@ -2200,8 +2220,17 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
             )
         except Exception:
             recent_fyis = ""
+        try:
+            from tools.baby_knowledge import get_entries as _get_baby
+            _baby = _get_baby(limit=10)
+            baby_context = "\n".join(
+                f"[{', '.join(e.get('tags') or [])}] {e['summary']}"
+                for e in _baby
+            )
+        except Exception:
+            baby_context = ""
         result, payment = await asyncio.gather(
-            self._run_loop(user_content, user_id, history, user_summary, shared_summary, recent_fyis),
+            self._run_loop(user_content, user_id, history, user_summary, shared_summary, recent_fyis, baby_context),
             self._wedding._extract_payment(image_bytes, caption),
         )
         if payment:
@@ -2293,6 +2322,105 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             messages=[{"role": "user", "content": prompt}],
         )
         return _fix_md(resp.content[0].text)
+
+    async def knowledge_sweep(self) -> list[str]:
+        """Weekly agentic sweep across all knowledge silos. Extracts new cross-domain facts
+        and appends them to the shared brain. Returns list of facts added."""
+        from tools.fyis import get_fyis as _get_fyis
+        from tools.baby_knowledge import get_entries as _get_baby
+        from tools.log import get_recent_drops
+        from tools.daily import get_tasks
+
+        # Gather all recent knowledge
+        fyis = _get_fyis(limit=40)
+        baby_entries = _get_baby(limit=30)
+        wedding_drops = get_recent_drops(limit=20)
+
+        # Completed tasks from both users (signals what's been actioned)
+        all_user_ids = list(self._USER_NAMES.keys())
+        completed_tasks = []
+        for uid in all_user_ids:
+            try:
+                done = get_tasks(uid, include_done=True)
+                completed_tasks += [t for t in done if t.get("done")][-10:]
+            except Exception:
+                pass
+
+        existing_brain = get_shared_summary() or ""
+
+        def _fmt_list(items, key_fn):
+            return "\n".join(key_fn(i) for i in items) if items else "None."
+
+        fyi_text = _fmt_list(fyis, lambda f: f"[{f.get('category','misc')}] {f['content']}")
+        baby_text = _fmt_list(baby_entries, lambda e: f"[{', '.join(e.get('tags') or [])}] {e['summary']}")
+        wedding_text = _fmt_list(wedding_drops, lambda d: f"[{d.get('category','wedding')}] {d['content'][:200]}")
+        tasks_text = _fmt_list(completed_tasks, lambda t: f"✓ {t.get('task','')[:100]}")
+
+        prompt = f"""You are the knowledge curator for Ansen and Jess, a couple planning their wedding (due date Feb 2027, expecting their first baby).
+
+You have access to everything they've shared with their personal assistant bot this week across all domains. Your job: identify meaningful facts about them as a couple that should be permanently remembered.
+
+EXISTING SHARED BRAIN (already saved — do NOT re-add these):
+{existing_brain or "(empty)"}
+
+--- NEW INFORMATION THIS PERIOD ---
+
+FYIS (casual notes and updates):
+{fyi_text}
+
+BABY KNOWLEDGE (pregnancy and parenting knowledge they've saved):
+{baby_text}
+
+WEDDING DROPS (wedding planning notes and decisions):
+{wedding_text}
+
+RECENTLY COMPLETED TASKS:
+{tasks_text}
+
+---
+
+Extract facts worth adding to the permanent shared brain. Focus on:
+- New decisions made or confirmed
+- Preferences revealed about either person
+- Cross-domain insights (e.g. timing clashes between wedding and baby)
+- Facts about their life together that future conversations should know
+- Patterns in what they're working on or worried about
+
+Output ONLY a JSON array of fact strings to add. Each fact: one clear sentence, max 120 chars. Output nothing if nothing new is worth adding.
+
+Example output:
+["Jess is taking Ritual prenatal vitamins (Folate), arriving Jun 16.", "They've booked La Varche as a regular dinner spot — fits 4 pax, June 27 confirmed.", "StashAway account designated as baby fund, current value SGD 16,627."]
+
+If nothing new: output []"""
+
+        resp = await self.client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+
+        # Parse the JSON array
+        import re as _re
+        match = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+        if not match:
+            return []
+        try:
+            facts = json.loads(match.group())
+        except Exception:
+            return []
+
+        if not facts:
+            return []
+
+        # Append each fact to the shared brain
+        for fact in facts:
+            try:
+                append_shared_summary(fact)
+            except Exception:
+                pass
+
+        return facts
 
     async def brain_synthesis(self) -> str:
         """Synthesise shared brain + recent FYIs into a coherent couple knowledge base."""

@@ -910,6 +910,24 @@ async def _handle_fyi_callback(query, context, data: str):
         await context.bot.send_message(chat_id=chat_id, text="🗑 Archived.")
 
 
+async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
+    """Weekly sweep across all knowledge silos — extracts facts into shared brain."""
+    if not ALLOWED_IDS:
+        return
+    try:
+        facts = await agent.knowledge_sweep()
+        if not facts:
+            return
+        lines = ["🧠 <b>Knowledge update</b>\n", "<i>I've added these to our shared brain from this week's conversations:</i>\n"]
+        for f in facts:
+            lines.append(f"• {f}")
+        text = "\n".join(lines)
+        for uid in ALLOWED_IDS:
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+    except Exception:
+        logger.exception("send_knowledge_sweep failed")
+
+
 async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
@@ -985,6 +1003,8 @@ def main():
         app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
         # FYI graduation check — every Sunday at 9am (surface notes nearing 30-day expiry)
         app.job_queue.run_daily(send_fyi_graduation, time=REMINDER_TIME, days=(6,))
+        # Knowledge sweep — every Wednesday evening (extract cross-domain facts into shared brain)
+        app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:
