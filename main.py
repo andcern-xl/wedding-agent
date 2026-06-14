@@ -81,7 +81,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [
         "👋 Two brains, one bot.\n",
-        "/wedding — planning, tasks, reminders, categories",
+        "/wedding — planning & categories",
+        "/shared — tasks, reminders, FYIs, shared brain",
         "/baby — pregnancy updates, milestones, knowledge base",
         "/stocks — newsletter digest + buy/hold/skip",
         "/me — your personal tasks\n",
@@ -94,11 +95,16 @@ def _wedding_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Catch Up", callback_data="wedding_bringmeuptospeed"),
          InlineKeyboardButton("📅 Plan", callback_data="wedding_plan")],
-        [InlineKeyboardButton("✅ Tasks", callback_data="wedding_tasks"),
-         InlineKeyboardButton("⏰ Reminders", callback_data="wedding_reminders")],
-        [InlineKeyboardButton("🧠 Shared", callback_data="wedding_shared"),
-         InlineKeyboardButton("📨 FYIs", callback_data="wedding_fyis")],
         [InlineKeyboardButton("📂 Categories", callback_data="wedding_categories")],
+    ])
+
+
+def _shared_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧠 Brain", callback_data="shared_brain"),
+         InlineKeyboardButton("📨 FYIs", callback_data="shared_fyis")],
+        [InlineKeyboardButton("✅ Tasks", callback_data="shared_tasks"),
+         InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
     ])
 
 
@@ -135,6 +141,16 @@ async def cmd_wedding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💒 <b>Wedding</b>",
         parse_mode="HTML",
         reply_markup=_wedding_menu(),
+    )
+
+
+async def cmd_shared_parent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    await update.message.reply_text(
+        "🧠 <b>Shared</b>",
+        parse_mode="HTML",
+        reply_markup=_shared_menu(),
     )
 
 
@@ -544,6 +560,59 @@ async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+async def _handle_shared_callback(query, context, action: str, user_id: int):
+    chat_id = query.message.chat_id
+
+    if action == "brain":
+        try:
+            summary = get_shared_summary()
+            if not summary.strip():
+                await context.bot.send_message(chat_id=chat_id, text="Nothing in the shared brain yet.")
+                return
+            text = "<b>🧠 Shared Brain</b>\n\n" + summary
+            sections = _split_sections(text)
+            for section in sections:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "fyis":
+        try:
+            fyis = get_fyis(limit=20)
+            if not fyis:
+                await context.bot.send_message(chat_id=chat_id, text="No FYIs yet.")
+                return
+            lines = ["<b>📨 Recent FYIs</b>\n"]
+            for f in fyis:
+                when = (f.get("created_at") or "")[:10]
+                cat = f.get("category")
+                cat_tag = f" [{cat}]" if cat else ""
+                lines.append(f"\n• <i>{when}</i>{cat_tag} — {f['content']}")
+            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "tasks":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Checking your tasks...")
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks, user_id)
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "reminders":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Pulling reminders...")
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks, user_id)
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
 async def _handle_wedding_callback(query, context, action: str, user_id: int):
     chat_id = query.message.chat_id
 
@@ -593,55 +662,6 @@ async def _handle_wedding_callback(query, context, action: str, user_id: int):
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
             await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
-
-    elif action == "tasks":
-        msg = await context.bot.send_message(chat_id=chat_id, text="Checking your tasks...")
-        try:
-            user_names = await _fetch_user_names(context)
-            text, tasks = await agent.combined_daily_brief(ALLOWED_IDS, user_names)
-            keyboard = _reminders_keyboard(tasks, user_id)
-            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
-
-    elif action == "reminders":
-        msg = await context.bot.send_message(chat_id=chat_id, text="Pulling reminders...")
-        try:
-            user_names = await _fetch_user_names(context)
-            text, tasks = await agent.reminders_brief(ALLOWED_IDS, user_names)
-            keyboard = _reminders_keyboard(tasks, user_id)
-            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-        except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
-
-    elif action == "shared":
-        try:
-            summary = get_shared_summary()
-            if not summary.strip():
-                await context.bot.send_message(chat_id=chat_id, text="Nothing in the shared brain yet.")
-                return
-            text = "<b>🧠 Shared Brain</b>\n\n" + summary
-            sections = _split_sections(text)
-            for section in sections:
-                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
-        except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
-
-    elif action == "fyis":
-        try:
-            fyis = get_fyis(limit=20)
-            if not fyis:
-                await context.bot.send_message(chat_id=chat_id, text="No FYIs yet.")
-                return
-            lines = ["<b>📨 Recent FYIs</b>\n"]
-            for f in fyis:
-                when = (f.get("created_at") or "")[:10]
-                cat = f.get("category")
-                cat_tag = f" [{cat}]" if cat else ""
-                lines.append(f"• <i>{when}</i>{cat_tag} — {f['content']}")
-            await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
-        except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def _handle_baby_callback(query, context, action: str):
@@ -753,6 +773,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await _handle_baby_callback(query, context, data[5:])
 
+    elif data.startswith("shared_"):
+        await query.answer()
+        await _handle_shared_callback(query, context, data[7:], user_id)
+
     else:
         await query.answer()
 
@@ -836,6 +860,7 @@ def main():
         commands = [
             BotCommand("start", "Help & intro"),
             BotCommand("wedding", "💒 Wedding planning"),
+            BotCommand("shared", "🧠 Shared tasks, FYIs & brain"),
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
             BotCommand("me", "👤 My personal tasks"),
@@ -852,7 +877,7 @@ def main():
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("reminders", cmd_reminders))
-    app.add_handler(CommandHandler("shared", cmd_shared))
+    app.add_handler(CommandHandler("shared", cmd_shared_parent))
     app.add_handler(CommandHandler("fyis", cmd_fyis))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
     app.add_handler(CommandHandler("stocks", cmd_stocks))
