@@ -2199,7 +2199,7 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
 
     async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
         """Private tasks + tasks assigned to me. Excludes wedding and baby categories."""
-        from datetime import date as _date
+        from datetime import date as _date, datetime as _dt
         today_str = _date.today().isoformat()
         try:
             all_tasks = get_tasks(user_id, include_done=False)
@@ -2225,29 +2225,59 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
         if not mine:
             return f"<b>👤 My Tasks{name_str}</b>\n\nNothing personal on your list.", []
 
-        def _sort_key(t):
-            due = t.get("due_date")
-            if not due: return (3, "")
-            if due < today_str: return (0, due)
-            if due == today_str: return (1, due)
-            return (2, due)
-
-        mine.sort(key=_sort_key)
-        lines = [f"<b>👤 My Tasks{name_str}</b>\n"]
+        overdue, today, upcoming, someday = [], [], [], []
         for t in mine:
             due = t.get("due_date")
-            task_text = (t.get("task") or "").strip()
-            if task_text.upper().startswith("TASK:"):
-                task_text = task_text[5:].strip()
             if not due:
-                lines.append(f"• {task_text}")
+                someday.append(t)
             elif due < today_str:
-                lines.append(f"🔴 {task_text}")
+                overdue.append(t)
             elif due == today_str:
-                lines.append(f"📅 {task_text}")
+                today.append(t)
             else:
-                lines.append(f"• {task_text} — <i>{due}</i>")
-        return "\n".join(lines), mine
+                upcoming.append(t)
+
+        def _fmt(t, show_date=False) -> str:
+            raw = (t.get("task") or "").strip()
+            if raw.upper().startswith("TASK:"):
+                raw = raw[5:].strip()
+            raw = raw[:90] + "…" if len(raw) > 90 else raw
+            if show_date and t.get("due_date"):
+                try:
+                    d = _dt.strptime(t["due_date"], "%Y-%m-%d")
+                    raw += f" <i>({d.strftime('%-d %b')})</i>"
+                except Exception:
+                    pass
+            return raw
+
+        lines = [f"<b>👤 My Tasks{name_str}</b>"]
+        ordered = []
+
+        if overdue:
+            lines.append("\n🔴 <b>Overdue</b>")
+            for t in sorted(overdue, key=lambda x: x.get("due_date") or ""):
+                lines.append(f"• {_fmt(t, show_date=True)}")
+                ordered.append(t)
+
+        if today:
+            lines.append("\n📅 <b>Today</b>")
+            for t in today:
+                lines.append(f"• {_fmt(t)}")
+                ordered.append(t)
+
+        if upcoming:
+            lines.append("\n📆 <b>Coming up</b>")
+            for t in sorted(upcoming, key=lambda x: x.get("due_date") or ""):
+                lines.append(f"• {_fmt(t, show_date=True)}")
+                ordered.append(t)
+
+        if someday:
+            lines.append("\n• <b>No date</b>")
+            for t in someday:
+                lines.append(f"• {_fmt(t)}")
+                ordered.append(t)
+
+        return "\n".join(lines), ordered
 
     async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """All open tasks tagged category='baby', sorted by due date."""
