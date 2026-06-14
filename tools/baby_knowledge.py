@@ -1,4 +1,4 @@
-from tools.supabase_client import get_client
+from tools.db import get_client
 
 
 def save_entry(summary: str, tags: list[str], raw_text: str = "", user_id: int = 0, source: str = "screenshot") -> dict:
