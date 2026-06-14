@@ -1542,6 +1542,7 @@ class UnifiedAgent:
                 raw_text=inputs.get("raw_text", ""),
                 user_id=user_id,
             )
+            flags["baby_drop"] = True
             return {"status": "saved", "id": entry.get("id"), "tags": inputs.get("tags", [])}
 
         return {"error": f"Unknown tool: {name}"}
@@ -1566,7 +1567,7 @@ class UnifiedAgent:
 
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "") -> dict:
         import logging as _logging
-        flags = {"wedding_drop": False, "fyi": False, "summary_updated": False, "completed_tasks": []}
+        flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": []}
         messages = history + [{"role": "user", "content": user_content}]
         system_prompt = self._build_system(user_summary, shared_summary, user_id)
         last_response = None
@@ -1603,12 +1604,12 @@ class UnifiedAgent:
                 except Exception:
                     pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"], "completed_tasks": flags["completed_tasks"]}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "completed_tasks": flags["completed_tasks"]}
 
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": self._strip_image_data(messages[-40:]), "notify_partner": flags["wedding_drop"] or flags["fyi"]}
+                return {"text": reply, "history": self._strip_image_data(messages[-40:]), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"]}
 
             if last_response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]
