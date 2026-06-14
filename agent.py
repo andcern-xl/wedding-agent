@@ -1052,6 +1052,10 @@ Any time someone shares something useful about pregnancy, birth, newborns, paren
 - Any screenshot text that contains pregnancy/baby advice
 Tag appropriately. The knowledge base is for tacit knowledge they'll want to search later.
 
+BABY TO-DOS
+Any action item related to pregnancy, birth prep, hospital, scans, appointments, or baby gear → add_daily_task with category="baby" and visibility="shared". Baby tasks are always shared — both need to know.
+Examples: "book viability scan", "research hospitals", "buy prenatal vitamins", "find a paediatrician"
+
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
@@ -2192,6 +2196,35 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
 
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         return await self._daily.evening_brief(user_ids, user_names)
+
+    async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
+        """All open tasks tagged category='baby', sorted by due date."""
+        if user_names is None:
+            user_names = {uid: str(uid) for uid in user_ids}
+        seen: set = set()
+        tasks: list[dict] = []
+        for uid in user_ids:
+            try:
+                for t in get_tasks(uid, include_done=False):
+                    tid = t.get("id")
+                    if t.get("category") == "baby" and tid not in seen:
+                        seen.add(tid)
+                        tasks.append(t)
+            except Exception:
+                pass
+
+        if not tasks:
+            return "No baby reminders yet.\n\nAdd one by saying something like <i>\"remind us to book the viability scan\"</i>.", []
+
+        tasks.sort(key=lambda x: x.get("due_date") or "9999")
+        lines = ["<b>👶 Baby Reminders</b>\n"]
+        for t in tasks:
+            due = t.get("due_date")
+            due_str = f" — <i>{due}</i>" if due else ""
+            assigned = t.get("assigned_to")
+            assigned_str = f" → {user_names.get(assigned, str(assigned))}" if assigned else ""
+            lines.append(f"• {t['task']}{due_str}{assigned_str}")
+        return "\n".join(lines), tasks
 
     async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Two-column view: each person's private tasks + a shared section.

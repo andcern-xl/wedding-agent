@@ -120,7 +120,8 @@ def _baby_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Weekly Brief", callback_data="baby_brief"),
          InlineKeyboardButton("📚 Knowledge", callback_data="baby_knowledge")],
-        [InlineKeyboardButton("📅 Milestones", callback_data="baby_milestones")],
+        [InlineKeyboardButton("📅 Milestones", callback_data="baby_milestones"),
+         InlineKeyboardButton("✅ Reminders", callback_data="baby_reminders")],
     ])
 
 
@@ -657,6 +658,16 @@ async def _handle_baby_callback(query, context, action: str):
         else:
             lines.append("No milestones in the next 8 weeks.")
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+
+    elif action == "reminders":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Checking baby reminders...")
+        try:
+            user_names = await _fetch_user_names(context)
+            text, tasks = await agent.baby_reminders_brief(ALLOWED_IDS, user_names)
+            keyboard = _reminders_keyboard(tasks, query.from_user.id)
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
