@@ -21,6 +21,7 @@ from tools.search import web_search
 from tools.gmail import get_emails
 from tools.baby import pregnancy_summary, upcoming_milestones
 from tools.baby_knowledge import save_entry as save_baby_entry, get_entries as get_baby_entries, search_entries as search_baby_entries
+from tools.baby_budget import add_item as add_baby_budget_item, summary as baby_budget_summary
 
 _TELEGRAM_ALLOWED_TAGS = re.compile(
     r'<(?!/?(b|i|u|s|code|pre|a)(?:\s[^>]*)?>)',
@@ -1060,6 +1061,10 @@ BABY TO-DOS
 Any action item related to pregnancy, birth prep, hospital, scans, appointments, or baby gear → add_daily_task with category="baby" and visibility="shared". Baby tasks are always shared — both need to know.
 Examples: "book viability scan", "research hospitals", "buy prenatal vitamins", "find a paediatrician"
 
+BABY BUDGET
+Any baby/pregnancy purchase, quote, or planned spend → log_baby_expense. Categories: gear (pram, crib, car seat), medical (scans, tests, consultations), clothing (maternity, baby clothes), hospital (delivery package, room), nutrition (vitamins, supplements), other.
+Triggered by: prices mentioned, "I bought", "we ordered", "how much is", "looking at [item]", or any baby product/service cost.
+
 BABY QUESTIONS (for the doctor / OB / midwife)
 Any question they want to ask at an appointment → add_daily_task with category="baby_questions" and visibility="shared".
 Triggered by: "add to OB questions", "ask the doctor", "remind us to ask", "question for the midwife", or any question phrased as something to clarify at an appointment.
@@ -1375,6 +1380,27 @@ TOOLS = [
             "required": ["summary", "tags"],
         },
     },
+    {
+        "name": "log_baby_expense",
+        "description": "Log a baby-related expense or planned purchase to the baby budget. Use when someone mentions buying, ordering, or planning to buy something for the baby, or shares a quote/price for baby gear, medical, or hospital costs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "What was bought or planned (e.g. 'Bugaboo Fox pram', 'Gleneagles delivery package', 'prenatal vitamins')"},
+                "amount": {"type": "number", "description": "Cost in SGD (or leave out if unknown)"},
+                "currency": {"type": "string", "description": "Currency code, default SGD"},
+                "category": {"type": "string", "description": "One of: gear, medical, clothing, hospital, nutrition, other"},
+                "status": {"type": "string", "enum": ["planned", "bought", "deposit", "quoted"], "description": "planned = intending to buy, bought = purchased, deposit = partial payment made, quoted = got a price"},
+                "notes": {"type": "string", "description": "Any extra context"},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "read_baby_budget",
+        "description": "Read the baby budget — all logged expenses and planned purchases with totals.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -1557,6 +1583,21 @@ class UnifiedAgent:
             )
             flags["baby_drop"] = True
             return {"status": "saved", "id": entry.get("id"), "tags": inputs.get("tags", [])}
+
+        if name == "log_baby_expense":
+            entry = add_baby_budget_item(
+                item=inputs["item"],
+                amount=inputs.get("amount"),
+                category=inputs.get("category"),
+                status=inputs.get("status", "planned"),
+                currency=inputs.get("currency", "SGD"),
+                notes=inputs.get("notes"),
+            )
+            flags["baby_drop"] = True
+            return {"status": "saved", "item": inputs["item"], "amount": inputs.get("amount")}
+
+        if name == "read_baby_budget":
+            return baby_budget_summary()
 
         return {"error": f"Unknown tool: {name}"}
 
@@ -2337,6 +2378,37 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             items.append(f"• {q}")
 
         return "<b>❓ Questions for the Doctor</b>\n\nTap ✅ once asked.\n\n" + "\n\n".join(items), tasks
+
+    async def baby_budget_brief(self) -> str:
+        data = baby_budget_summary()
+        items = data.get("items", [])
+        if not items:
+            return "💰 <b>Baby Budget</b>\n\nNothing logged yet.\n\nMention a price or purchase and I'll track it automatically."
+
+        spent = data.get("total_spent", 0)
+        planned = data.get("total_planned", 0)
+        by_cat = data.get("by_category", {})
+
+        STATUS_EMOJI = {"bought": "✅", "deposit": "💳", "planned": "🗒", "quoted": "💬"}
+        CAT_EMOJI = {"gear": "🛒", "medical": "🏥", "clothing": "👕", "hospital": "🏨", "nutrition": "💊", "other": "📦"}
+
+        lines = [
+            "💰 <b>Baby Budget</b>\n",
+            f"✅ Spent: <b>SGD {spent:,.0f}</b>",
+            f"🗒 Planned: <b>SGD {planned:,.0f}</b>",
+            f"📊 Total committed: <b>SGD {spent + planned:,.0f}</b>",
+        ]
+
+        for cat, cat_items in sorted(by_cat.items()):
+            emoji = CAT_EMOJI.get(cat, "📦")
+            lines.append(f"\n{emoji} <b>{cat.title()}</b>")
+            for i in cat_items:
+                status_icon = STATUS_EMOJI.get(i.get("status", "planned"), "•")
+                amt = f" — SGD {i['amount']:,.0f}" if i.get("amount") else ""
+                notes = f" <i>({i['notes']})</i>" if i.get("notes") else ""
+                lines.append(f"{status_icon} {i['item']}{amt}{notes}")
+
+        return "\n\n".join(lines) if len(lines) > 4 else "\n".join(lines)
 
     async def reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Two-column view: each person's private tasks + a shared section.
