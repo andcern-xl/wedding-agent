@@ -24,6 +24,10 @@ from tools.baby_knowledge import save_entry as save_baby_entry, get_entries as g
 from tools.baby_budget import add_item as add_baby_budget_item, summary as baby_budget_summary
 from tools.shared_budget import add_item as add_shared_budget_item, summary as shared_budget_summary
 
+# Model constants — swap here to change globally
+CHAT_MODEL = "claude-haiku-4-5-20251001"      # conversations, briefs, tool routing
+SYNTHESIS_MODEL = "claude-sonnet-4-6"          # knowledge synthesis, compression, complex reasoning
+
 _TELEGRAM_ALLOWED_TAGS = re.compile(
     r'<(?!/?(b|i|u|s|code|pre|a)(?:\s[^>]*)?>)',
     re.IGNORECASE,
@@ -115,7 +119,7 @@ class WeddingAgent:
         messages = history + [{"role": "user", "content": user_content}]
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=1024,
             system=self._build_system_prompt(),
             messages=messages,
@@ -151,7 +155,7 @@ Return ONLY a JSON object with these fields (omit fields you can't determine):
 If this image has no financial content, return: {"skip": true}"""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=300,
             messages=[{
                 "role": "user",
@@ -202,7 +206,7 @@ If this image has no financial content, return: {"skip": true}"""
         messages = history + [{"role": "user", "content": content}]
 
         main_call = self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=1024,
             system=self._build_system_prompt(),
             messages=messages,
@@ -305,7 +309,7 @@ FORMATTING RULES — follow exactly:
 - Put a blank line between each bullet — not just between sections. This is essential for readability."""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=1200,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
@@ -368,7 +372,7 @@ FORMATTING RULES — follow exactly:
 - Put a blank line between each bullet — not just between sections. This is essential for readability in Telegram."""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=2048,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
@@ -472,7 +476,7 @@ FORMATTING RULES — follow exactly:
 - Put a blank line between each bullet — not just between sections. This is essential for readability in Telegram."""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=1500,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
@@ -588,7 +592,7 @@ class DailyAgent:
             categories=cat_list,
         )
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -660,7 +664,7 @@ class DailyAgent:
 
         messages = history + [{"role": "user", "content": f"[Context]\n{context}\n\n[Message]\n{text}"}]
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=800,
             system=DAILY_SYSTEM_PROMPT,
             messages=messages,
@@ -734,7 +738,7 @@ All open tasks grouped by category. Use the category emoji and name as a sub-hea
 Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=1000,
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -851,7 +855,7 @@ Undated open tasks grouped by category. Use category emoji and name as sub-heade
 Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=1200,
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -971,7 +975,7 @@ Calendar events (with times) and tasks due tomorrow. Skip this section entirely 
 Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=800,
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -1744,7 +1748,7 @@ class UnifiedAgent:
 
         for _ in range(10):
             last_response = await self.client.messages.create(
-                model="claude-sonnet-4-6",
+                model=CHAT_MODEL,
                 max_tokens=2048,
                 system=system_prompt,
                 tools=TOOLS,
@@ -1854,7 +1858,7 @@ class UnifiedAgent:
 
         # ── STEP 3: extract asset names — plain text list, no JSON ─────────
         extract_resp = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=600,
             messages=[{"role": "user", "content": f"""Today is {today}. Read these newsletter subjects and bodies.
 Extract every stock, crypto, ETF, company, or investment topic mentioned.
@@ -1939,7 +1943,7 @@ Analyst/news: {a['d_news'] or '(no search data)'}
 """
 
         brief_resp = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=CHAT_MODEL,
             max_tokens=3500,
             messages=[{"role": "user", "content": f"""You are a financial analyst. Today is {today}.
 Write an investment brief for these assets. Use the research data below — it's from web searches done right now.
@@ -2090,7 +2094,7 @@ Rules:
 
         try:
             response = await self.client.messages.create(
-                model="claude-sonnet-4-6",
+                model=SYNTHESIS_MODEL,
                 max_tokens=700,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -2236,7 +2240,7 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
 
         try:
             response = await self.client.messages.create(
-                model="claude-sonnet-4-6",
+                model=CHAT_MODEL,
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -2267,7 +2271,7 @@ If there is NOTHING genuinely worth flagging right now, respond with exactly the
         # purely on visual understanding — critical for screenshots, newsletters, charts.
         try:
             ocr_resp = await self.client.messages.create(
-                model="claude-sonnet-4-6",
+                model=CHAT_MODEL,
                 max_tokens=1500,
                 messages=[{
                     "role": "user",
@@ -2355,7 +2359,7 @@ For each topic, write 2-4 sentences of coherent advice drawn from the entries �
 Format: Telegram HTML only. <b>headers</b>. Blank line between every bullet. Emoji section headers."""
 
         resp = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2396,7 +2400,7 @@ For each milestone in the list: what it is, what it checks for, when to book it.
 RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size comparisons."""
 
         resp = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2473,7 +2477,7 @@ Example output:
 If nothing new: output []"""
 
         resp = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2566,7 +2570,7 @@ For each other theme, write 2-5 concise bullets of facts. Make it feel like a li
 Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between sections. Emoji headers. No asterisks."""
 
         resp = await self.client.messages.create(
-            model="claude-sonnet-4-6",
+            model=SYNTHESIS_MODEL,
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
