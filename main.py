@@ -21,6 +21,9 @@ from tools.notifications import get_pending_notifications, mark_notification_sen
 from tools.user_memory import get_shared_summary, append_shared_summary
 from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi
 from tools.daily import complete_task
+from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added
+
+ANSEN_ID = 63756531
 
 load_dotenv()
 
@@ -94,7 +97,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/shared — tasks, reminders, FYIs, shared brain",
         "/baby — pregnancy updates, milestones, knowledge base",
         "/stocks — newsletter digest + buy/hold/skip",
-        "/me — your personal tasks\n",
+        "/me — your personal tasks",
+        "/shows — upcoming gigs & events\n",
         "Or just talk — drop a note, screenshot, or question.",
     ]
     await update.message.reply_text("\n".join(lines))
@@ -421,6 +425,38 @@ async def cmd_baby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _format_shows(shows: list) -> str:
+    from datetime import datetime as _dt
+    if not shows:
+        return "🎟 <b>Upcoming Shows</b>\n\nNothing saved yet. Drop a ticket screenshot and I'll add it."
+    lines = ["🎟 <b>Upcoming Shows</b>\n"]
+    for s in shows:
+        name = s["show_name"]
+        venue = s.get("venue") or ""
+        dt_raw = s.get("show_date") or ""
+        tm = s.get("show_time") or ""
+        cal = " ✅" if s.get("calendar_added") else ""
+        notes = s.get("notes") or ""
+        if dt_raw:
+            try:
+                d = _dt.strptime(dt_raw, "%Y-%m-%d")
+                dt_str = d.strftime("%-d %b %Y")
+            except Exception:
+                dt_str = dt_raw
+        else:
+            dt_str = "date TBC"
+        detail = " · ".join(x for x in [dt_str, tm] if x)
+        line = f"• <b>{name}</b>{cal}"
+        if venue:
+            line += f"\n  📍 {venue}"
+        if detail:
+            line += f"\n  📅 {detail}"
+        if notes:
+            line += f"\n  <i>{notes}</i>"
+        lines.append(line)
+    return "\n\n".join(lines)
+
+
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
@@ -430,10 +466,126 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text, tasks = await agent.personal_brief(user_id, user_name)
         keyboard = _reminders_keyboard(tasks, user_id)
+        shows_row = [InlineKeyboardButton("🎟 Shows", callback_data="me_shows")]
+        rows = list(keyboard.inline_keyboard) if keyboard else []
+        rows.append(shows_row)
+        keyboard = InlineKeyboardMarkup(rows)
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_me failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def cmd_shows(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    try:
+        shows = get_upcoming_shows()
+        text = _format_shows(shows)
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_shows failed")
+        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def send_show_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Daily check — DM Ansen about any show 7 days away."""
+    try:
+        shows = get_shows_in_n_days(7)
+        for show in shows:
+            if show.get("calendar_added"):
+                continue
+            name = show["show_name"]
+            venue = show.get("venue") or ""
+            dt_raw = show.get("show_date") or ""
+            tm = show.get("show_time") or ""
+            from datetime import datetime as _dt
+            if dt_raw:
+                try:
+                    d = _dt.strptime(dt_raw, "%Y-%m-%d")
+                    dt_str = d.strftime("%-d %b")
+                except Exception:
+                    dt_str = dt_raw
+            else:
+                dt_str = "date TBC"
+            detail = " · ".join(x for x in [dt_str, tm] if x)
+            lines = [f"🎟 <b>{name}</b> is one week away!"]
+            if venue:
+                lines.append(f"📍 {venue}")
+            if detail:
+                lines.append(f"📅 {detail}")
+            lines.append("\nWant to add this to the shared calendar?")
+            text = "\n".join(lines)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Add to Calendar", callback_data=f"show_cal_yes:{show['id']}"),
+                    InlineKeyboardButton("❌ Not now", callback_data=f"show_cal_no:{show['id']}"),
+                ]
+            ])
+            await context.bot.send_message(
+                chat_id=ANSEN_ID, text=text, parse_mode="HTML", reply_markup=keyboard
+            )
+    except Exception:
+        logger.exception("send_show_reminders failed")
+
+
+async def _handle_show_cal_callback(query, context, data: str):
+    chat_id = query.message.chat_id
+    if ":" not in data:
+        return
+    action, show_id = data.split(":", 1)
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if action == "no":
+        await context.bot.send_message(chat_id=chat_id, text="👍 No problem — let me know if you want to add it later.")
+        return
+
+    show = get_show_by_id(show_id)
+    if not show:
+        await context.bot.send_message(chat_id=chat_id, text="Couldn't find that show.")
+        return
+
+    name = show["show_name"]
+    dt_raw = show.get("show_date")
+    tm = show.get("show_time") or "20:00"
+    venue = show.get("venue") or ""
+
+    if not dt_raw:
+        await context.bot.send_message(chat_id=chat_id, text=f"No date saved for {name} — add it first.")
+        return
+
+    # Build start/end (default 3h show if no duration known)
+    import re as _re
+    # Normalise time: "8:00 PM" → "20:00", "20:00" stays
+    time_clean = tm.strip()
+    match = _re.match(r"(\d{1,2}):(\d{2})\s*(AM|PM)?", time_clean, _re.IGNORECASE)
+    if match:
+        h, m, period = int(match.group(1)), int(match.group(2)), (match.group(3) or "").upper()
+        if period == "PM" and h != 12:
+            h += 12
+        elif period == "AM" and h == 12:
+            h = 0
+        start_str = f"{dt_raw}T{h:02d}:{m:02d}:00"
+        end_str = f"{dt_raw}T{min(h+3, 23):02d}:{m:02d}:00"
+    else:
+        start_str = f"{dt_raw}T20:00:00"
+        end_str = f"{dt_raw}T23:00:00"
+
+    try:
+        from tools.gcal import create_event
+        import asyncio
+        result = await asyncio.to_thread(create_event, name, start_str, end_str, "", venue)
+        mark_show_calendar_added(show_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ <b>{name}</b> added to the shared calendar.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Couldn't add to calendar: {str(e)[:200]}",
+        )
 
 
 async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
@@ -853,6 +1005,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await _handle_fyi_callback(query, context, data[4:])
 
+    elif data == "me_shows":
+        await query.answer()
+        try:
+            shows = get_upcoming_shows()
+            text = _format_shows(shows)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
+    elif data.startswith("show_cal_yes:") or data.startswith("show_cal_no:"):
+        await query.answer()
+        action_key = "yes" if data.startswith("show_cal_yes:") else "no"
+        show_id = data.split(":", 1)[1]
+        await _handle_show_cal_callback(query, context, f"{action_key}:{show_id}")
+
     else:
         await query.answer()
 
@@ -1069,6 +1236,7 @@ def main():
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
             BotCommand("me", "👤 My personal tasks"),
+            BotCommand("shows", "🎟 Upcoming shows & gigs"),
         ]
         await application.bot.set_my_commands(commands)
 
@@ -1088,6 +1256,7 @@ def main():
     app.add_handler(CommandHandler("stocks", cmd_stocks))
     app.add_handler(CommandHandler("baby", cmd_baby))
     app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
+    app.add_handler(CommandHandler("shows", cmd_shows))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
@@ -1114,6 +1283,8 @@ def main():
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
         # Check for scheduled notifications every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
+        # Daily show reminders — 7 days out, only to Ansen
+        app.job_queue.run_daily(send_show_reminders, time=REMINDER_TIME)
     else:
         logger.warning("Job queue unavailable — scheduled reminders disabled. Install python-telegram-bot[job-queue].")
 

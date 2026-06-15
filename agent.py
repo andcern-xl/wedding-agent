@@ -1131,6 +1131,31 @@ Any question they want to ask at an appointment → add_daily_task with category
 Triggered by: "add to OB questions", "ask the doctor", "remind us to ask", "question for the midwife", or any question phrased as something to clarify at an appointment.
 Examples: "ask about iron levels", "check if we need the flu jab", "ask when to start kick counts"
 
+SAVING YOUR OWN ANALYSIS — DO THIS PROACTIVELY
+When you generate a substantive recommendation, decision framework, or "my take" on any topic — especially baby, medical, insurance, financial, or legal questions — save the key insight to the knowledge base AFTER responding. Don't just give advice and let it disappear.
+
+Baby/pregnancy/medical/hospital/insurance topics → save_baby_knowledge
+  summary: the key decision or takeaway in 2-3 sentences
+  tags: relevant tags
+  raw_text: include the full reasoning so they can refer back
+
+Couple decisions ("we decided X", "going with Y", "our position is Z") → save_shared_context
+  One clear sentence stating the decision.
+
+Triggers for saving your own analysis:
+- You gave a "my take" or concrete recommendation
+- You worked through a decision with pros/cons and landed somewhere
+- The user asked "what should we do about X" and you gave a real answer
+- You explained a nuanced topic (insurance, hospital billing, legal) with practical implications
+
+Do not save generic explanations or information that didn't result in a recommendation. Save decisions and insights, not encyclopaedia entries.
+
+UPCOMING SHOWS (Ansen only)
+Ansen tracks concerts, gigs, festivals, and events he has tickets for. When he drops a ticket screenshot or mentions a show/event he has tickets to:
+→ call save_show immediately — extract show name, venue, date, time from the screenshot or text
+→ confirm back casually: "🎟 Got it — [Show Name] at [Venue], [Date]"
+Signals: ticket screenshot, barcode, booking confirmation, "I got tickets to", "I bought tickets for", "I'm going to see"
+
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
@@ -1496,6 +1521,21 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "save_show",
+        "description": "Save a concert, show, gig, festival, or event to Ansen's upcoming shows list. Use when Ansen drops a ticket screenshot or mentions a show/event he has tickets for. Extract show name, venue, date, and time from the image or message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "show_name": {"type": "string", "description": "Name of the show, artist, event, or performance"},
+                "venue": {"type": "string", "description": "Venue name and location"},
+                "show_date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                "show_time": {"type": "string", "description": "Time e.g. '8:00 PM' or '20:00'"},
+                "notes": {"type": "string", "description": "Any extra details — support acts, door time, ticket ref, seat, etc."},
+            },
+            "required": ["show_name"],
+        },
+    },
 ]
 
 
@@ -1718,6 +1758,17 @@ class UnifiedAgent:
                 "found": len(results),
                 "entries": [{"summary": e["summary"], "tags": e.get("tags", [])} for e in results],
             }
+
+        if name == "save_show":
+            from tools.shows import add_show
+            show = add_show(
+                show_name=inputs["show_name"],
+                venue=inputs.get("venue"),
+                show_date=inputs.get("show_date"),
+                show_time=inputs.get("show_time"),
+                notes=inputs.get("notes"),
+            )
+            return {"status": "saved", "id": str(show["id"]), "show_name": inputs["show_name"]}
 
         return {"error": f"Unknown tool: {name}"}
 
