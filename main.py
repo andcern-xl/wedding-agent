@@ -466,10 +466,10 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text, tasks = await agent.personal_brief(user_id, user_name)
         keyboard = _reminders_keyboard(tasks, user_id)
-        shows_row = [InlineKeyboardButton("🎟 Shows", callback_data="me_shows")]
         rows = list(keyboard.inline_keyboard) if keyboard else []
-        rows.append(shows_row)
-        keyboard = InlineKeyboardMarkup(rows)
+        if user_id == ANSEN_ID:
+            rows.append([InlineKeyboardButton("🎟 Shows", callback_data="me_shows")])
+        keyboard = InlineKeyboardMarkup(rows) if rows else None
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_me failed")
@@ -478,6 +478,8 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_shows(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
+        return
+    if update.effective_user.id != ANSEN_ID:
         return
     try:
         shows = get_upcoming_shows()
@@ -1007,6 +1009,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "me_shows":
         await query.answer()
+        if user_id != ANSEN_ID:
+            return
         try:
             shows = get_upcoming_shows()
             text = _format_shows(shows)
