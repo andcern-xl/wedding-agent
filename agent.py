@@ -1175,6 +1175,16 @@ Triggers for saving your own analysis:
 
 Do not save generic explanations or information that didn't result in a recommendation. Save decisions and insights, not encyclopaedia entries.
 
+TRAVEL
+Ansen and Jess travel frequently. Track trips in the shared trips list.
+
+Saving a trip: "we're going to X", "I booked flights to X", "planning a trip to X" → save_trip, then IMMEDIATELY search_web for visa requirements for BOTH Singapore passport (Ansen) AND US passport (Jess), then call update_trip to store visa_ansen and visa_jess. Do this automatically — don't wait to be asked.
+Updating: booked flights/hotel, dates changed, adding context → update_trip
+Viewing: "what trips do we have", "travel plans" → get_trips
+Visa check: "what visa do we need for X" → search_web for both passports, update_trip with results
+
+Visa format to save: "Visa-free, 30 days" / "e-Visa required — apply at [url], ~$30, processing 3 days" / "Visa on arrival, USD 35" / "Visa required — Singapore embassy"
+
 UPCOMING SHOWS (Ansen only)
 Ansen tracks concerts, gigs, festivals, and events he has tickets for.
 
@@ -1563,6 +1573,49 @@ TOOLS = [
         },
     },
     {
+        "name": "save_trip",
+        "description": "Save a new trip to the shared travel list. Use when either person mentions going somewhere — 'we're going to Japan', 'booked flights to Bali', 'planning a trip to Seoul'. After saving, search visa requirements for both Singapore and US passports and call update_trip to store the visa info.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "destination": {"type": "string", "description": "City or country name"},
+                "country": {"type": "string", "description": "Country name if different from destination"},
+                "start_date": {"type": "string", "description": "Departure date in YYYY-MM-DD format"},
+                "end_date": {"type": "string", "description": "Return date in YYYY-MM-DD format"},
+                "status": {"type": "string", "enum": ["planning", "booked", "completed", "cancelled"], "description": "Trip status. Default: planning"},
+                "notes": {"type": "string", "description": "Any initial notes — flight refs, hotel, purpose of trip"},
+            },
+            "required": ["destination"],
+        },
+    },
+    {
+        "name": "update_trip",
+        "description": "Update an existing trip — status, visa info, notes, dates. Use after searching visa requirements to store the result. Also use when flights/hotels are booked, dates change, or any new info comes in.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "destination": {"type": "string", "description": "Destination name to look up the trip (partial match)"},
+                "status": {"type": "string", "enum": ["planning", "booked", "completed", "cancelled"]},
+                "visa_ansen": {"type": "string", "description": "Visa requirement for Ansen (Singapore passport) e.g. 'Visa-free 90 days' or 'e-Visa required, apply at...'"},
+                "visa_jess": {"type": "string", "description": "Visa requirement for Jess (US passport)"},
+                "notes": {"type": "string", "description": "New note to append to the trip (will be added to existing notes)"},
+                "start_date": {"type": "string", "description": "Updated start date YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "Updated end date YYYY-MM-DD"},
+            },
+            "required": ["destination"],
+        },
+    },
+    {
+        "name": "get_trips",
+        "description": "List upcoming trips. Use when asked about travel plans, upcoming trips, or to check visa status for a destination.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_past": {"type": "boolean", "description": "Include completed/past trips. Default false."},
+            },
+        },
+    },
+    {
         "name": "delete_show",
         "description": "Remove a show from Ansen's list. Use when he says he can't go, sold the tickets, or wants it removed.",
         "input_schema": {
@@ -1808,6 +1861,51 @@ class UnifiedAgent:
                 "found": len(results),
                 "entries": [{"summary": e["summary"], "tags": e.get("tags", [])} for e in results],
             }
+
+        if name == "save_trip":
+            from tools.trips import add_trip
+            trip = add_trip(
+                destination=inputs["destination"],
+                country=inputs.get("country"),
+                start_date=inputs.get("start_date"),
+                end_date=inputs.get("end_date"),
+                status=inputs.get("status", "planning"),
+                notes=inputs.get("notes"),
+            )
+            return {"status": "saved", "id": str(trip["id"]), "destination": inputs["destination"]}
+
+        if name == "update_trip":
+            from tools.trips import find_trips_by_destination, update_trip as _update_trip, append_trip_note
+            matches = find_trips_by_destination(inputs["destination"])
+            if not matches:
+                return {"status": "not_found", "destination": inputs["destination"]}
+            trip = matches[0]
+            kwargs = {}
+            for field in ("status", "visa_ansen", "visa_jess", "start_date", "end_date"):
+                if inputs.get(field):
+                    kwargs[field] = inputs[field]
+            if kwargs:
+                _update_trip(trip["id"], **kwargs)
+            if inputs.get("notes"):
+                append_trip_note(trip["id"], inputs["notes"])
+            return {"status": "updated", "destination": trip["destination"]}
+
+        if name == "get_trips":
+            from tools.trips import get_upcoming_trips, get_all_trips
+            trips = get_all_trips() if inputs.get("include_past") else get_upcoming_trips()
+            return [
+                {
+                    "id": str(t["id"]),
+                    "destination": t["destination"],
+                    "start_date": t.get("start_date"),
+                    "end_date": t.get("end_date"),
+                    "status": t.get("status"),
+                    "visa_ansen": t.get("visa_ansen"),
+                    "visa_jess": t.get("visa_jess"),
+                    "notes": t.get("notes"),
+                }
+                for t in trips
+            ]
 
         if name == "save_show":
             from tools.shows import add_show
@@ -2356,6 +2454,23 @@ Rules:
         except Exception:
             pass
 
+        # Upcoming trips
+        trips_block = ""
+        try:
+            from tools.trips import get_upcoming_trips as _get_trips
+            upcoming_trips = _get_trips()
+            if upcoming_trips:
+                trip_lines = []
+                for t in upcoming_trips:
+                    dest = t["destination"]
+                    dates = " – ".join(x for x in [t.get("start_date") or "", t.get("end_date") or ""] if x) or "dates TBC"
+                    va = t.get("visa_ansen") or "not checked"
+                    vj = t.get("visa_jess") or "not checked"
+                    trip_lines.append(f"  • {dest} ({dates}) | Ansen visa: {va} | Jess visa: {vj} | status: {t.get('status','planning')}")
+                trips_block = "UPCOMING TRIPS:\n" + "\n".join(trip_lines)
+        except Exception:
+            pass
+
         # Upcoming shows — Ansen only
         shows_block = ""
         if user_id == 63756531:
@@ -2407,6 +2522,8 @@ SHARED BRAIN:
 {wedding_block}
 
 {baby_block}
+
+{trips_block}
 
 {shows_block}
 

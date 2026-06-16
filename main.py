@@ -96,8 +96,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/shared — tasks, reminders, FYIs, shared brain",
         "/baby — pregnancy updates, milestones, knowledge base",
         "/stocks — newsletter digest + buy/hold/skip",
-        "/me — your personal tasks",
-        "/shows — upcoming gigs & events\n",
+        "/me — your personal tasks (includes shows)\n",
         "Or just talk — drop a note, screenshot, or question.",
     ]
     await update.message.reply_text("\n".join(lines))
@@ -117,7 +116,8 @@ def _shared_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("📨 FYIs", callback_data="shared_fyis")],
         [InlineKeyboardButton("✅ Tasks", callback_data="shared_tasks"),
          InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
-        [InlineKeyboardButton("💰 Budget", callback_data="shared_budget")],
+        [InlineKeyboardButton("💰 Budget", callback_data="shared_budget"),
+         InlineKeyboardButton("✈️ Travel", callback_data="shared_travel")],
     ])
 
 
@@ -847,6 +847,53 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
+    elif action == "travel":
+        try:
+            from tools.trips import get_upcoming_trips
+            from datetime import datetime as _dt
+            trips = get_upcoming_trips()
+            if not trips:
+                text = "✈️ <b>Travel</b>\n\nNo upcoming trips yet. Just mention where you're going and I'll add it."
+                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+                return
+            STATUS_ICON = {"planning": "🗓", "booked": "✅", "completed": "🏁", "cancelled": "❌"}
+            lines = ["✈️ <b>Upcoming Trips</b>\n"]
+            del_rows = []
+            for t in trips:
+                dest = t["destination"]
+                status = t.get("status") or "planning"
+                icon = STATUS_ICON.get(status, "🗓")
+                start = t.get("start_date") or ""
+                end = t.get("end_date") or ""
+                if start:
+                    try:
+                        start = _dt.strptime(start, "%Y-%m-%d").strftime("%-d %b")
+                    except Exception:
+                        pass
+                if end:
+                    try:
+                        end = _dt.strptime(end, "%Y-%m-%d").strftime("%-d %b %Y")
+                    except Exception:
+                        pass
+                date_str = f"{start} – {end}" if start and end else (start or end or "dates TBC")
+                line = f"{icon} <b>{dest}</b> · {date_str}"
+                va = t.get("visa_ansen")
+                vj = t.get("visa_jess")
+                if va or vj:
+                    line += f"\n  🛂 Ansen: {va or '—'} | Jess: {vj or '—'}"
+                notes = t.get("notes") or ""
+                if notes:
+                    first_note = notes.split("\n")[0][:80]
+                    line += f"\n  <i>{first_note}</i>"
+                lines.append(line)
+                label = dest[:28] + "…" if len(dest) > 28 else dest
+                del_rows.append([InlineKeyboardButton(f"🗑 {label}", callback_data=f"trip_del:{t['id']}")])
+            text = "\n\n".join(lines)
+            keyboard = InlineKeyboardMarkup(del_rows) if del_rows else None
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
 
 async def _handle_wedding_callback(query, context, action: str, user_id: int):
     chat_id = query.message.chat_id
@@ -1026,6 +1073,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
+    elif data.startswith("trip_del:"):
+        await query.answer()
+        trip_id = data[9:]
+        try:
+            from tools.trips import get_trip_by_id, delete_trip as _del_trip
+            trip = get_trip_by_id(trip_id)
+            name = trip["destination"] if trip else "that trip"
+            _del_trip(trip_id)
+            current = query.message.reply_markup
+            if current:
+                new_rows = [row for row in current.inline_keyboard if not any(btn.callback_data == data for btn in row)]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"🗑 Removed <b>{escape(name)}</b>.", parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"Couldn't remove: {str(e)[:100]}")
 
     elif data.startswith("show_del:"):
         await query.answer()
@@ -1288,7 +1351,6 @@ def main():
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
             BotCommand("me", "👤 My personal tasks"),
-            BotCommand("shows", "🎟 Upcoming shows & gigs"),
         ]
         await application.bot.set_my_commands(commands)
 
