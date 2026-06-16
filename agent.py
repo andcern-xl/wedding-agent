@@ -563,6 +563,27 @@ Rules:
 - category: pick the best matching slug from available categories, or null if unclear"""
 
 
+_CAL_STOP = {"with", "the", "and", "for", "our", "from", "this", "that", "have", "will", "dinner", "lunch", "brunch", "meet", "catch"}
+
+def _is_calendar_covered(task: dict, cal_events: list) -> bool:
+    """True if a calendar event already represents this task (same date + name overlap)."""
+    due = task.get("due_date")
+    if not due:
+        return False
+    task_text = (task.get("task") or "").lower()
+    task_words = {w for w in task_text.split() if len(w) >= 4 and w not in _CAL_STOP}
+    if not task_words:
+        return False
+    for e in cal_events:
+        event_date = (e.get("start") or "")[:10]
+        if event_date != due:
+            continue
+        event_words = {w.lower() for w in (e.get("title") or "").split() if len(w) >= 4 and w.lower() not in _CAL_STOP}
+        if task_words & event_words:
+            return True
+    return False
+
+
 def _task_label(t: dict, today_str: str) -> str:
     icon = "👥" if t["visibility"] == "shared" else "🔒"
     due = t.get("due_date")
@@ -768,16 +789,19 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
                     t["_owner"] = names.get(uid, str(uid))
                 merged.append(t)
 
-        overdue = sorted([t for t in merged if t.get("due_date") and t["due_date"] < today_str], key=lambda t: t["due_date"])
-        due_today = [t for t in merged if t.get("due_date") == today_str]
-        upcoming = sorted([t for t in merged if t.get("due_date") and t["due_date"] > today_str], key=lambda t: t["due_date"])
-        no_date = sorted([t for t in merged if not t.get("due_date")], key=lambda t: t["task"].lower())
-
-        # Google Calendar events
+        # Google Calendar events — fetch first so we can filter tasks against them
         try:
             events = await asyncio.to_thread(get_events, 7)
         except Exception:
             events = []
+
+        # Drop tasks already represented by a calendar event (same date + name overlap)
+        merged = [t for t in merged if not _is_calendar_covered(t, events)]
+
+        overdue = sorted([t for t in merged if t.get("due_date") and t["due_date"] < today_str], key=lambda t: t["due_date"])
+        due_today = [t for t in merged if t.get("due_date") == today_str]
+        upcoming = sorted([t for t in merged if t.get("due_date") and t["due_date"] > today_str], key=lambda t: t["due_date"])
+        no_date = sorted([t for t in merged if not t.get("due_date")], key=lambda t: t["task"].lower())
 
         parts = [f"TODAY IS {weekday.upper()}, {today_str}"]
 
@@ -852,7 +876,8 @@ Tasks due in the next 7 days. One bullet each. Skip if none.
 <b>On the List</b>
 Undated open tasks grouped by category. Use category emoji and name as sub-header. Note whose task it is where relevant.
 
-Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
+Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight.
+Never list the same event under both Calendar and Tasks — calendar always wins, suppress the task."""
 
         response = await self.client.messages.create(
             model=CHAT_MODEL,
@@ -1076,7 +1101,7 @@ HOW TO USE TOOLS
 - New category request → add_custom_category
 - Decisions / confirmed bookings → read_memory
 - "what's on the calendar" / "what's happening this week" → read_calendar
-- "book", "schedule", "add to calendar" → create_calendar_event
+- "book", "schedule", "add to calendar" → create_calendar_event; then immediately call read_daily_tasks and mark_task_done on any open task that matches the same event (by name or date) — never leave a calendar event AND an open task for the same thing
 - "cancel", "remove from calendar" → delete_calendar_event (read_calendar first to get the event ID)
 - "what reminders are scheduled" → list_notifications
 - "cancel that reminder" → cancel_notification (list_notifications first to get the ID)
@@ -1151,10 +1176,11 @@ Triggers for saving your own analysis:
 Do not save generic explanations or information that didn't result in a recommendation. Save decisions and insights, not encyclopaedia entries.
 
 UPCOMING SHOWS (Ansen only)
-Ansen tracks concerts, gigs, festivals, and events he has tickets for. When he drops a ticket screenshot or mentions a show/event he has tickets to:
-→ call save_show immediately — extract show name, venue, date, time from the screenshot or text
-→ confirm back casually: "🎟 Got it — [Show Name] at [Venue], [Date]"
-Signals: ticket screenshot, barcode, booking confirmation, "I got tickets to", "I bought tickets for", "I'm going to see"
+Ansen tracks concerts, gigs, festivals, and events he has tickets for.
+
+Adding: ticket screenshot or "I got tickets to X" → save_show (extract name, venue, date, time) → confirm: "🎟 Got it — [Show] at [Venue], [Date]"
+Removing: "I can't go to X", "remove X", "sold my tickets to X" → delete_show
+Updating: "might not make X", "sold the ticket", "got upgraded" → update_show with appropriate status (going/maybe/cant_go/sold) and/or notes
 
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
@@ -1189,7 +1215,7 @@ TASK QUALITY RULES — enforce these strictly:
 - Task names must be SHORT (under 80 chars). The action only — not the backstory. If you need to include context, log it as an FYI or wedding drop separately, then create a short task.
   WRONG: "Look into getting an OCBC credit card (any card) so you don't lose points. When ready, transfer $10k..."
   RIGHT: "Look into OCBC credit card for points"
-- Social events / dinners with a confirmed date and time → create_calendar_event, NOT add_daily_task
+- Social events / dinners with a confirmed date and time → create_calendar_event, NOT add_daily_task. If a task already exists for it, mark it done after creating the event.
 - Package trackers / running balances ("10 manicure sessions, 7 remaining") → save to personal summary via save_preference, NOT add_daily_task
 - Facts or preferences about either person ("Jess likes kaya waffle", "Ansen prefers window seats", "Jess is allergic to X") → save_preference for that person, NEVER add_daily_task or log_fyi. These are memory, not tasks.
 - Items someone already owns or knows about ("AirPods are in the car") → log_fyi, NOT add_daily_task
@@ -1536,6 +1562,30 @@ TOOLS = [
             "required": ["show_name"],
         },
     },
+    {
+        "name": "delete_show",
+        "description": "Remove a show from Ansen's list. Use when he says he can't go, sold the tickets, or wants it removed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "show_name": {"type": "string", "description": "Name of the show to remove (partial match is fine)"},
+            },
+            "required": ["show_name"],
+        },
+    },
+    {
+        "name": "update_show",
+        "description": "Update a show's status or notes. Use when Ansen says he might not make it, sold a ticket, got an upgrade, or adds any context about a show.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "show_name": {"type": "string", "description": "Name of the show to update (partial match is fine)"},
+                "status": {"type": "string", "enum": ["going", "maybe", "cant_go", "sold"], "description": "Attendance status: going (default), maybe, cant_go, sold"},
+                "notes": {"type": "string", "description": "Additional context to save with the show"},
+            },
+            "required": ["show_name"],
+        },
+    },
 ]
 
 
@@ -1770,6 +1820,24 @@ class UnifiedAgent:
             )
             return {"status": "saved", "id": str(show["id"]), "show_name": inputs["show_name"]}
 
+        if name == "delete_show":
+            from tools.shows import find_shows_by_name, delete_show as _delete_show
+            matches = find_shows_by_name(inputs["show_name"])
+            if not matches:
+                return {"status": "not_found", "show_name": inputs["show_name"]}
+            show = matches[0]
+            _delete_show(show["id"])
+            return {"status": "deleted", "show_name": show["show_name"]}
+
+        if name == "update_show":
+            from tools.shows import find_shows_by_name, update_show as _update_show
+            matches = find_shows_by_name(inputs["show_name"])
+            if not matches:
+                return {"status": "not_found", "show_name": inputs["show_name"]}
+            show = matches[0]
+            _update_show(show["id"], status=inputs.get("status"), notes=inputs.get("notes"))
+            return {"status": "updated", "show_name": show["show_name"], "new_status": inputs.get("status")}
+
         return {"error": f"Unknown tool: {name}"}
 
     @staticmethod
@@ -1790,10 +1858,35 @@ class UnifiedAgent:
                 result.append(m)
         return result
 
+    @staticmethod
+    def _sanitize_history(messages: list) -> list:
+        """Ensure history starts at a clean boundary — no orphaned tool_result blocks.
+
+        Trimming to the last N messages can split a tool_use/tool_result pair, leaving
+        a tool_result with no matching tool_use in the previous message. The Anthropic API
+        returns a 400 in that case. We scan forward to the first message that is either:
+        - a plain-text user message (string content), or
+        - a user message whose content list contains no tool_result blocks
+        and drop everything before it.
+        """
+        for i, m in enumerate(messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content", "")
+            if isinstance(content, str):
+                return messages[i:]
+            if isinstance(content, list):
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+                )
+                if not has_tool_result:
+                    return messages[i:]
+        return []  # nothing clean — start fresh
+
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": []}
-        messages = history + [{"role": "user", "content": user_content}]
+        messages = self._sanitize_history(history) + [{"role": "user", "content": user_content}]
         system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context)
         last_response = None
 
@@ -1812,7 +1905,7 @@ class UnifiedAgent:
                     reply = "Got it."
                 reply = _fix_md(reply)
                 messages.append({"role": "assistant", "content": reply})
-                updated_history = self._strip_image_data(messages[-40:])
+                updated_history = self._sanitize_history(self._strip_image_data(messages[-40:]))
 
                 try:
                     msg_count = get_message_count(user_id) + 1
@@ -1834,7 +1927,7 @@ class UnifiedAgent:
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": self._strip_image_data(messages[-40:]), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"]}
+                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"]}
 
             if last_response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]
@@ -2157,150 +2250,252 @@ Rules:
             pass  # compression failure is non-critical
 
     async def proactive_check(self, user_id: int, user_name: str) -> str | None:
-        """Survey current state for this user and return a message if something is genuinely worth flagging, else None."""
-        import os
-        from datetime import date as _date, datetime as _datetime, timezone as _tz
+        """Agentic proactive intelligence check — can use tools to research and surface insights."""
+        import os, json as _json
+        from datetime import date as _date, datetime as _datetime
 
         today = _date.today()
         today_str = today.isoformat()
-        other_name = next((n for uid, n in self._USER_NAMES.items() if uid != user_id), "partner")
+        tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
+        wedding_days = (_date(2026, 11, 7) - today).days
 
-        # --- Gather data ---
+        # --- Gather base context ---
+        profile = ""
         try:
-            profile = get_summary(user_id)
+            profile = get_summary(user_id) or ""
         except Exception:
-            profile = ""
+            pass
 
+        shared = ""
         try:
-            shared = get_shared_summary()
+            shared = get_shared_summary() or ""
         except Exception:
-            shared = ""
+            pass
 
-        # Open tasks — compute staleness
-        try:
-            raw_tasks = get_tasks(user_id, include_done=False)
-        except Exception:
-            raw_tasks = []
-
+        # Tasks with staleness flags
         task_lines = []
-        for t in raw_tasks:
-            created = (t.get("created_at") or today_str)[:10]
-            try:
-                age_days = (today - _date.fromisoformat(created)).days
-            except ValueError:
-                age_days = 0
-            due = t.get("due_date") or "no date"
-            overdue = due != "no date" and due < today_str
-            stale = age_days >= 7
-            flags = []
-            if overdue:
-                flags.append("OVERDUE")
-            if stale:
-                flags.append(f"open {age_days}d")
-            flag_str = f" [{', '.join(flags)}]" if flags else ""
-            vis = "shared" if t.get("visibility") == "shared" else "private"
-            task_lines.append(f"  • {t['task']} (due: {due}, {vis}){flag_str}")
-
+        try:
+            for t in get_tasks(user_id, include_done=False):
+                created = (t.get("created_at") or today_str)[:10]
+                try:
+                    age_days = (today - _date.fromisoformat(created)).days
+                except ValueError:
+                    age_days = 0
+                due = t.get("due_date") or "no date"
+                overdue = due != "no date" and due < today_str
+                flags = []
+                if overdue:
+                    flags.append("OVERDUE")
+                if age_days >= 14:
+                    flags.append(f"stale {age_days}d")
+                flag_str = f" [{', '.join(flags)}]" if flags else ""
+                task_lines.append(f"  • {t['task']} (due: {due}){flag_str}")
+        except Exception:
+            pass
         tasks_block = ("OPEN TASKS:\n" + "\n".join(task_lines)) if task_lines else "OPEN TASKS: none"
 
-        # Wedding drops — last activity per category
+        # Recent FYIs
+        fyi_lines = []
         try:
-            all_drops = get_recent_drops(limit=200)
+            from tools.fyis import get_fyis as _get_fyis
+            for f in _get_fyis(limit=20):
+                when = (f.get("created_at") or "")[:10]
+                cat = f.get("category") or "misc"
+                fyi_lines.append(f"  [{cat}] {when}: {f['content']}")
         except Exception:
-            all_drops = []
+            pass
+        fyis_block = ("RECENT FYIs:\n" + "\n".join(fyi_lines)) if fyi_lines else "RECENT FYIs: none"
 
-        last_drop_by_cat: dict[str, str] = {}
-        for d in all_drops:
-            cat = d.get("category") or "general"
-            if cat not in last_drop_by_cat:
-                last_drop_by_cat[cat] = d["ts"][:10]
-
-        wedding_lines = []
-        for cat_key, cat_info in CATEGORIES.items():
-            last = last_drop_by_cat.get(cat_key)
-            if last:
-                try:
-                    days_ago = (today - _date.fromisoformat(last)).days
-                    wedding_lines.append(f"  • {cat_info['name']}: last activity {days_ago}d ago ({last})")
-                except ValueError:
-                    wedding_lines.append(f"  • {cat_info['name']}: last activity {last}")
-            else:
-                wedding_lines.append(f"  • {cat_info['name']}: NO ACTIVITY YET")
-
-        wedding_block = "WEDDING PLANNING ACTIVITY BY CATEGORY:\n" + "\n".join(wedding_lines)
-
-        # Calendar — next 14 days
+        # Calendar — next 21 days
+        cal_lines = []
         try:
-            cal_events = await asyncio.to_thread(get_events, 14)
-            cal_lines = []
-            for e in cal_events[:10]:
+            for e in (await asyncio.to_thread(get_events, 21))[:15]:
                 start = e["start"]
                 if "T" in start:
                     try:
                         start = _datetime.fromisoformat(start).strftime("%-d %b %H:%M")
                     except ValueError:
                         pass
-                cal_lines.append(f"  • {start} — {e['title']}")
-            cal_block = ("CALENDAR (next 14 days):\n" + "\n".join(cal_lines)) if cal_lines else "CALENDAR: no events"
+                loc = f" @ {e['location']}" if e.get("location") else ""
+                cal_lines.append(f"  • {start} — {e['title']}{loc}")
         except Exception:
-            cal_block = "CALENDAR: unavailable"
+            pass
+        cal_block = ("CALENDAR (next 21 days):\n" + "\n".join(cal_lines)) if cal_lines else "CALENDAR: none"
 
-        tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
+        # Wedding category activity
+        wedding_lines = []
+        try:
+            all_drops = get_recent_drops(limit=200)
+            last_drop_by_cat: dict[str, str] = {}
+            for d in all_drops:
+                cat = d.get("category") or "general"
+                if cat not in last_drop_by_cat:
+                    last_drop_by_cat[cat] = d["ts"][:10]
+            for cat_key, cat_info in CATEGORIES.items():
+                last = last_drop_by_cat.get(cat_key)
+                if last:
+                    try:
+                        days_ago = (today - _date.fromisoformat(last)).days
+                        wedding_lines.append(f"  • {cat_info['name']}: last activity {days_ago}d ago")
+                    except ValueError:
+                        wedding_lines.append(f"  • {cat_info['name']}: {last}")
+                else:
+                    wedding_lines.append(f"  • {cat_info['name']}: NO ACTIVITY YET")
+        except Exception:
+            pass
+        wedding_block = ("WEDDING CATEGORIES:\n" + "\n".join(wedding_lines)) if wedding_lines else "WEDDING CATEGORIES: unavailable"
 
-        prompt = f"""You are a proactive personal assistant for {user_name}. Today is {today_str} ({tz_name}).
+        # Baby context
+        baby_block = ""
+        try:
+            info = pregnancy_summary()
+            milestones = upcoming_milestones(within_weeks=4)
+            baby_block = f"PREGNANCY: Week {info['week']} of {info['total_weeks']}, due {info['due_date']}\n"
+            if milestones:
+                baby_block += "UPCOMING MILESTONES:\n" + "\n".join(f"  • {m}" for m in milestones[:5])
+        except Exception:
+            pass
 
-Their wedding is on 7 November 2026 — {((_date(2026, 11, 7) - today).days)} days away.
+        # Upcoming shows — Ansen only
+        shows_block = ""
+        if user_id == 63756531:
+            try:
+                from tools.shows import get_upcoming_shows as _get_shows
+                from datetime import timedelta as _td
+                cutoff = (today + _td(days=21)).isoformat()
+                shows = [s for s in _get_shows() if (s.get("show_date") or "9999") <= cutoff]
+                if shows:
+                    show_lines = []
+                    for s in shows:
+                        dt_raw = s.get("show_date") or "TBC"
+                        if dt_raw != "TBC":
+                            try:
+                                dt_raw = _datetime.strptime(dt_raw, "%Y-%m-%d").strftime("%-d %b")
+                            except Exception:
+                                pass
+                        tm = s.get("show_time") or ""
+                        venue = s.get("venue") or ""
+                        cal = " [in calendar]" if s.get("calendar_added") else " [NOT in calendar]"
+                        show_lines.append(f"  • {s['show_name']} — {dt_raw} {tm} {venue}{cal}")
+                    shows_block = "UPCOMING SHOWS (next 21 days):\n" + "\n".join(show_lines)
+            except Exception:
+                pass
 
-THEIR PROFILE:
-{profile or "(no profile yet)"}
+        # --- Proactive tools available to this check ---
+        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis")]
 
-SHARED BRAIN (confirmed couple decisions):
+        system = f"""You are a proactive intelligence agent for {user_name}. Today is {today_str} ({tz_name}).
+
+IDENTITIES:
+- Ansen: Singaporean passport
+- Jess / Jessica: US passport (American)
+- Wedding: 7 November 2026 ({wedding_days} days away)
+- Baby due: 18 February 2027
+
+YOUR CONTEXT:
+{profile or "(no profile)"}
+
+SHARED BRAIN:
 {shared or "(empty)"}
 
 {tasks_block}
 
-{wedding_block}
+{fyis_block}
 
 {cal_block}
 
+{wedding_block}
+
+{baby_block}
+
+{shows_block}
+
 ---
 
-Your job: decide if there is anything GENUINELY worth sending {user_name} an unprompted message about right now.
+YOUR JOB: Scan all context above and decide if anything is worth an unprompted message to {user_name}. You have web search available — use it when you spot something that needs real-time research.
 
-Things worth flagging (be selective — only flag if there's real urgency or a real pattern):
-- A wedding category with NO activity that is time-sensitive (venue, photographer, catering book out fast)
-- A task that has been open for 2+ weeks with no progress — worth a nudge or a "is this still relevant?"
-- An overdue task that hasn't been cleared
-- A calendar event in the next 3 days that likely needs prep
-- A pattern from their profile that suggests something is being avoided or forgotten
-- A deadline or booking window that's closing (e.g. "venue deposits usually required 12 months out")
+INTELLIGENCE TRIGGERS — actively look for these:
 
-Things NOT worth flagging:
-- Anything already covered in the morning daily brief (today's due tasks, upcoming tasks)
-- Generic wedding advice with no personal specificity
-- Things that are going fine
-- More than 3 bullets — if you have too much to say, pick the top 2-3
+🌍 TRAVEL
+- Any destination mentioned in FYIs, calendar, or tasks → search visa requirements for BOTH Singapore passport AND US passport, flag if either needs a visa/e-visa/action
+- Entry requirements (health declarations, onward ticket, insurance mandates)
+- Visa application lead times — flag early if it takes weeks
 
-If there IS something worth saying, write ONLY the Telegram message itself — no preamble, no "here are my top picks", no analysis. Just the message, starting immediately with the first line of content.
+👶 BABY
+- What's medically happening this week in the pregnancy
+- Upcoming milestones or appointments that need prep
+- Things that should be booked/done by this gestational week but aren't
+- Cross-domain: wedding is 3 months before due date — flag planning conflicts
 
-Max 4 bullets. Sound like a sharp friend, not a notification bot.
+💒 WEDDING
+- Categories with no activity that book out fast (venues, photographers, caterers)
+- Vendor follow-ups that have gone quiet
+- Decisions that should be made by now given {wedding_days} days remaining
 
-FORMATTING: Telegram uses parse_mode=HTML — **asterisks are NOT rendered, they show as literal * characters**. Use <b>bold</b> for any headers, • for bullets, and emojis freely (💍 🚨 📸 🏨 💰 📅). Never use ** or _ for formatting.
+💰 FINANCE
+- Bills or payments mentioned in FYIs that are approaching
+- Outstanding amounts that haven't moved
 
-If there is NOTHING genuinely worth flagging right now, respond with exactly the word: NOTHING"""
+🎟 SHOWS (Ansen)
+- Show in next 7 days not yet in calendar → flag it
+- Show logistics worth surfacing (transport, timing, etc.)
 
-        try:
-            response = await self.client.messages.create(
-                model=CHAT_MODEL,
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result = response.content[0].text.strip()
-            if result.upper() == "NOTHING" or result.upper().startswith("NOTHING"):
+📋 TASKS
+- Overdue tasks not cleared
+- Tasks open 14+ days with no progress
+
+🔗 CROSS-DOMAIN
+- Conflicts between wedding timeline and baby timeline
+- Anything where one domain affects another
+
+RULES:
+- Use search_web when you detect a travel destination, visa question, or anything needing current info — don't just guess
+- Be selective — max 3-4 things. If nothing is genuinely worth flagging, say NOTHING
+- Don't repeat what the morning brief already covers (today's due tasks)
+- Sound like a sharp friend who notices things, not a notification bot
+- FORMATTING: Telegram HTML only — <b>bold</b>, • bullets, emojis. Never use ** or _
+
+If nothing is worth flagging: respond with exactly: NOTHING"""
+
+        # --- Run agentic loop (max 4 tool calls) ---
+        messages: list[dict] = [{"role": "user", "content": "Run your proactive intelligence check now."}]
+        for _ in range(4):
+            try:
+                response = await self.client.messages.create(
+                    model=SYNTHESIS_MODEL,
+                    max_tokens=800,
+                    system=system,
+                    tools=proactive_tools,
+                    messages=messages,
+                )
+            except Exception:
                 return None
-            return _fix_md(result)
-        except Exception:
-            return None
+
+            if response.stop_reason == "end_turn":
+                result = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+                if not result or result.upper().startswith("NOTHING"):
+                    return None
+                return _fix_md(result)
+
+            if response.stop_reason == "tool_use":
+                tool_uses = [b for b in response.content if b.type == "tool_use"]
+                messages.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for tu in tool_uses:
+                    try:
+                        res = await self._execute_tool(tu.name, tu.input, user_id, {})
+                    except Exception as e:
+                        res = {"error": str(e)}
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": _json.dumps(res),
+                    })
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                break
+
+        return None
 
     async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
@@ -2654,6 +2849,11 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         except Exception:
             return "Couldn't load your tasks right now.", []
 
+        try:
+            cal_events = await asyncio.to_thread(get_events, 30)
+        except Exception:
+            cal_events = []
+
         mine = []
         seen: set = set()
         for t in all_tasks:
@@ -2667,7 +2867,7 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
                 continue
             assigned = t.get("assigned_to")
             is_mine = (assigned == user_id) or (not assigned and t.get("visibility") == "private" and t.get("user_id") == user_id)
-            if is_mine:
+            if is_mine and not _is_calendar_covered(t, cal_events):
                 seen.add(tid)
                 mine.append(t)
 

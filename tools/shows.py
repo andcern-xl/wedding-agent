@@ -11,7 +11,7 @@ def add_show(
     show_time: str | None = None,
     notes: str | None = None,
 ) -> dict:
-    row: dict = {"user_id": ANSEN_ID, "show_name": show_name, "calendar_added": False}
+    row: dict = {"user_id": ANSEN_ID, "show_name": show_name, "calendar_added": False, "status": "going"}
     if venue:
         row["venue"] = venue
     if show_date:
@@ -39,6 +39,29 @@ def get_show_by_id(show_id: str) -> dict | None:
 def get_shows_in_n_days(n: int) -> list[dict]:
     target = (date.today() + timedelta(days=n)).isoformat()
     return get_client().table("shows").select("*").eq("show_date", target).execute().data
+
+
+def find_shows_by_name(name: str) -> list[dict]:
+    all_shows = get_client().table("shows").select("*").eq("user_id", ANSEN_ID).execute().data
+    name_lower = name.lower()
+    return [s for s in all_shows if name_lower in (s.get("show_name") or "").lower()]
+
+
+def delete_show(show_id: str) -> bool:
+    result = get_client().table("shows").delete().eq("id", show_id).execute()
+    return bool(result.data)
+
+
+def update_show(show_id: str, status: str | None = None, notes: str | None = None) -> bool:
+    updates: dict = {}
+    if status:
+        updates["status"] = status
+    if notes is not None:
+        updates["notes"] = notes
+    if not updates:
+        return False
+    result = get_client().table("shows").update(updates).eq("id", show_id).execute()
+    return bool(result.data)
 
 
 def mark_calendar_added(show_id: str) -> bool:

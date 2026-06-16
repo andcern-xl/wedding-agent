@@ -21,7 +21,7 @@ from tools.notifications import get_pending_notifications, mark_notification_sen
 from tools.user_memory import get_shared_summary, append_shared_summary
 from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi
 from tools.daily import complete_task
-from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added
+from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added, delete_show as _delete_show_by_id
 
 ANSEN_ID = 63756531
 
@@ -31,14 +31,13 @@ try:
     REMINDER_TIMEZONE = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
 except Exception:
     REMINDER_TIMEZONE = ZoneInfo("UTC")
-REMINDER_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
-_evening_hour = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
-EVENING_TIME = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
+REMINDER_TIME   = dtime(hour=9,  minute=0, tzinfo=REMINDER_TIMEZONE)   # 9am  — tasks, FYIs, baby, shows
+_evening_hour   = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
+EVENING_TIME    = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — recap, knowledge sweep
 _proactive_hour = int(os.getenv("PROACTIVE_HOUR", "14"))
-PROACTIVE_TIME = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
-_stocks_hour = int(os.getenv("STOCKS_BRIEF_HOUR", "9"))
-STOCKS_TIME = dtime(hour=_stocks_hour, minute=0, tzinfo=REMINDER_TIMEZONE)
-BABY_WEEKLY_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)  # Mondays 9am
+PROACTIVE_TIME  = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 2pm — proactive intelligence
+CRYPTO_TIME     = dtime(hour=20, minute=0, tzinfo=REMINDER_TIMEZONE)               # 8pm — stocks & crypto
+BABY_WEEKLY_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -425,11 +424,14 @@ async def cmd_baby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _format_shows(shows: list) -> str:
+_STATUS_ICON = {"going": "🎟", "maybe": "❓", "cant_go": "❌", "sold": "💸"}
+
+def _format_shows(shows: list) -> tuple[str, InlineKeyboardMarkup | None]:
     from datetime import datetime as _dt
     if not shows:
-        return "🎟 <b>Upcoming Shows</b>\n\nNothing saved yet. Drop a ticket screenshot and I'll add it."
+        return "🎟 <b>Upcoming Shows</b>\n\nNothing saved yet. Drop a ticket screenshot and I'll add it.", None
     lines = ["🎟 <b>Upcoming Shows</b>\n"]
+    del_rows = []
     for s in shows:
         name = s["show_name"]
         venue = s.get("venue") or ""
@@ -437,6 +439,8 @@ def _format_shows(shows: list) -> str:
         tm = s.get("show_time") or ""
         cal = " ✅" if s.get("calendar_added") else ""
         notes = s.get("notes") or ""
+        status = s.get("status") or "going"
+        icon = _STATUS_ICON.get(status, "🎟")
         if dt_raw:
             try:
                 d = _dt.strptime(dt_raw, "%Y-%m-%d")
@@ -446,7 +450,8 @@ def _format_shows(shows: list) -> str:
         else:
             dt_str = "date TBC"
         detail = " · ".join(x for x in [dt_str, tm] if x)
-        line = f"• <b>{name}</b>{cal}"
+        name_display = f"<s>{name}</s>" if status in ("cant_go", "sold") else f"<b>{name}</b>"
+        line = f"{icon} {name_display}{cal}"
         if venue:
             line += f"\n  📍 {venue}"
         if detail:
@@ -454,7 +459,11 @@ def _format_shows(shows: list) -> str:
         if notes:
             line += f"\n  <i>{notes}</i>"
         lines.append(line)
-    return "\n\n".join(lines)
+        label = name[:28] + "…" if len(name) > 28 else name
+        del_rows.append([InlineKeyboardButton(f"🗑 {label}", callback_data=f"show_del:{s['id']}")])
+    text = "\n\n".join(lines)
+    keyboard = InlineKeyboardMarkup(del_rows) if del_rows else None
+    return text, keyboard
 
 
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -483,8 +492,8 @@ async def cmd_shows(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         shows = get_upcoming_shows()
-        text = _format_shows(shows)
-        await update.message.reply_text(text, parse_mode="HTML")
+        text, keyboard = _format_shows(shows)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_shows failed")
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1013,10 +1022,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             shows = get_upcoming_shows()
-            text = _format_shows(shows)
-            await context.bot.send_message(chat_id=query.message.chat_id, text=text, parse_mode="HTML")
+            text, keyboard = _format_shows(shows)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
+    elif data.startswith("show_del:"):
+        await query.answer()
+        if user_id != ANSEN_ID:
+            return
+        show_id = data[9:]
+        show = get_show_by_id(show_id)
+        name = show["show_name"] if show else "that show"
+        try:
+            _delete_show_by_id(show_id)
+            # Remove just this show's button row from the keyboard
+            current = query.message.reply_markup
+            if current:
+                new_rows = [row for row in current.inline_keyboard if not any(btn.callback_data == data for btn in row)]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"🗑 Removed <b>{escape(name)}</b>.", parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"Couldn't remove: {str(e)[:100]}")
 
     elif data.startswith("show_cal_yes:") or data.startswith("show_cal_no:"):
         await query.answer()
@@ -1026,6 +1053,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         await query.answer()
+
+
+async def send_morning_fyis(context: ContextTypes.DEFAULT_TYPE):
+    """Morning FYI digest — recent FYIs from the last 3 days, sent only if there are any."""
+    if not ALLOWED_IDS:
+        return
+    try:
+        from tools.fyis import get_fyis as _get_fyis
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.utcnow() - _td(days=3)).date().isoformat()
+        recent = [f for f in _get_fyis(limit=30) if (f.get("created_at") or "")[:10] >= cutoff]
+        if not recent:
+            return
+        text = _format_fyis(recent)
+        for uid in ALLOWED_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+            except Exception:
+                pass
+    except Exception:
+        logger.exception("send_morning_fyis failed")
 
 
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
@@ -1269,26 +1317,33 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
 
     if app.job_queue is not None:
-        # Weekly wedding brief — Mondays at 9am
-        app.job_queue.run_daily(send_priority_brief, time=REMINDER_TIME, days=(0,))
-        # Daily task brief — every day at 9am
+        # ── MORNING 9am ──────────────────────────────────────────────
+        # Daily task brief — every day
         app.job_queue.run_daily(send_daily_brief, time=REMINDER_TIME)
-        # Evening recap — every day at EVENING_BRIEF_HOUR (default 9pm)
-        app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
-        # Proactive intelligence check — daily at PROACTIVE_HOUR (default 2pm)
-        app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
-        # Daily stocks & crypto brief — every day at STOCKS_BRIEF_HOUR (default 9am)
-        app.job_queue.run_daily(send_stocks_brief, time=STOCKS_TIME)
-        # Baby weekly update — every Monday at 9am
+        # FYI morning digest — recent FYIs from last 3 days (skips if nothing new)
+        app.job_queue.run_daily(send_morning_fyis, time=REMINDER_TIME)
+        # Baby weekly update — every Monday
         app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
-        # FYI graduation check — every Sunday at 9am (surface notes nearing 30-day expiry)
-        app.job_queue.run_daily(send_fyi_graduation, time=REMINDER_TIME, days=(6,))
-        # Knowledge sweep — every Wednesday evening (extract cross-domain facts into shared brain)
-        app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
-        # Check for scheduled notifications every 60 seconds
-        app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
-        # Daily show reminders — 7 days out, only to Ansen
+        # Show reminders — 7 days out, Ansen only
         app.job_queue.run_daily(send_show_reminders, time=REMINDER_TIME)
+        # FYI graduation — every Sunday (surface notes nearing 30-day expiry)
+        app.job_queue.run_daily(send_fyi_graduation, time=REMINDER_TIME, days=(6,))
+        # Wedding brief — every Sunday morning
+        app.job_queue.run_daily(send_priority_brief, time=REMINDER_TIME, days=(6,))
+        # ── MIDDAY 2pm ───────────────────────────────────────────────
+        # Proactive intelligence check
+        app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
+        # ── EVENING 8pm ──────────────────────────────────────────────
+        # Stocks & crypto brief
+        app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
+        # ── NIGHT 9pm ────────────────────────────────────────────────
+        # Evening recap — every day
+        app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
+        # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
+        app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
+        # ── ALWAYS ───────────────────────────────────────────────────
+        # Scheduled notification check every 60 seconds
+        app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
     else:
         logger.warning("Job queue unavailable — scheduled reminders disabled. Install python-telegram-bot[job-queue].")
 
