@@ -1081,6 +1081,10 @@ PEOPLE
 PROACTIVE NOTIFICATIONS — YOU CAN DO THIS
 You are running inside a Telegram bot with a job queue. You CAN send messages at specific times. When someone asks for a time-based reminder, call schedule_notification — a background job fires it automatically at the right moment. Never tell the user you can't send proactive messages or push alerts. You can. Use the tool.
 
+MESSAGING THE PARTNER — DO THIS PROPERLY
+When asked to "notify", "tell", "message", "ping", "let Jess know", "tell Ansen" etc → call message_partner immediately. It fires within 30 seconds.
+NEVER claim to have notified someone without calling message_partner. Do not say "Done", "Sent", or "Jess got the notification" unless the tool returned {"status": "sent"}. If you haven't called the tool, you haven't sent anything.
+
 PROACTIVE LONG-TERM REMINDERS — DO THIS WITHOUT BEING ASKED
 When someone mentions any of these, immediately schedule a follow-up reminder 1 year out (or the appropriate interval) WITHOUT waiting to be asked:
 - Pet vaccinations / vet visits / parasite treatment → 1 year follow-up: "Time for Lucille's [vaccine] again — want me to book the vet?"
@@ -1404,6 +1408,17 @@ TOOLS = [
             "properties": {
                 "limit": {"type": "integer", "description": "Max results. Default 20."},
             },
+        },
+    },
+    {
+        "name": "message_partner",
+        "description": "Send an immediate message to the other person (Ansen or Jess). Use this whenever asked to 'notify', 'tell', 'message', 'ping', or 'let know' the partner. This is the ONLY reliable way to reach them right now — it fires within 30 seconds. Never claim you've notified someone without calling this tool.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The message to send. Write it naturally, as if from you — include context so they know what it's about."},
+            },
+            "required": ["message"],
         },
     },
     {
@@ -1747,6 +1762,22 @@ class UnifiedAgent:
         if name == "read_fyis":
             fyis = get_fyis(limit=inputs.get("limit", 20))
             return [{"id": str(f["id"]), "user_id": f["user_id"], "content": f["content"], "category": f.get("category"), "created_at": f["created_at"][:16]} for f in fyis]
+
+        if name == "message_partner":
+            import os
+            from zoneinfo import ZoneInfo
+            from datetime import timezone as _tz, timedelta as _td
+            tz = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
+            partner_ids = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip() and int(x.strip()) != user_id]
+            if not partner_ids:
+                return {"error": "No partner found in ALLOWED_USER_IDS"}
+            fire_at = datetime.now(_tz.utc) + _td(seconds=30)
+            ids_sent = []
+            for pid in partner_ids:
+                notif = _sched_notif(pid, inputs["message"], fire_at, "none")
+                ids_sent.append(str(notif["id"]))
+            partner_name = next((n for uid, n in self._USER_NAMES.items() if uid != user_id), "your partner")
+            return {"status": "sent", "to": partner_name, "fires_in": "30 seconds"}
 
         if name == "schedule_notification":
             import os
