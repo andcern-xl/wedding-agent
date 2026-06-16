@@ -312,6 +312,13 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             if text.startswith("/"):
                 return
 
+            # Prepend reply context so the agent knows what the user is referring to
+            reply = update.message.reply_to_message
+            if reply:
+                replied_text = reply.text or reply.caption or ""
+                if replied_text and replied_text.strip():
+                    text = f'[Replying to: "{replied_text.strip()}"]\n{text}'
+
             result = await agent.handle_message(text=text, user_id=user_id, history=history)
 
             if result.get("notify_partner"):
