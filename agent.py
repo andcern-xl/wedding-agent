@@ -1061,6 +1061,10 @@ RECENT FYIs — notes and updates from the last 30 days. Reference naturally whe
 BABY KNOWLEDGE — what the couple has saved about pregnancy, birth, and parenting. Use when giving advice or answering questions:
 {baby_context}
 
+RECALLED MEMORIES — discrete facts retrieved from all past conversations, relevant to this message:
+{mem0_context}
+These are extracted facts, not summaries. Reference them naturally if useful. They may overlap with the profile above — treat as reinforcing signals.
+
 PEOPLE
 - Ansen: user_id 63756531
 - Jess / Jessica: user_id 6927468999
@@ -1672,7 +1676,7 @@ class UnifiedAgent:
 
     _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
 
-    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "") -> str:
+    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -1689,6 +1693,7 @@ class UnifiedAgent:
             shared_summary=shared_summary or "Nothing shared yet.",
             recent_fyis=recent_fyis or "No recent FYIs.",
             baby_context=baby_context or "No baby knowledge saved yet.",
+            mem0_context=mem0_context or "No specific memories recalled for this query.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
@@ -2019,11 +2024,11 @@ class UnifiedAgent:
                     return messages[i:]
         return []  # nothing clean — start fresh
 
-    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "") -> dict:
+    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": []}
         messages = self._sanitize_history(history) + [{"role": "user", "content": user_content}]
-        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context)
+        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context)
         last_response = None
 
         for _ in range(10):
@@ -2277,33 +2282,67 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
     async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
             history = []
-        try:
-            user_summary = get_summary(user_id)
-        except Exception:
-            user_summary = ""
-        try:
-            shared_summary = get_shared_summary()
-        except Exception:
-            shared_summary = ""
-        try:
-            from tools.fyis import get_fyis_for_context
-            _fyis = get_fyis_for_context(limit=15)
-            recent_fyis = "\n".join(
-                f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
-                for f in _fyis
-            )
-        except Exception:
-            recent_fyis = ""
-        try:
-            from tools.baby_knowledge import get_entries as _get_baby
-            _baby = _get_baby(limit=10)
-            baby_context = "\n".join(
-                f"[{', '.join(e.get('tags') or [])}] {e['summary']}"
-                for e in _baby
-            )
-        except Exception:
-            baby_context = ""
-        return await self._run_loop(text, user_id, history, user_summary, shared_summary, recent_fyis, baby_context)
+
+        # Fetch all context concurrently
+        async def _get_user_summary():
+            try:
+                return get_summary(user_id)
+            except Exception:
+                return ""
+
+        async def _get_shared():
+            try:
+                return get_shared_summary()
+            except Exception:
+                return ""
+
+        async def _get_fyis():
+            try:
+                from tools.fyis import get_fyis_for_context
+                _fyis = get_fyis_for_context(limit=15)
+                return "\n".join(
+                    f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
+                    for f in _fyis
+                )
+            except Exception:
+                return ""
+
+        async def _get_baby():
+            try:
+                from tools.baby_knowledge import get_entries as _gb
+                _baby = _gb(limit=10)
+                return "\n".join(
+                    f"[{', '.join(e.get('tags') or [])}] {e['summary']}"
+                    for e in _baby
+                )
+            except Exception:
+                return ""
+
+        async def _get_mem0():
+            try:
+                from tools.mem0_memory import search_memories as _search
+                return await asyncio.to_thread(_search, text, user_id, 6)
+            except Exception:
+                return ""
+
+        user_summary, shared_summary, recent_fyis, baby_context, mem0_context = await asyncio.gather(
+            _get_user_summary(), _get_shared(), _get_fyis(), _get_baby(), _get_mem0()
+        )
+
+        result = await self._run_loop(
+            text, user_id, history, user_summary, shared_summary, recent_fyis, baby_context, mem0_context
+        )
+
+        # Async: store this exchange in mem0 for future recall (non-blocking)
+        reply_text = result.get("text", "")
+        if reply_text and text:
+            try:
+                from tools.mem0_memory import add_exchange as _add
+                asyncio.create_task(asyncio.to_thread(_add, text, reply_text, user_id))
+            except Exception:
+                pass
+
+        return result
 
     async def _compress_and_save(self, user_id: int, messages: list, existing_summary: str, message_count: int):
         # Build readable transcript — include tool exchanges so patterns in tool use are visible

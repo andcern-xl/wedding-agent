@@ -4,6 +4,7 @@ python-dotenv==1.0.1
 supabase>=2.0.0
 tzdata
 httpx>=0.27.0
+mem0ai>=0.1.0
 
 # Google Calendar + Gmail
 google-api-python-client==2.136.0

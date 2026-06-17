@@ -715,21 +715,31 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the bot's persistent memory profile for this user."""
+    """Show the bot's persistent memory — profile + discrete mem0 facts."""
     if not allowed(update):
         return
     from tools.user_memory import get_summary as _get_summary
+    from tools.mem0_memory import get_all_memories as _get_mem0
     user_id = update.effective_user.id
     try:
-        summary = _get_summary(user_id)
-        if not summary or not summary.strip():
-            await update.message.reply_text("I don't have a profile built for you yet — talk to me for a bit and I'll start building one.")
+        summary = _get_summary(user_id) or ""
+        mem0_facts = await asyncio.to_thread(_get_mem0, user_id)
+
+        parts = []
+        if summary.strip():
+            parts.append(f"<b>🧠 Profile (behavioral)</b>\n\n{summary}")
+        if mem0_facts:
+            facts_text = "\n".join(f"• {m['memory']}" for m in mem0_facts if m.get("memory"))
+            parts.append(f"<b>💡 Recalled facts ({len(mem0_facts)})</b>\n\n{facts_text}")
+
+        if not parts:
+            await update.message.reply_text("Nothing stored yet — talk to me for a bit and I'll start building a picture.")
             return
-        text = f"<b>🧠 What I know about you</b>\n\n{summary}"
-        sections = _split_sections(text)
-        await update.message.reply_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
+
+        for part in parts:
+            sections = _split_sections(part)
+            for section in sections:
+                await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_memory failed")
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
@@ -1424,6 +1434,12 @@ def main():
         await application.bot.set_my_commands(commands)
 
     app = Application.builder().token(token).post_init(post_init).build()
+
+    # Fire missed jobs within 1 hour — survives Railway restarts mid-schedule
+    if app.job_queue:
+        app.job_queue.scheduler.configure(
+            job_defaults={"misfire_grace_time": 3600}
+        )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("wedding", cmd_wedding))
