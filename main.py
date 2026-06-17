@@ -1149,45 +1149,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
 
 
-async def send_morning_fyis(context: ContextTypes.DEFAULT_TYPE):
-    """Morning FYI digest — per-user unread FYIs, synthesized to 3-5 bullets via Claude."""
+async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
+    """Unified morning brief — narrative prose per user, merges tasks + FYIs + calendar + context."""
     if not ALLOWED_IDS:
         return
-    try:
-        import anthropic as _ant
-        _client = _ant.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        for uid in ALLOWED_IDS:
-            try:
-                fyis = get_fyis_unacked(uid, limit=20)
-                if not fyis:
-                    continue
-                fyi_blob = "\n".join(f"- {f['content']}" for f in fyis)
-                resp = _client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=350,
-                    messages=[{
-                        "role": "user",
-                        "content": (
-                            "Summarise these FYIs into 3-5 short bullet points for a morning briefing. "
-                            "Use <b>bold</b> HTML tags for key terms only. No preamble, no headers.\n\n"
-                            f"{fyi_blob}"
-                        ),
-                    }],
-                )
-                summary = resp.content[0].text.strip()
-                text = (
-                    f"📨 <b>Morning FYIs</b>\n\n"
-                    f"{summary}\n\n"
-                    f"→ /fyis to read in full and check off items"
-                )
-                await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
-            except Exception:
-                logger.exception(f"send_morning_fyis failed for uid {uid}")
-    except Exception:
-        logger.exception("send_morning_fyis failed")
+    USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
+    for uid in ALLOWED_IDS:
+        name = USER_NAMES.get(uid, "")
+        try:
+            text = await agent.morning_brief(uid, name)
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+        except Exception:
+            logger.exception(f"send_morning_brief failed for uid {uid}")
 
 
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
+    """Kept for /tasks command — full structured view with Done buttons."""
     if not ALLOWED_IDS:
         return
     try:
@@ -1444,10 +1421,8 @@ def main():
 
     if app.job_queue is not None:
         # ── MORNING 9am ──────────────────────────────────────────────
-        # Daily task brief — every day
-        app.job_queue.run_daily(send_daily_brief, time=REMINDER_TIME)
-        # FYI morning digest — recent FYIs from last 3 days (skips if nothing new)
-        app.job_queue.run_daily(send_morning_fyis, time=REMINDER_TIME)
+        # Unified narrative morning brief per user (tasks + FYIs + calendar synthesized)
+        app.job_queue.run_daily(send_morning_brief, time=REMINDER_TIME)
         # Baby weekly update — every Monday
         app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
         # Show reminders — 7 days out, Ansen only

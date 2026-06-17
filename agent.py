@@ -3000,6 +3000,118 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
     async def daily_brief(self, user_id: int) -> str:
         return await self._daily.daily_brief(user_id)
 
+    async def morning_brief(self, user_id: int, user_name: str = "") -> str:
+        """Unified personalized morning brief — narrative prose, not a bullet dump."""
+        from tools.fyis import get_fyis_unacked as _get_fyis_unacked
+        from datetime import date as _date, datetime as _dt
+        today_str = _date.today().isoformat()
+        weekday = _date.today().strftime("%A")
+        _ANSEN_ID = 63756531
+
+        parts = [f"TODAY: {weekday}, {today_str}", f"USER: {user_name}"]
+
+        # Today's calendar
+        try:
+            events = await asyncio.to_thread(get_events, 7)
+            today_events = [e for e in events if e["start"].startswith(today_str)]
+        except Exception:
+            events = []
+            today_events = []
+
+        if today_events:
+            ev_lines = []
+            for e in today_events:
+                start = e["start"]
+                if "T" in start:
+                    try:
+                        dt = _dt.fromisoformat(start)
+                        start = dt.strftime("%-I:%M %p")
+                    except Exception:
+                        pass
+                ev_lines.append(f"  {start} — {e['title']}")
+            parts.append("TODAY'S CALENDAR:\n" + "\n".join(ev_lines))
+
+        # Tasks: overdue + today + next 7 days
+        try:
+            all_tasks = get_tasks(user_id, include_done=False)
+            visible = [t for t in all_tasks if not _is_junk_task(t) and not _is_calendar_covered(t, events)]
+            overdue = [t for t in visible if t.get("due_date") and t["due_date"] < today_str]
+            due_today = [t for t in visible if t.get("due_date") == today_str]
+            upcoming = sorted([t for t in visible if t.get("due_date") and t["due_date"] > today_str], key=lambda x: x["due_date"])[:5]
+            if overdue:
+                parts.append("OVERDUE: " + "; ".join(t["task"] for t in overdue))
+            if due_today:
+                parts.append("DUE TODAY: " + "; ".join(t["task"] for t in due_today))
+            if upcoming:
+                parts.append("COMING UP: " + "; ".join(f"{t['task']} ({t['due_date']})" for t in upcoming))
+        except Exception:
+            pass
+
+        # Unread FYIs
+        try:
+            fyis = _get_fyis_unacked(user_id, limit=10)
+            if fyis:
+                fyi_lines = "\n".join(f"  [{f.get('category','misc')}] {f['content']}" for f in fyis)
+                parts.append("UNREAD FYIs:\n" + fyi_lines)
+        except Exception:
+            pass
+
+        # Baby
+        try:
+            baby = pregnancy_summary()
+            milestones = upcoming_milestones(within_weeks=4)
+            baby_line = f"Baby: Week {baby['week']}, due {baby['due_date']}"
+            if milestones:
+                baby_line += ". Upcoming: " + "; ".join(milestones[:2])
+            parts.append(baby_line)
+        except Exception:
+            pass
+
+        # Upcoming shows (Ansen only)
+        if user_id == _ANSEN_ID:
+            try:
+                from tools.shows import get_shows_in_n_days as _shows_soon
+                soon = _shows_soon(14)
+                if soon:
+                    parts.append("SHOWS SOON: " + "; ".join(f"{s['show_name']} ({s.get('show_date','TBC')})" for s in soon))
+            except Exception:
+                pass
+
+        # Upcoming trips
+        try:
+            from tools.trips import get_upcoming_trips as _upcoming_trips
+            trips = _upcoming_trips()
+            if trips:
+                parts.append("TRIPS: " + "; ".join(f"{t['destination']} ({t.get('start_date','TBC')})" for t in trips[:3]))
+        except Exception:
+            pass
+
+        context = "\n\n".join(parts)
+
+        prompt = f"""{context}
+
+Write a morning update for {user_name}. You are a smart, proactive personal assistant who knows their full life context.
+
+STYLE: Write in flowing prose — 2 to 3 short paragraphs. NOT bullet points. Read like a thoughtful friend giving a quick morning rundown, not a secretary reading off a list.
+
+WHAT TO DO:
+- Lead with what's actually happening today (calendar, urgent tasks).
+- Look for connections across domains: a FYI that relates to a task, a trip that links to a visa question, a show coming up that ties to something on the calendar. Weave them together naturally instead of listing them separately.
+- Mention the baby week naturally if there's anything relevant (milestone, upcoming appointment).
+- Flag ⚠️ anything overdue — one sentence, not a list.
+- Skip undated backlog tasks entirely unless one is clearly urgent.
+- Last sentence: → /tasks /fyis for the full picture
+
+FORMATTING: Pure HTML. <b>bold</b> only for names or key terms. No bullet points. No headers. No **asterisks**. 3-4 sentences per paragraph max. This appears as a Telegram message on a phone — keep it readable at a glance."""
+
+        response = await self.client.messages.create(
+            model=SYNTHESIS_MODEL,
+            max_tokens=600,
+            system=DAILY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _fix_md(response.content[0].text)
+
     async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         return await self._daily.combined_daily_brief(user_ids, user_names)
 
