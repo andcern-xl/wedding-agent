@@ -106,6 +106,36 @@ def promote_fyi(fyi_id: str) -> str | None:
         return None
 
 
+ANSEN_ID = 63756531
+JESS_ID = 6927468999
+
+def _ack_field(user_id: int) -> str:
+    return "acked_ansen" if user_id == ANSEN_ID else "acked_jess"
+
+
+def ack_fyi(fyi_id: str, user_id: int) -> bool:
+    """Mark this FYI as seen by user_id. Archives when both have acked."""
+    try:
+        field = _ack_field(user_id)
+        get_client().table("fyis").update({field: True}).eq("id", fyi_id).execute()
+        row = get_client().table("fyis").select("acked_ansen,acked_jess").eq("id", fyi_id).execute().data
+        if row and row[0].get("acked_ansen") and row[0].get("acked_jess"):
+            archive_fyi(fyi_id)
+        return True
+    except Exception:
+        return False
+
+
+def get_fyis_unacked(user_id: int, limit: int = 30) -> list[dict]:
+    """FYIs this specific user hasn't yet acked."""
+    field = _ack_field(user_id)
+    try:
+        fyis = get_fyis(limit=limit)
+        return [f for f in fyis if not f.get(field)]
+    except Exception:
+        return []
+
+
 def keep_fyi(fyi_id: str) -> bool:
     """Reset created_at to now, extending the 30-day TTL by another 30 days."""
     try:

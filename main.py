@@ -19,7 +19,7 @@ from agent import UnifiedAgent
 from categories import CATEGORIES
 from tools.notifications import get_pending_notifications, mark_notification_sent
 from tools.user_memory import get_shared_summary, append_shared_summary
-from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi
+from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi, ack_fyi, get_fyis_unacked
 from tools.daily import complete_task
 from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added, delete_show as _delete_show_by_id
 
@@ -747,17 +747,40 @@ def _format_fyis(fyis: list) -> str:
     return "\n".join(blocks)
 
 
+def _format_fyis_with_buttons(fyis: list) -> tuple[str, InlineKeyboardMarkup | None]:
+    """FYIs grouped by category with a ✅ Got it button per item."""
+    grouped: dict = {}
+    for f in fyis:
+        cat = (f.get("category") or "other").lower()
+        grouped.setdefault(cat, []).append(f)
+    blocks = ["<b>📨 FYIs</b>\n"]
+    for cat, items in grouped.items():
+        emoji = _CAT_EMOJI.get(cat, "📌")
+        blocks.append(f"\n{emoji} <b>{cat.title()}</b>")
+        for f in items:
+            when = (f.get("created_at") or "")[:10]
+            blocks.append(f"• <i>{when}</i> — {f['content']}")
+    text = "\n".join(blocks)
+    rows = []
+    for f in fyis:
+        label = f["content"][:32] + "…" if len(f["content"]) > 32 else f["content"]
+        rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"fyi_gotit:{f['id']}")])
+    keyboard = InlineKeyboardMarkup(rows) if rows else None
+    return text, keyboard
+
+
 async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
+    user_id = update.effective_user.id
     try:
-        fyis = get_fyis(limit=30)
+        fyis = get_fyis_unacked(user_id, limit=30)
         if not fyis:
-            await update.message.reply_text("No FYIs yet.")
+            await update.message.reply_text("You're all caught up — no unread FYIs. 🎉")
             return
-        text = _format_fyis(fyis)
+        text, keyboard = _format_fyis_with_buttons(fyis)
         sections = _split_sections(text)
-        await update.message.reply_text(sections[0], parse_mode="HTML")
+        await update.message.reply_text(sections[0], parse_mode="HTML", reply_markup=keyboard)
         for section in sections[1:]:
             await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
@@ -781,13 +804,14 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
 
     elif action == "fyis":
         try:
-            fyis = get_fyis(limit=30)
+            fyis = get_fyis_unacked(user_id, limit=30)
             if not fyis:
-                await context.bot.send_message(chat_id=chat_id, text="No FYIs yet.")
+                await context.bot.send_message(chat_id=chat_id, text="You're all caught up — no unread FYIs. 🎉")
                 return
-            text = _format_fyis(fyis)
+            text, keyboard = _format_fyis_with_buttons(fyis)
             sections = _split_sections(text)
-            for section in sections:
+            await context.bot.send_message(chat_id=chat_id, text=sections[0], parse_mode="HTML", reply_markup=keyboard)
+            for section in sections[1:]:
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1126,22 +1150,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_morning_fyis(context: ContextTypes.DEFAULT_TYPE):
-    """Morning FYI digest — recent FYIs from the last 3 days, sent only if there are any."""
+    """Morning FYI digest — per-user unread FYIs, synthesized to 3-5 bullets via Claude."""
     if not ALLOWED_IDS:
         return
     try:
-        from tools.fyis import get_fyis as _get_fyis
-        from datetime import datetime as _dt, timedelta as _td
-        cutoff = (_dt.utcnow() - _td(days=3)).date().isoformat()
-        recent = [f for f in _get_fyis(limit=30) if (f.get("created_at") or "")[:10] >= cutoff]
-        if not recent:
-            return
-        text = _format_fyis(recent)
+        import anthropic as _ant
+        _client = _ant.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         for uid in ALLOWED_IDS:
             try:
+                fyis = get_fyis_unacked(uid, limit=20)
+                if not fyis:
+                    continue
+                fyi_blob = "\n".join(f"- {f['content']}" for f in fyis)
+                resp = _client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=350,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            "Summarise these FYIs into 3-5 short bullet points for a morning briefing. "
+                            "Use <b>bold</b> HTML tags for key terms only. No preamble, no headers.\n\n"
+                            f"{fyi_blob}"
+                        ),
+                    }],
+                )
+                summary = resp.content[0].text.strip()
+                text = (
+                    f"📨 <b>Morning FYIs</b>\n\n"
+                    f"{summary}\n\n"
+                    f"→ /fyis to read in full and check off items"
+                )
                 await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
             except Exception:
-                pass
+                logger.exception(f"send_morning_fyis failed for uid {uid}")
     except Exception:
         logger.exception("send_morning_fyis failed")
 
@@ -1235,6 +1276,22 @@ async def _handle_fyi_callback(query, context, data: str):
         return
     parts = data.split(":", 2)
     action = parts[0]
+
+    # --- Per-FYI checkoff ---
+    if action == "gotit":
+        fyi_id = parts[1]
+        uid = query.from_user.id
+        ack_fyi(fyi_id, uid)
+        await query.answer("✅ Got it!")
+        try:
+            current = query.message.reply_markup
+            if current:
+                cb = f"fyi_gotit:{fyi_id}"
+                new_rows = [row for row in current.inline_keyboard if not any(btn.callback_data == cb for btn in row)]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None)
+        except Exception:
+            logger.exception("fyi_gotit button removal failed")
+        return
 
     # --- Graduation actions (fyi_keep / fyi_promote / fyi_archive) ---
     if action in ("keep", "promote", "archive"):
