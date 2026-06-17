@@ -20,6 +20,7 @@ from categories import CATEGORIES
 from tools.notifications import get_pending_notifications, mark_notification_sent
 from tools.user_memory import get_shared_summary, append_shared_summary
 from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi, ack_fyi, get_fyis_unacked
+from tools.conversation import load_history, save_history
 from tools.daily import complete_task
 from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added, delete_show as _delete_show_by_id
 
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
 agent = UnifiedAgent()
-conversations: dict[int, list] = {}
+conversations: dict[int, list] = {}   # in-memory cache; backed by Supabase
 chat_locks: dict[int, asyncio.Lock] = {}
 
 
@@ -294,7 +295,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    history = conversations.get(chat_id, [])
+    # Load from Supabase if this is the first message after a restart
+    if chat_id not in conversations:
+        conversations[chat_id] = load_history(chat_id)
+    history = conversations[chat_id]
 
     try:
         if update.message.photo:
@@ -329,7 +333,10 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                     is_fyi=result.get("fyi", False),
                 )
 
-        conversations[chat_id] = result.get("history", history)
+        updated_history = result.get("history", history)
+        conversations[chat_id] = updated_history
+        # Persist to Supabase so history survives restarts/deploys
+        asyncio.create_task(asyncio.to_thread(save_history, chat_id, updated_history))
         await update.message.reply_text(result["text"], parse_mode="HTML")
 
         # Notify partner when tasks are marked done by the agent
@@ -705,6 +712,27 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("cmd_reminders failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the bot's persistent memory profile for this user."""
+    if not allowed(update):
+        return
+    from tools.user_memory import get_summary as _get_summary
+    user_id = update.effective_user.id
+    try:
+        summary = _get_summary(user_id)
+        if not summary or not summary.strip():
+            await update.message.reply_text("I don't have a profile built for you yet — talk to me for a bit and I'll start building one.")
+            return
+        text = f"<b>🧠 What I know about you</b>\n\n{summary}"
+        sections = _split_sections(text)
+        await update.message.reply_text(sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_memory failed")
+        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
 
 
 async def cmd_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1407,6 +1435,7 @@ def main():
     app.add_handler(CommandHandler("reminders", cmd_reminders))
     app.add_handler(CommandHandler("shared", cmd_shared_parent))
     app.add_handler(CommandHandler("fyis", cmd_fyis))
+    app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
     app.add_handler(CommandHandler("stocks", cmd_stocks))
     app.add_handler(CommandHandler("baby", cmd_baby))

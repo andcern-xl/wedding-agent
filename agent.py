@@ -1039,15 +1039,18 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 TODAY'S DATE: {today}
 CURRENT TIMEZONE: {timezone}
 
-WHAT YOU KNOW ABOUT THIS PERSON
+WHAT YOU KNOW ABOUT THIS PERSON (persistent memory — survives restarts)
 {user_summary}
 
-Read this before every response. Use it to:
-- Match their communication style (length, tone, formality)
-- Reference things they've shared without them having to repeat themselves
+This is your memory from all past conversations, compressed every 2 messages by a high-quality summariser. It is the ground truth for what you know about this person. Read it before every response and use it to:
+- Reference things they've shared without them having to repeat themselves — proactively bring up relevant context
+- Match their communication style exactly (length, tone, directness, emoji use)
 - Anticipate what they probably want based on their patterns
-- Skip explanations they don't need
-If it contains a PREFERENCES section, follow those as standing orders.
+- Skip explanations they don't need — they're not new users
+- When they say "you know that thing I mentioned" or "like last time" — check here first
+
+If someone says "do you remember X" and it's in the profile: confirm and use it. If it's not: say honestly "I don't have that noted — tell me again and I'll remember it."
+If it contains a PREFERENCES section, follow those as standing orders without being asked again.
 
 SHARED BRAIN — confirmed couple decisions and permanent memories:
 {shared_summary}
@@ -2022,7 +2025,7 @@ class UnifiedAgent:
 
                 try:
                     msg_count = get_message_count(user_id) + 1
-                    if msg_count % 4 == 0:
+                    if msg_count % 2 == 0:
                         asyncio.create_task(
                             self._compress_and_save(user_id, updated_history, user_summary, msg_count)
                         )
