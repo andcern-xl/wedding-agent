@@ -39,6 +39,20 @@ _proactive_hour = int(os.getenv("PROACTIVE_HOUR", "14"))
 PROACTIVE_TIME  = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 2pm — proactive intelligence
 CRYPTO_TIME     = dtime(hour=20, minute=0, tzinfo=REMINDER_TIMEZONE)               # 8pm — stocks & crypto
 BABY_WEEKLY_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
+APPOINTMENT_TIME = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
+
+# Medical/appointment keywords for event title detection
+APPOINTMENT_KEYWORDS = {
+    "appointment", "scan", "obgyn", "ob-gyn", "ob/gyn", "doctor", "clinic",
+    "hospital", "midwife", "checkup", "check-up", "blood test", "ultrasound",
+    "consult", "consultation", "viability", "dating scan", "nuchal", "anatomy",
+    "glucose", "gtt", "nst", "prenatal", "antenatal", "gp", "specialist",
+    "physio", "dentist", "dr ", "dr.",
+}
+
+# Days before trip departure that trigger a pre-trip milestone brief
+TRIP_MILESTONES = {56, 28, 14, 7, 2}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -1410,6 +1424,80 @@ async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"proactive_check failed for {uid}")
 
 
+async def send_trip_milestones(context: ContextTypes.DEFAULT_TYPE):
+    """Daily check — fire pre-trip intelligence briefs at milestone days before departure."""
+    from tools.trips import get_upcoming_trips
+    from datetime import date as _date
+
+    if not ALLOWED_IDS:
+        return
+
+    today = _date.today()
+    try:
+        trips = get_upcoming_trips()
+    except Exception:
+        logger.exception("send_trip_milestones: failed to fetch trips")
+        return
+
+    for trip in trips:
+        start_str = trip.get("start_date")
+        if not start_str:
+            continue
+        try:
+            departure = _date.fromisoformat(start_str)
+        except ValueError:
+            continue
+        days_until = (departure - today).days
+        if days_until not in TRIP_MILESTONES:
+            continue
+        try:
+            msg = await agent.trip_milestone_brief(trip, days_until)
+            if msg:
+                for uid in ALLOWED_IDS:
+                    await context.bot.send_message(chat_id=uid, text=msg, parse_mode="HTML")
+        except Exception:
+            logger.exception(f"trip_milestone_brief failed for {trip.get('destination')}")
+
+
+async def send_appointment_prebrief(context: ContextTypes.DEFAULT_TYPE):
+    """Nightly check — synthesise pre-brief for tomorrow's medical/health appointments."""
+    from tools.gcal import get_events as _get_events
+    from datetime import date as _date, timedelta as _td
+
+    if not ALLOWED_IDS:
+        return
+
+    tomorrow_str = (_date.today() + _td(days=1)).isoformat()
+    try:
+        all_events = await asyncio.to_thread(_get_events, 2)
+        tomorrow_events = [e for e in all_events if (e.get("start") or "").startswith(tomorrow_str)]
+    except Exception:
+        logger.exception("send_appointment_prebrief: failed to fetch calendar")
+        return
+
+    if not tomorrow_events:
+        return
+
+    medical_events = [
+        e for e in tomorrow_events
+        if any(kw in (e.get("title") or "").lower() for kw in APPOINTMENT_KEYWORDS)
+    ]
+    if not medical_events:
+        return
+
+    try:
+        msg = await agent.appointment_pre_brief(medical_events)
+        if msg:
+            names = ", ".join(e.get("title", "appointment") for e in medical_events)
+            header = f"📅 <b>Tomorrow: {names}</b>\n\n"
+            for uid in ALLOWED_IDS:
+                await context.bot.send_message(
+                    chat_id=uid, text=header + msg, parse_mode="HTML"
+                )
+    except Exception:
+        logger.exception("send_appointment_prebrief: synthesis failed")
+
+
 def main():
     import asyncio
     asyncio.set_event_loop(asyncio.new_event_loop())
@@ -1477,8 +1565,12 @@ def main():
         # Wedding brief — every Sunday morning
         app.job_queue.run_daily(send_priority_brief, time=REMINDER_TIME, days=(6,))
         # ── MIDDAY 2pm ───────────────────────────────────────────────
-        # Proactive intelligence check
+        # Proactive intelligence check (event-centric, sorted by proximity)
         app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
+        # Trip milestone briefs — fires at 56/28/14/7/2 days before departure
+        app.job_queue.run_daily(send_trip_milestones, time=REMINDER_TIME)
+        # Appointment pre-brief — nightly check for tomorrow's medical events
+        app.job_queue.run_daily(send_appointment_prebrief, time=APPOINTMENT_TIME)
         # ── EVENING 8pm ──────────────────────────────────────────────
         # Stocks & crypto brief
         app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)

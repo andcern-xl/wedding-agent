@@ -2481,21 +2481,46 @@ Rules:
             pass
         fyis_block = ("RECENT FYIs:\n" + "\n".join(fyi_lines)) if fyi_lines else "RECENT FYIs: none"
 
-        # Calendar — next 21 days
-        cal_lines = []
+        # Calendar — next 21 days, bucketed by proximity so Claude prioritises correctly
+        _within_48h: list[str] = []
+        _within_7d:  list[str] = []
+        _beyond:     list[str] = []
         try:
-            for e in (await asyncio.to_thread(get_events, 21))[:15]:
-                start = e["start"]
-                if "T" in start:
+            for e in (await asyncio.to_thread(get_events, 21))[:20]:
+                raw_start = e["start"]
+                event_date = raw_start[:10]
+                try:
+                    days_until = (_date.fromisoformat(event_date) - today).days
+                except ValueError:
+                    days_until = 99
+                if "T" in raw_start:
                     try:
-                        start = _datetime.fromisoformat(start).strftime("%-d %b %H:%M")
+                        label = _datetime.fromisoformat(raw_start).strftime("%-d %b %H:%M")
                     except ValueError:
-                        pass
+                        label = raw_start
+                else:
+                    try:
+                        label = _datetime.strptime(raw_start, "%Y-%m-%d").strftime("%-d %b")
+                    except ValueError:
+                        label = raw_start
                 loc = f" @ {e['location']}" if e.get("location") else ""
-                cal_lines.append(f"  • {start} — {e['title']}{loc}")
+                entry = f"  • {label} — {e['title']}{loc}"
+                if days_until <= 2:
+                    _within_48h.append(entry)
+                elif days_until <= 7:
+                    _within_7d.append(entry)
+                else:
+                    _beyond.append(entry)
         except Exception:
             pass
-        cal_block = ("CALENDAR (next 21 days):\n" + "\n".join(cal_lines)) if cal_lines else "CALENDAR: none"
+        cal_parts = []
+        if _within_48h:
+            cal_parts.append("⚡ IMMINENT (0–2 days):\n" + "\n".join(_within_48h))
+        if _within_7d:
+            cal_parts.append("📅 THIS WEEK (3–7 days):\n" + "\n".join(_within_7d))
+        if _beyond:
+            cal_parts.append("🗓 UPCOMING (8–21 days):\n" + "\n".join(_beyond))
+        cal_block = "CALENDAR:\n\n" + "\n\n".join(cal_parts) if cal_parts else "CALENDAR: none"
 
         # Wedding category activity
         wedding_lines = []
@@ -2606,7 +2631,12 @@ SHARED BRAIN:
 
 ---
 
-YOUR JOB: Scan all context above and decide if anything is worth an unprompted message to {user_name}. You have web search available — use it when you spot something that needs real-time research.
+YOUR JOB: Scan all context above and surface anything genuinely worth flagging to {user_name}. Work in priority order — imminent events first, then this week, then general intelligence.
+
+PRIORITY ORDER:
+1. ⚡ IMMINENT (calendar events within 48h): check EACH imminent event against every data source — do they need to bring anything? Are there questions to ask? Visa issues? Related tasks still open? Pregnancy considerations?
+2. 📅 THIS WEEK (events in next 3–7 days): flag prep items, visa applications needing lead time, booking deadlines, OBGYN sign-off for travel
+3. 🔍 GENERAL: wedding urgency, baby milestones, stale tasks, finance
 
 INTELLIGENCE TRIGGERS — actively look for these:
 
@@ -2643,8 +2673,9 @@ INTELLIGENCE TRIGGERS — actively look for these:
 - Anything where one domain affects another
 
 RULES:
-- Use search_web when you detect a travel destination, visa question, or anything needing current info — don't just guess
-- Be selective — max 3-4 things. If nothing is genuinely worth flagging, say NOTHING
+- Use search_web when you detect a travel destination, visa question, or anything needing real-time info — don't guess
+- Lead with imminent events if any — give each one a named header: ⚡ <b>Tomorrow: [Event Name]</b>
+- Be selective — max 5 bullets total. If nothing is genuinely worth flagging, say NOTHING
 - Don't repeat what the morning brief already covers (today's due tasks)
 - Sound like a sharp friend who notices things, not a notification bot
 - FORMATTING: Telegram HTML only — <b>bold</b>, • bullets, emojis. Never use ** or _
@@ -2845,6 +2876,235 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             messages=[{"role": "user", "content": prompt}],
         )
         return _fix_md(resp.content[0].text)
+
+    async def trip_milestone_brief(self, trip: dict, days_until: int) -> str | None:
+        """Pre-trip intelligence fired at milestone days (56/28/14/7/2 before departure)."""
+        import json as _json
+        from tools.fyis import get_fyis as _get_fyis
+
+        dest = trip.get("destination", "")
+        start = trip.get("start_date") or "TBC"
+        end = trip.get("end_date") or "TBC"
+        visa_ansen = trip.get("visa_ansen") or "not checked"
+        visa_jess = trip.get("visa_jess") or "not checked"
+        notes = trip.get("notes") or ""
+
+        milestone_label = {56: "8 weeks out", 28: "4 weeks out", 14: "2 weeks out", 7: "1 week out", 2: "2 days out"}.get(days_until, f"{days_until} days out")
+
+        # Pregnancy context
+        baby_block = ""
+        try:
+            info = pregnancy_summary()
+            baby_block = f"Week {info['week']}, due {info['due_date']}"
+        except Exception:
+            pass
+
+        # FYIs mentioning this destination or travel
+        fyi_lines = []
+        try:
+            for f in _get_fyis(limit=25):
+                content = f.get("content", "")
+                if dest.lower() in content.lower() or "travel" in (f.get("category") or "").lower():
+                    fyi_lines.append(f"  [{(f.get('created_at') or '')[:10]}] {content}")
+        except Exception:
+            pass
+
+        # Tasks mentioning this destination or travel category
+        task_lines = []
+        try:
+            for uid in self._USER_NAMES:
+                for t in get_tasks(uid, include_done=False):
+                    task_text = (t.get("task") or "").lower()
+                    if dest.lower() in task_text or t.get("category") == "travel":
+                        task_lines.append(f"  • {t['task']} (due: {t.get('due_date') or 'no date'})")
+        except Exception:
+            pass
+
+        shared = ""
+        try:
+            shared = get_shared_summary() or ""
+        except Exception:
+            pass
+
+        system = f"""You are a proactive travel intelligence agent for Ansen and Jess.
+
+TRIP: {dest}
+DATES: {start} → {end}
+MILESTONE: {milestone_label} until departure
+VISA — Ansen (Singapore passport): {visa_ansen}
+VISA — Jess (US passport): {visa_jess}
+TRIP NOTES: {notes or "none"}
+{f"PREGNANCY: {baby_block}" if baby_block else ""}
+
+SHARED BRAIN:
+{shared or "(empty)"}
+
+RELATED FYIs:
+{chr(10).join(fyi_lines) if fyi_lines else "  none"}
+
+RELATED TASKS:
+{chr(10).join(task_lines) if task_lines else "  none"}
+
+IDENTITIES:
+- Ansen: Singaporean passport (visa-free for most countries)
+- Jess: US passport (American — US-specific requirements often differ)
+- Wedding: 7 November 2026  |  Baby due: 18 February 2027
+
+YOUR JOB: It is {milestone_label} until {dest}. Use search_web to check current entry requirements for BOTH passports — look for recent changes (new e-visa systems, biometric requirements, ETA schemes, health declarations). Then surface what's actionable.
+
+Focus on:
+1. Visa / entry status — any action needed? Flag with ⚠️ and exact steps if urgent
+2. What's still unbooked or unresolved (accommodation, insurance, airport transfers)
+3. Pregnancy considerations if applicable (flight length >4h, travel insurance with maternity cover, OBGYN sign-off, airline policies)
+4. 1-2 practical heads-up items specific to this destination / timing
+
+RULES:
+- Specific and actionable — not "check visa" but "Jess needs UK ETA — apply at gov.uk/eta, £10, typically instant"
+- 4–6 bullets max. Telegram HTML only: <b>bold</b>, • bullets, emojis
+- If everything is sorted and nothing worth flagging: respond with exactly NOTHING"""
+
+        tools = [t for t in TOOLS if t["name"] == "search_web"]
+        messages: list[dict] = [{"role": "user", "content": f"Run pre-trip intelligence for {dest} ({milestone_label})."}]
+        first_uid = next(iter(self._USER_NAMES))
+
+        for _ in range(3):
+            try:
+                response = await self.client.messages.create(
+                    model=SYNTHESIS_MODEL,
+                    max_tokens=700,
+                    system=system,
+                    tools=tools,
+                    messages=messages,
+                )
+            except Exception:
+                return None
+
+            if response.stop_reason == "end_turn":
+                result = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+                if not result or result.upper().startswith("NOTHING"):
+                    return None
+                return f"✈️ <b>{dest} — {milestone_label}</b>\n\n" + _fix_md(result)
+
+            if response.stop_reason == "tool_use":
+                tool_uses = [b for b in response.content if b.type == "tool_use"]
+                messages.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for tu in tool_uses:
+                    try:
+                        res = await self._execute_tool(tu.name, tu.input, first_uid, {})
+                    except Exception as exc:
+                        res = {"error": str(exc)}
+                    tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": _json.dumps(res)})
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                break
+        return None
+
+    async def appointment_pre_brief(self, medical_events: list[dict]) -> str | None:
+        """Night-before synthesis for medical/health appointments — questions, what to bring, relevant knowledge."""
+        from tools.baby_knowledge import get_entries as _get_baby, search_entries as _search_baby
+        from tools.fyis import get_fyis as _get_fyis
+
+        if not medical_events:
+            return None
+
+        # Questions saved to ask at appointments
+        question_lines = []
+        seen_q: set = set()
+        for uid in self._USER_NAMES:
+            try:
+                for t in get_tasks(uid, include_done=False):
+                    if t.get("category") == "baby_questions":
+                        q = (t.get("task") or "").strip()
+                        if q.upper().startswith("TASK:"):
+                            q = q[5:].strip()
+                        if q and q not in seen_q:
+                            seen_q.add(q)
+                            question_lines.append(f"  • {q}")
+            except Exception:
+                pass
+
+        # Baby knowledge relevant to this appointment type
+        search_query = " ".join(e.get("title", "") for e in medical_events)
+        baby_entries: list[dict] = []
+        try:
+            baby_entries = _search_baby(search_query)[:6] if search_query else []
+        except Exception:
+            pass
+        if not baby_entries:
+            try:
+                baby_entries = _get_baby(limit=6)
+            except Exception:
+                pass
+        baby_knowledge_text = "\n".join(
+            f"  [{', '.join(e.get('tags') or [])}] {e['summary']}" for e in baby_entries
+        ) if baby_entries else "  none"
+
+        # Recent health/baby FYIs
+        fyi_lines = []
+        try:
+            health_kw = {"doctor", "scan", "blood", "results", "appointment", "test", "hospital", "clinic"}
+            for f in _get_fyis(limit=20):
+                cat = f.get("category") or ""
+                content = (f.get("content") or "").lower()
+                if cat in ("health", "baby") or any(kw in content for kw in health_kw):
+                    fyi_lines.append(f"  [{(f.get('created_at') or '')[:10]}] {f['content']}")
+        except Exception:
+            pass
+
+        # Pregnancy context
+        baby_block = ""
+        try:
+            info = pregnancy_summary()
+            milestones = upcoming_milestones(within_weeks=4)
+            baby_block = f"Week {info['week']} of {info['total_weeks']}, due {info['due_date']}"
+            if milestones:
+                baby_block += " — upcoming: " + "; ".join(milestones[:2])
+        except Exception:
+            pass
+
+        event_summaries = "\n".join(
+            f"  • {e.get('title', 'Appointment')} — {e.get('start', 'tomorrow')}"
+            for e in medical_events
+        )
+
+        prompt = f"""You are a practical medical prep assistant for Ansen and Jess (first-time parents, {baby_block}).
+
+TOMORROW'S APPOINTMENT(S):
+{event_summaries}
+
+OPEN QUESTIONS TO ASK (saved by them):
+{chr(10).join(question_lines) if question_lines else "  none saved yet"}
+
+RELEVANT KNOWLEDGE BASE:
+{baby_knowledge_text}
+
+RELEVANT HEALTH FYIs:
+{chr(10).join(fyi_lines) if fyi_lines else "  none"}
+
+Write a concise tonight reminder for tomorrow's appointment. Cover:
+1. <b>❓ Questions to ask</b> — pull from their saved list, prioritise by relevance to this appointment type. Add 1-2 smart ones they might have missed.
+2. <b>📋 Bring</b> — ID, referral letters, test results they've mentioned, vitamins list if relevant, insurance card
+3. <b>💡 Heads up</b> — one practical note (eat before if it's a long appointment, wear loose clothing for scans, etc.)
+
+RULES:
+- Warm and practical — like a helpful friend reminding them tonight
+- Tight — 6–8 bullets max total across all sections
+- Telegram HTML only: <b>bold headers</b>, • bullets, blank line between sections, no asterisks
+- If there's genuinely nothing useful to surface (no questions, no relevant knowledge, basic appointment): respond NOTHING"""
+
+        try:
+            response = await self.client.messages.create(
+                model=SYNTHESIS_MODEL,
+                max_tokens=700,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = response.content[0].text.strip()
+            if not result or result.upper().startswith("NOTHING"):
+                return None
+            return _fix_md(result)
+        except Exception:
+            return None
 
     async def knowledge_sweep(self) -> list[str]:
         """Weekly agentic sweep across all knowledge silos. Extracts new cross-domain facts
