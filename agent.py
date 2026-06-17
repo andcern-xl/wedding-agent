@@ -1665,6 +1665,23 @@ TOOLS = [
             "required": ["show_name"],
         },
     },
+    {
+        "name": "read_stocks_history",
+        "description": "Read past investment briefs — what newsletters have been saying about stocks, crypto, and ETFs over recent weeks. Use for any finance/investment question: 'is now a good time to buy X', 'what's the outlook on BTC', 'what have the newsletters said about Y'. Always call this before giving investment opinions so your answer reflects actual newsletter signals, not just general knowledge.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "asset": {
+                    "type": "string",
+                    "description": "Optional: filter to a specific asset name or ticker (e.g. 'bitcoin', 'BTC', 'Apple', 'ETH'). Omit to get the full recent briefs.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of past briefs to read. Default 4 (last ~4 weeks).",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1979,6 +1996,22 @@ class UnifiedAgent:
             _update_show(show["id"], status=inputs.get("status"), notes=inputs.get("notes"))
             return {"status": "updated", "show_name": show["show_name"], "new_status": inputs.get("status")}
 
+        if name == "read_stocks_history":
+            from tools.stocks_knowledge import get_recent_briefs, search_asset
+            asset = inputs.get("asset", "").strip()
+            limit = int(inputs.get("limit") or 4)
+            if asset:
+                return search_asset(asset, limit=limit)
+            rows = get_recent_briefs(limit=limit)
+            # Return structured data without the full brief_text (too large for tool result)
+            return [
+                {
+                    "brief_date": r["brief_date"],
+                    "assets": r.get("assets") or [],
+                }
+                for r in rows
+            ]
+
         return {"error": f"Unknown tool: {name}"}
 
     @staticmethod
@@ -2274,6 +2307,23 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
                     for a in researched[:5]]
             await asyncio.to_thread(append_shared_summary,
                 f"📊 Stocks {today}: {', '.join(sigs)}")
+        except Exception:
+            pass
+
+        # ── STEP 7: persist brief for conversational recall ───────────────
+        try:
+            from tools.stocks_knowledge import save_brief as _save_brief
+            _brief_assets = [
+                {
+                    "name": a["name"],
+                    "ticker": a.get("ticker", ""),
+                    "type": a.get("type", "other"),
+                    "sentiment": a.get("sentiment", "neutral"),
+                    "thesis": a.get("thesis", ""),
+                }
+                for a in researched
+            ]
+            await asyncio.to_thread(_save_brief, today, _brief_assets, brief_text)
         except Exception:
             pass
 
