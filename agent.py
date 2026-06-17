@@ -803,26 +803,32 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
         upcoming = sorted([t for t in merged if t.get("due_date") and t["due_date"] > today_str], key=lambda t: t["due_date"])
         no_date = sorted([t for t in merged if not t.get("due_date")], key=lambda t: t["task"].lower())
 
-        parts = [f"TODAY IS {weekday.upper()}, {today_str}"]
-
-        if events:
-            ev_lines = []
-            for e in events[:10]:
-                start = e["start"]
-                if "T" in start:
-                    try:
-                        dt = datetime.fromisoformat(start)
-                        start = dt.strftime("%-d %b %H:%M")
-                    except ValueError:
-                        pass
-                ev_lines.append(f"  • {start} — {e['title']}")
-            parts.append("CALENDAR (next 7 days):\n" + "\n".join(ev_lines))
-
         def _owner_label(t: dict) -> str:
             owner = t.get("_owner", "")
             if owner and owner != "shared":
                 return f" [{owner}]"
             return ""
+
+        if not merged and not events:
+            return "✅ Nothing on the list today. Add tasks by telling me — \"remind us to X on Friday\".", []
+
+        # Only show today's events in the daily brief — keep full list for task dedup only
+        today_events = [e for e in events if e["start"].startswith(today_str)]
+
+        parts = [f"TODAY IS {weekday.upper()}, {today_str}"]
+
+        if today_events:
+            ev_lines = []
+            for e in today_events:
+                start = e["start"]
+                if "T" in start:
+                    try:
+                        dt = datetime.fromisoformat(start)
+                        start = dt.strftime("%-I:%M %p")
+                    except ValueError:
+                        pass
+                ev_lines.append(f"  • {start} — {e['title']}")
+            parts.append("TODAY'S CALENDAR:\n" + "\n".join(ev_lines))
 
         if overdue:
             lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in overdue]
@@ -833,55 +839,33 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
             parts.append("DUE TODAY:\n" + "\n".join(lines))
 
         if upcoming:
-            lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in upcoming[:10]]
-            parts.append("COMING UP:\n" + "\n".join(lines))
+            lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in upcoming[:7]]
+            parts.append("COMING UP (next 7 days):\n" + "\n".join(lines))
 
         if no_date:
-            by_cat: dict[str, list] = {}
-            for t in no_date:
-                cat = t.get("category") or "personal"
-                by_cat.setdefault(cat, []).append(t)
-            cat_lines = ["NO DATE:"]
-            for cat_slug, tasks in by_cat.items():
-                info = cats.get(cat_slug, {"emoji": "📌", "name": cat_slug.title()})
-                cat_lines.append(f"\n{info['emoji']} {info['name']}:")
-                for t in tasks:
-                    cat_lines.append(f"  • {_task_label(t, today_str)}{_owner_label(t)}")
-            parts.append("\n".join(cat_lines))
-
-        if not merged and not events:
-            return "✅ Nothing on the list today. Add tasks by telling me — \"remind us to X on Friday\".", []
+            lines = [f"  • {_task_label(t, today_str)}{_owner_label(t)}" for t in no_date[:8]]
+            parts.append("ON THE LIST (no date):\n" + "\n".join(lines))
 
         context = "\n\n".join(parts)
         person_list = " and ".join(names.values()) if names else "both of you"
         prompt = f"""{context}
 
-Generate a sharp combined daily brief for {person_list}. Structure:
+Write a morning brief for {person_list}. Be a smart friend, not a secretary — synthesise, don't dump.
 
-<b>📅 Today on the Calendar</b>
-Calendar events today and the next few days. One line each with date/time. Skip if none.
+Rules:
+- Max 5 bullets total. Each bullet = one clear action or heads-up.
+- Lead with anything happening TODAY (calendar events, things due today, overdue items). Use ⚠️ for overdue.
+- Then 1-2 most urgent upcoming items if space allows.
+- Skip undated backlog entirely unless something is critically overdue.
+- Never list calendar AND the same task — calendar wins.
+- Where a task belongs to one person, note [Name] in brackets.
+- End with one line: → /tasks /reminders for the full picture
 
----
-
-<b>Today & Overdue</b>
-Tasks due today plus any overdue. Flag overdue ones urgently. Where tasks belong to one person, note their name in brackets. Skip if none.
-
----
-
-<b>Coming Up</b>
-Tasks due in the next 7 days. One bullet each. Skip if none.
-
----
-
-<b>On the List</b>
-Undated open tasks grouped by category. Use category emoji and name as sub-header. Note whose task it is where relevant.
-
-Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight.
-Never list the same event under both Calendar and Tasks — calendar always wins, suppress the task."""
+Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**. Keep it tight — this is a phone notification, not a report."""
 
         response = await self.client.messages.create(
-            model=CHAT_MODEL,
-            max_tokens=1200,
+            model=SYNTHESIS_MODEL,
+            max_tokens=500,
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2977,7 +2961,41 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         return await self._wedding.category_status(category)
 
     async def priority_brief(self) -> str:
-        return await self._wedding.priority_brief()
+        from datetime import date as _date, datetime as _dt
+        wedding_brief = await self._wedding.priority_brief()
+
+        # Prepend full-week calendar to the Sunday brief
+        try:
+            events = await asyncio.to_thread(get_events, 7)
+        except Exception:
+            events = []
+
+        if not events:
+            return wedding_brief
+
+        today_str = _date.today().isoformat()
+        ev_lines = []
+        for e in events[:14]:
+            start = e["start"]
+            day_label = ""
+            if "T" in start:
+                try:
+                    dt = _dt.fromisoformat(start)
+                    day_label = dt.strftime("%a %-d %b, %-I:%M %p")
+                except Exception:
+                    day_label = start[:10]
+            else:
+                try:
+                    dt = _dt.strptime(start, "%Y-%m-%d")
+                    day_label = dt.strftime("%a %-d %b")
+                except Exception:
+                    day_label = start
+            is_today = start.startswith(today_str)
+            prefix = "📍 " if is_today else "• "
+            ev_lines.append(f"{prefix}{day_label} — {e['title']}")
+
+        cal_block = "📅 <b>This Week's Calendar</b>\n\n" + "\n".join(ev_lines)
+        return cal_block + "\n\n---\n\n" + wedding_brief
 
     async def daily_brief(self, user_id: int) -> str:
         return await self._daily.daily_brief(user_id)
