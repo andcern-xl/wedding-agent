@@ -2598,6 +2598,28 @@ Rules:
             except Exception:
                 pass
 
+        # --- Load previous state for gap de-duplication ---
+        prev_output = ""
+        prev_date = ""
+        try:
+            from tools.proactive_state import load_state as _load_proactive_state
+            _prev = _load_proactive_state(user_id)
+            prev_output = _prev.get("last_output") or ""
+            prev_date = _prev.get("last_run_date") or ""
+        except Exception:
+            pass
+
+        prev_block = ""
+        if prev_output and prev_date:
+            prev_block = f"""PREVIOUSLY FLAGGED — you said this on {prev_date}:
+{prev_output}
+
+OPEN GAP RULES — apply before deciding what to surface:
+• If a previous gap now has an OPEN TASK addressing it → being handled, skip it
+• If a previous gap is resolved (visa field now set, booking confirmed in FYIs/brain) → skip it
+• Only re-surface a previous gap if: (a) event is now ≤7 days away, or (b) genuinely new information changes the picture
+• Gaps NOT in the previous list → surface as normal if actionable"""
+
         # --- Proactive tools available to this check ---
         proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis")]
 
@@ -2628,6 +2650,8 @@ SHARED BRAIN:
 {trips_block}
 
 {shows_block}
+
+{prev_block}
 
 ---
 
@@ -2700,7 +2724,13 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
                 result = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
                 if not result or result.upper().startswith("NOTHING"):
                     return None
-                return _fix_md(result)
+                fixed = _fix_md(result)
+                try:
+                    from tools.proactive_state import save_state as _save_proactive_state
+                    _save_proactive_state(user_id, result, today_str)
+                except Exception:
+                    pass
+                return fixed
 
             if response.stop_reason == "tool_use":
                 tool_uses = [b for b in response.content if b.type == "tool_use"]
@@ -2926,15 +2956,58 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
         except Exception:
             pass
 
+        # Categorise known state vs open gaps before building the prompt
+        _confirmed: list[str] = []
+        _open_gaps: list[str] = []
+
+        # Visa
+        _va_clean = (visa_ansen or "").lower().strip()
+        _vj_clean = (visa_jess or "").lower().strip()
+        if _va_clean and _va_clean not in ("not checked", ""):
+            _confirmed.append(f"Ansen visa: {visa_ansen}")
+        else:
+            _open_gaps.append("Ansen visa (Singapore passport) — not yet checked")
+        if _vj_clean and _vj_clean not in ("not checked", ""):
+            _confirmed.append(f"Jess visa: {visa_jess}")
+        else:
+            _open_gaps.append("Jess visa (US passport) — not yet checked")
+
+        # Accommodation — infer from FYIs / tasks / notes
+        accom_keywords = {"hotel", "airbnb", "hostel", "accommodation", "stay", "room", "villa", "apartment"}
+        _accom_mentioned = any(
+            any(kw in (line or "").lower() for kw in accom_keywords)
+            for line in fyi_lines + task_lines + [notes]
+        )
+        if _accom_mentioned:
+            _confirmed.append("Accommodation mentioned in notes/FYIs")
+        else:
+            _open_gaps.append("Accommodation — nothing confirmed in notes or FYIs")
+
+        # Insurance — flag if not mentioned and pregnancy involved
+        _insur_mentioned = any("insur" in (line or "").lower() for line in fyi_lines + task_lines + [notes])
+        if baby_block and not _insur_mentioned:
+            _open_gaps.append("Travel insurance with maternity cover — not mentioned")
+
+        # If all gaps are resolved and it's an early milestone, nothing to surface
+        if not _open_gaps and days_until > 14:
+            return None
+
+        confirmed_block = "\n".join(f"  ✅ {c}" for c in _confirmed) if _confirmed else "  none yet"
+        gaps_block = "\n".join(f"  ⚠️ {g}" for g in _open_gaps) if _open_gaps else "  none — all clear"
+        need_visa_search = any("visa" in g.lower() for g in _open_gaps)
+
         system = f"""You are a proactive travel intelligence agent for Ansen and Jess.
 
 TRIP: {dest}
 DATES: {start} → {end}
 MILESTONE: {milestone_label} until departure
-VISA — Ansen (Singapore passport): {visa_ansen}
-VISA — Jess (US passport): {visa_jess}
-TRIP NOTES: {notes or "none"}
 {f"PREGNANCY: {baby_block}" if baby_block else ""}
+
+WHAT'S ALREADY CONFIRMED (do NOT re-flag these):
+{confirmed_block}
+
+OPEN GAPS (these need attention — focus here):
+{gaps_block}
 
 SHARED BRAIN:
 {shared or "(empty)"}
@@ -2947,21 +3020,18 @@ RELATED TASKS:
 
 IDENTITIES:
 - Ansen: Singaporean passport (visa-free for most countries)
-- Jess: US passport (American — US-specific requirements often differ)
+- Jess: US passport (American — requirements often differ)
 - Wedding: 7 November 2026  |  Baby due: 18 February 2027
 
-YOUR JOB: It is {milestone_label} until {dest}. Use search_web to check current entry requirements for BOTH passports — look for recent changes (new e-visa systems, biometric requirements, ETA schemes, health declarations). Then surface what's actionable.
+YOUR JOB: Surface only the OPEN GAPS above. {"Use search_web to check current entry requirements for any open visa gaps — look for recent system changes (ETA schemes, biometric requirements, health declarations)." if need_visa_search else "Visa is already confirmed — skip the visa search."}
 
-Focus on:
-1. Visa / entry status — any action needed? Flag with ⚠️ and exact steps if urgent
-2. What's still unbooked or unresolved (accommodation, insurance, airport transfers)
-3. Pregnancy considerations if applicable (flight length >4h, travel insurance with maternity cover, OBGYN sign-off, airline policies)
-4. 1-2 practical heads-up items specific to this destination / timing
+For each open gap: give a specific, actionable step (not "book accommodation" but "consider checking Booking.com — {dest} in peak season can fill fast").
 
 RULES:
-- Specific and actionable — not "check visa" but "Jess needs UK ETA — apply at gov.uk/eta, £10, typically instant"
-- 4–6 bullets max. Telegram HTML only: <b>bold</b>, • bullets, emojis
-- If everything is sorted and nothing worth flagging: respond with exactly NOTHING"""
+- Only flag genuine open gaps — not things already confirmed above
+- Specific steps, not vague advice
+- 3–5 bullets max. Telegram HTML only: <b>bold</b>, • bullets, emojis
+- If no gaps remain after checking: respond with exactly NOTHING"""
 
         tools = [t for t in TOOLS if t["name"] == "search_web"]
         messages: list[dict] = [{"role": "user", "content": f"Run pre-trip intelligence for {dest} ({milestone_label})."}]
