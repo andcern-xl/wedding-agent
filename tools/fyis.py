@@ -136,6 +136,14 @@ def get_fyis_unacked(user_id: int, limit: int = 30) -> list[dict]:
         return []
 
 
+def get_fyi_by_id(fyi_id: str) -> dict | None:
+    try:
+        rows = get_client().table("fyis").select("*").eq("id", fyi_id).execute().data
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
 def keep_fyi(fyi_id: str) -> bool:
     """Reset created_at to now, extending the 30-day TTL by another 30 days."""
     try:

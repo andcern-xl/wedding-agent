@@ -800,23 +800,31 @@ def _format_fyis(fyis: list) -> str:
 
 
 def _format_fyis_with_buttons(fyis: list) -> tuple[str, InlineKeyboardMarkup | None]:
-    """FYIs grouped by category with a ✅ Got it button per item."""
+    """FYIs as a compact card list — tap each to expand full content."""
     grouped: dict = {}
     for f in fyis:
         cat = (f.get("category") or "other").lower()
         grouped.setdefault(cat, []).append(f)
-    blocks = ["<b>📨 FYIs</b>\n"]
+    count = len(fyis)
+    blocks = [f"<b>📨 FYIs</b>  ·  {count} unread\n"]
     for cat, items in grouped.items():
         emoji = _CAT_EMOJI.get(cat, "📌")
-        blocks.append(f"\n{emoji} <b>{cat.title()}</b>")
+        blocks.append(f"{emoji} <b>{cat.title()}</b>")
         for f in items:
-            when = (f.get("created_at") or "")[:10]
-            blocks.append(f"• <i>{when}</i> — {f['content']}")
-    text = "\n".join(blocks)
+            snippet = f["content"][:60].strip()
+            if len(f["content"]) > 60:
+                snippet += "…"
+            blocks.append(f"• {snippet}")
+        blocks.append("")
+    text = "\n".join(blocks).rstrip()
     rows = []
     for f in fyis:
-        label = f["content"][:32] + "…" if len(f["content"]) > 32 else f["content"]
-        rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"fyi_gotit:{f['id']}")])
+        cat = (f.get("category") or "other").lower()
+        emoji = _CAT_EMOJI.get(cat, "📌")
+        label = f["content"][:38].strip()
+        if len(f["content"]) > 38:
+            label += "…"
+        rows.append([InlineKeyboardButton(f"{emoji} {label} →", callback_data=f"fyi_expand:{f['id']}")])
     keyboard = InlineKeyboardMarkup(rows) if rows else None
     return text, keyboard
 
@@ -940,39 +948,25 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
                 return
             STATUS_ICON = {"planning": "🗓", "booked": "✅", "completed": "🏁", "cancelled": "❌"}
-            lines = ["✈️ <b>Upcoming Trips</b>\n"]
-            del_rows = []
+            count = len(trips)
+            lines = [f"✈️ <b>Upcoming Trips</b>  ·  {count}\n"]
+            rows = []
             for t in trips:
                 dest = t["destination"]
                 status = t.get("status") or "planning"
                 icon = STATUS_ICON.get(status, "🗓")
                 start = t.get("start_date") or ""
-                end = t.get("end_date") or ""
                 if start:
                     try:
-                        start = _dt.strptime(start, "%Y-%m-%d").strftime("%-d %b")
+                        start = _dt.strptime(start, "%Y-%m-%d").strftime("%-d %b '%y")
                     except Exception:
                         pass
-                if end:
-                    try:
-                        end = _dt.strptime(end, "%Y-%m-%d").strftime("%-d %b %Y")
-                    except Exception:
-                        pass
-                date_str = f"{start} – {end}" if start and end else (start or end or "dates TBC")
-                line = f"{icon} <b>{dest}</b> · {date_str}"
-                va = t.get("visa_ansen")
-                vj = t.get("visa_jess")
-                if va or vj:
-                    line += f"\n  🛂 Ansen: {va or '—'} | Jess: {vj or '—'}"
-                notes = t.get("notes") or ""
-                if notes:
-                    first_note = notes.split("\n")[0][:80]
-                    line += f"\n  <i>{first_note}</i>"
-                lines.append(line)
-                label = dest[:28] + "…" if len(dest) > 28 else dest
-                del_rows.append([InlineKeyboardButton(f"🗑 {label}", callback_data=f"trip_del:{t['id']}")])
-            text = "\n\n".join(lines)
-            keyboard = InlineKeyboardMarkup(del_rows) if del_rows else None
+                date_preview = start or "dates TBC"
+                lines.append(f"{icon} <b>{escape(dest)}</b>  ·  {date_preview}")
+                label = f"{icon} {dest[:24]}  {date_preview} →"
+                rows.append([InlineKeyboardButton(label, callback_data=f"trip_expand:{t['id']}")])
+            text = "\n".join(lines)
+            keyboard = InlineKeyboardMarkup(rows)
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1173,6 +1167,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"Couldn't remove: {str(e)[:100]}")
 
+    elif data.startswith("trip_expand:"):
+        await query.answer()
+        trip_id = data[12:]
+        try:
+            from tools.trips import get_trip_by_id
+            from datetime import datetime as _dt2
+            t = get_trip_by_id(trip_id)
+            if not t:
+                await context.bot.send_message(chat_id=query.message.chat_id, text="Trip not found.")
+                return
+            def _fmt_d(d):
+                try:
+                    return _dt2.strptime(d, "%Y-%m-%d").strftime("%-d %b %Y")
+                except Exception:
+                    return d
+            STATUS_ICON = {"planning": "🗓", "booked": "✅", "completed": "🏁", "cancelled": "❌"}
+            dest = t["destination"]
+            status = t.get("status") or "planning"
+            icon = STATUS_ICON.get(status, "🗓")
+            start_str = _fmt_d(t["start_date"]) if t.get("start_date") else "TBC"
+            end_str = _fmt_d(t["end_date"]) if t.get("end_date") else "TBC"
+            date_str = f"{start_str} – {end_str}" if t.get("start_date") and t.get("end_date") else start_str
+            lines = [f"✈️ <b>{escape(dest)}</b>  {icon} {status.title()}", f"\n📅 {date_str}"]
+            va = t.get("visa_ansen")
+            vj = t.get("visa_jess")
+            if va or vj:
+                lines.append(f"🛂 Ansen: {va or '—'}  |  Jess: {vj or '—'}")
+            notes = t.get("notes") or ""
+            if notes:
+                lines.append(f"\n📝 <i>{escape(notes[:600])}</i>")
+            text = "\n".join(lines)
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Delete trip", callback_data=f"trip_del:{trip_id}")]
+            ])
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard
+            )
+        except Exception as e:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
     elif data.startswith("show_del:"):
         await query.answer()
         if user_id != ANSEN_ID:
@@ -1305,6 +1339,34 @@ async def _handle_fyi_callback(query, context, data: str):
         return
     parts = data.split(":", 2)
     action = parts[0]
+
+    # --- Expand: open a focused card for one FYI ---
+    if action == "expand":
+        fyi_id = parts[1]
+        from tools.fyis import get_fyi_by_id
+        fyi = get_fyi_by_id(fyi_id)
+        if not fyi:
+            await query.answer("FYI not found.")
+            return
+        await query.answer()
+        when = (fyi.get("created_at") or "")[:10]
+        cat = (fyi.get("category") or "misc").lower()
+        cat_emoji = _CAT_EMOJI.get(cat, "📌")
+        text = (
+            f"{cat_emoji} <b>{cat.title()}</b>\n"
+            f"<i>{when}</i>\n\n"
+            f"{escape(fyi['content'])}"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Got it", callback_data=f"fyi_gotit:{fyi_id}"),
+             InlineKeyboardButton("📌 Keep 30d", callback_data=f"fyi_keep:{fyi_id}")],
+            [InlineKeyboardButton("🧠 → Brain", callback_data=f"fyi_promote:{fyi_id}"),
+             InlineKeyboardButton("🗑 Archive", callback_data=f"fyi_archive:{fyi_id}")],
+        ])
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard
+        )
+        return
 
     # --- Per-FYI checkoff ---
     if action == "gotit":
