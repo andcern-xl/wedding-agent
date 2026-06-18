@@ -1682,6 +1682,58 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "get_grocery_lists",
+        "description": "Read all active grocery shopping lists with their items. Call whenever the user asks what's on the grocery list, what needs to be bought, or wants to see the shopping list.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "add_grocery_items",
+        "description": "Add one or more items to a grocery list. Creates the list if it doesn't exist. Use whenever user says 'add X to grocery list', 'we need X', 'get X from the store', 'pick up X', 'buy X', 'add to groceries', 'prenatal vitamins', 'hand warmers' etc. Always use this when shopping-related items are mentioned.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": {"type": "string"}, "description": "List of items to add"},
+                "list_name": {"type": "string", "description": "Name of the grocery list. Default: 'Groceries'. Use a descriptive name if user specifies a trip (e.g. 'Baby supplies', 'IKEA run', 'Weekend shop')."},
+            },
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "remove_grocery_item",
+        "description": "Remove an item from a grocery list. Use when user says 'remove X', 'take X off the list', 'we don't need X anymore'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "Item name to remove"},
+                "list_name": {"type": "string", "description": "Name of the list. Default: 'Groceries'."},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "check_off_grocery_item",
+        "description": "Mark a grocery item as bought/got. Use when user says 'got X', 'bought X', 'picked up X', 'found X'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string"},
+                "list_name": {"type": "string", "description": "Default: 'Groceries'."},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "close_grocery_list",
+        "description": "Mark a grocery shopping trip as done (all bought). Use when user says 'done with shopping', 'grocery run complete', 'finished the shop'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {"type": "string"},
+            },
+            "required": ["list_name"],
+        },
+    },
 ]
 
 
@@ -2012,6 +2064,63 @@ class UnifiedAgent:
                 for r in rows
             ]
 
+        if name == "get_grocery_lists":
+            from tools.groceries import get_active_lists
+            lists = get_active_lists()
+            return [
+                {
+                    "id": str(lst["id"]),
+                    "name": lst["name"],
+                    "item_count": len(lst["items"]),
+                    "items": [{"id": str(it["id"]), "item": it["item"], "quantity": it.get("quantity")} for it in lst["items"]],
+                }
+                for lst in lists
+            ]
+
+        if name == "add_grocery_items":
+            from tools.groceries import get_or_create_list, add_items
+            list_name = (inputs.get("list_name") or "Groceries").strip()
+            lst = get_or_create_list(list_name, user_id)
+            added = add_items(lst["id"], inputs.get("items", []), user_id)
+            flags["grocery_update"] = {
+                "action": "add",
+                "items": [it["item"] for it in added],
+                "list_name": lst["name"],
+            }
+            return {"status": "added", "list": lst["name"], "items": [it["item"] for it in added]}
+
+        if name == "remove_grocery_item":
+            from tools.groceries import get_list_by_name, remove_item_by_text
+            list_name = (inputs.get("list_name") or "Groceries").strip()
+            lst = get_list_by_name(list_name)
+            if not lst:
+                return {"error": f"No active list named '{list_name}'"}
+            removed = remove_item_by_text(lst["id"], inputs["item"])
+            if removed:
+                flags["grocery_update"] = {
+                    "action": "remove",
+                    "items": [inputs["item"]],
+                    "list_name": lst["name"],
+                }
+            return {"status": "removed" if removed else "not_found", "item": inputs["item"]}
+
+        if name == "check_off_grocery_item":
+            from tools.groceries import get_list_by_name, check_off_item
+            list_name = (inputs.get("list_name") or "Groceries").strip()
+            lst = get_list_by_name(list_name)
+            if not lst:
+                return {"error": f"No active list named '{list_name}'"}
+            ok = check_off_item(lst["id"], inputs["item"])
+            return {"status": "checked_off" if ok else "not_found", "item": inputs["item"]}
+
+        if name == "close_grocery_list":
+            from tools.groceries import get_list_by_name, close_list
+            lst = get_list_by_name(inputs["list_name"])
+            if not lst:
+                return {"error": f"No active list named '{inputs['list_name']}'"}
+            close_list(lst["id"])
+            return {"status": "closed", "list": lst["name"]}
+
         return {"error": f"Unknown tool: {name}"}
 
     @staticmethod
@@ -2059,7 +2168,7 @@ class UnifiedAgent:
 
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> dict:
         import logging as _logging
-        flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": []}
+        flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": [], "grocery_update": None}
         messages = self._sanitize_history(history) + [{"role": "user", "content": user_content}]
         system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context)
         last_response = None
@@ -2096,12 +2205,12 @@ class UnifiedAgent:
                 except Exception:
                     pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "completed_tasks": flags["completed_tasks"]}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"]}
 
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"]}
+                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "grocery_update": flags["grocery_update"]}
 
             if last_response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]

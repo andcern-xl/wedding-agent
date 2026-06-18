@@ -133,6 +133,7 @@ def _shared_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
         [InlineKeyboardButton("💰 Budget", callback_data="shared_budget"),
          InlineKeyboardButton("✈️ Travel", callback_data="shared_travel")],
+        [InlineKeyboardButton("🛒 Groceries", callback_data="shared_groceries")],
     ])
 
 
@@ -366,6 +367,29 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                         )
                     except Exception:
                         pass
+
+        # Notify partner on grocery add/remove
+        grocery = result.get("grocery_update")
+        if grocery:
+            sender = update.effective_user.first_name or "Your partner"
+            action = grocery.get("action", "updated")
+            list_name = grocery.get("list_name", "Groceries")
+            items = grocery.get("items", [])
+            if items:
+                if action == "add":
+                    icon = "🛒"
+                    verb = "added to"
+                else:
+                    icon = "🗑"
+                    verb = "removed from"
+                item_lines = "\n".join(f"  • {it}" for it in items)
+                notif_text = f"{icon} <b>{sender}</b> {verb} <b>{list_name}</b>\n\n{item_lines}"
+                for uid in ALLOWED_IDS:
+                    if uid != user_id:
+                        try:
+                            await context.bot.send_message(chat_id=uid, text=notif_text, parse_mode="HTML")
+                        except Exception:
+                            pass
 
     except Exception as e:
         logger.exception(f"Error handling message: {e}")
@@ -784,6 +808,38 @@ _CAT_EMOJI = {
 }
 
 
+def _format_groceries() -> tuple[str, InlineKeyboardMarkup | None]:
+    from tools.groceries import get_active_lists
+    lists = get_active_lists()
+    if not lists:
+        return "🛒 <b>Groceries</b>\n\nNo active lists. Just say \"add milk to grocery list\" to start one.", None
+    blocks = ["🛒 <b>Grocery Lists</b>\n"]
+    rows = []
+    for lst in lists:
+        items = lst.get("items") or []
+        count = len(items)
+        blocks.append(f"\n<b>{escape(lst['name'])}</b>  ·  {count} item{'s' if count != 1 else ''}")
+        for it in items[:12]:
+            blocks.append(f"  • {escape(it['item'])}")
+        if count > 12:
+            blocks.append(f"  <i>+{count - 12} more…</i>")
+        rows.append([InlineKeyboardButton(f"✅ Done — {lst['name'][:28]}", callback_data=f"grocery_done:{lst['id']}")])
+    text = "\n".join(blocks)
+    keyboard = InlineKeyboardMarkup(rows)
+    return text, keyboard
+
+
+async def cmd_groceries(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    try:
+        text, keyboard = _format_groceries()
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.exception("cmd_groceries failed")
+        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
 def _format_fyis(fyis: list) -> str:
     grouped: dict = {}
     for f in fyis:
@@ -967,6 +1023,13 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
                 rows.append([InlineKeyboardButton(label, callback_data=f"trip_expand:{t['id']}")])
             text = "\n".join(lines)
             keyboard = InlineKeyboardMarkup(rows)
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "groceries":
+        try:
+            text, keyboard = _format_groceries()
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1206,6 +1269,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
+    elif data.startswith("grocery_done:"):
+        await query.answer()
+        list_id = data[13:]
+        try:
+            from tools.groceries import get_active_lists, close_list
+            lists = get_active_lists()
+            lst = next((l for l in lists if str(l["id"]) == list_id), None)
+            name = lst["name"] if lst else "that list"
+            close_list(list_id)
+            current = query.message.reply_markup
+            if current:
+                new_rows = [row for row in current.inline_keyboard if not any(btn.callback_data == data for btn in row)]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"🛒 <b>{escape(name)}</b> — shopping done! List archived.", parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"Couldn't close: {str(e)[:100]}")
 
     elif data.startswith("show_del:"):
         await query.answer()
@@ -1607,6 +1687,7 @@ def main():
     app.add_handler(CommandHandler("baby", cmd_baby))
     app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
     app.add_handler(CommandHandler("shows", cmd_shows))
+    app.add_handler(CommandHandler("groceries", cmd_groceries))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
