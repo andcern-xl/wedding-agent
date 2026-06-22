@@ -2872,10 +2872,15 @@ RULES:
 - Sound like a sharp friend who notices things, not a notification bot
 - FORMATTING: Telegram HTML only — <b>bold</b>, • bullets, emojis. Never use ** or _
 
+CALENDAR IS SOURCE OF TRUTH:
+- If a task date and a calendar event date differ — the calendar is correct, full stop. Do NOT flag this as a question or ask for confirmation. Simply note "Task updated to match calendar" if relevant, and move on. Never say "one of these is wrong" or ask which date is right.
+
+TRIPS — only surface a trip if it's within 28 days OR has a specific open gap (visa not confirmed, accommodation missing, health clearance needed). Do not surface trips just because they exist on the calendar.
+
 If nothing is worth flagging: respond with exactly: NOTHING"""
 
         # --- Run agentic loop (max 4 tool calls) ---
-        messages: list[dict] = [{"role": "user", "content": "Run your proactive intelligence check now."}]
+        messages: list[dict] = [{"role": "user", "content": "Run your proactive intelligence check now. Do not add an intro header or greeting — jump straight into the findings."}]
         for _ in range(4):
             try:
                 response = await self.client.messages.create(

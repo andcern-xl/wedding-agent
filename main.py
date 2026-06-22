@@ -1642,7 +1642,7 @@ async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
         try:
             msg = await agent.proactive_check(uid, name)
             if msg:
-                await context.bot.send_message(chat_id=uid, text=msg, parse_mode="HTML")
+                await context.bot.send_message(chat_id=uid, text=f"🌙 <b>Tonight's check-in</b>\n\n{msg}", parse_mode="HTML")
         except Exception:
             logger.exception(f"proactive_check failed for {uid}")
 
