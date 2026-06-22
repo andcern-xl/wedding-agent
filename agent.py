@@ -1072,6 +1072,12 @@ PEOPLE
 PROACTIVE NOTIFICATIONS — YOU CAN DO THIS
 You are running inside a Telegram bot with a job queue. You CAN send messages at specific times. When someone asks for a time-based reminder, call schedule_notification — a background job fires it automatically at the right moment. Never tell the user you can't send proactive messages or push alerts. You can. Use the tool.
 
+NOTIFICATION MESSAGE STYLE — always write notification messages with:
+- A relevant emoji at the start (🐾 for pets, 🏥 for health, 💍 for wedding, 🍼 for baby, ✈️ for travel, 💰 for money, 📅 for calendar, ⏰ for general reminders)
+- Short, warm, direct phrasing — like a helpful friend, not a calendar alert
+- Any useful context (what to bring, what to prepare) in 1–2 sentences max
+- No "Reminder:" prefix — the emoji does that job
+
 MESSAGING THE PARTNER — DO THIS PROPERLY
 When asked to "notify", "tell", "message", "ping", "let Jess know", "tell Ansen" etc → call message_partner immediately. It fires within 30 seconds.
 NEVER claim to have notified someone without calling message_partner. Do not say "Done", "Sent", or "Jess got the notification" unless the tool returned {{"status": "sent"}}. If you haven't called the tool, you haven't sent anything.
@@ -1228,13 +1234,16 @@ log_fyi when:
 - Status update: "I'm running late", "the plumber is coming at 3", "the package arrived"
 - News or information: "the vet called, results were fine", "the venue confirmed our date"
 - Sharing context: "the caterer raised their prices", "Mum is arriving Friday"
+- Trackers and balances: "pedicure package — 6 sessions remaining", "10 manicure sessions, used 3" → log_fyi with category="personal", NEVER add_daily_task
+- "Ask X about Y" with no specific deadline or urgency → log_fyi, NOT a task
+- Anything that's just good to know, even if it has a soft "might want to" action attached
 
 add_daily_task when:
-- Future action still to be done: "remind me to call", "we need to book", "don't forget to pay"
+- Concrete future action with real intent to do it: "remind me to call", "we need to book", "don't forget to pay"
 - Request directed at the other person: "can you follow up with the venue?", "Jess can you call the florist?"
-- Anything that would sit on a to-do list
+- Has a clear owner and should appear on a to-do list
 
-When in doubt: if it's something that already happened or is just good to know → FYI. If it needs someone to act → task.
+When in doubt: if it's something that already happened or is just good to know → FYI. If it needs someone to act → task. A soft curiosity ("I wonder if X", "might be worth asking about Y") is always an FYI, never a task.
 
 TASK QUALITY RULES — enforce these strictly:
 - Task names must be SHORT (under 80 chars). The action only — not the backstory. If you need to include context, log it as an FYI or wedding drop separately, then create a short task.
@@ -3643,17 +3652,23 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
 
 Write a morning update for {user_name}. You are a smart, proactive personal assistant who knows their full life context.
 
-STYLE: Write in flowing prose — 2 to 3 short paragraphs. NOT bullet points. Read like a thoughtful friend giving a quick morning rundown, not a secretary reading off a list.
+STRUCTURE: Use emoji section headers to break the brief into 3–5 scannable sections. Only include sections that have actual content. Suggested sections (adapt as needed):
+
+📅 <b>Today</b> — what's on the calendar, what needs doing today
+🍼 <b>Baby</b> — week milestone, upcoming appointment, anything relevant (only if there's something worth saying)
+💍 <b>Wedding</b> — active wedding tasks or upcoming decisions (only if relevant)
+✈️ <b>Trips</b> — upcoming travel, open gaps (only if relevant)
+🎵 <b>Shows</b> — upcoming events (Ansen only, only if relevant)
+💰 <b>Money</b> — financial items, payments, DBS/investments (only if relevant)
+⚠️ <b>Heads up</b> — overdue items, expiring things, urgent flags (only if there's something)
 
 WHAT TO DO:
-- Lead with what's actually happening today (calendar, urgent tasks).
-- Look for connections across domains: a FYI that relates to a task, a trip that links to a visa question, a show coming up that ties to something on the calendar. Weave them together naturally instead of listing them separately.
-- Mention the baby week naturally if there's anything relevant (milestone, upcoming appointment).
-- Flag ⚠️ anything overdue — one sentence, not a list.
-- Skip undated backlog tasks entirely unless one is clearly urgent.
-- Last sentence: → /tasks /fyis for the full picture
+- Under each header, write 2–4 short sentences max. Natural, friendly tone — not a bullet dump.
+- Look for connections: a FYI that relates to a task, a trip that links to a visa question. Weave them within the relevant section.
+- Skip sections entirely if nothing meaningful to say — don't pad.
+- Last line (outside sections): → /tasks /fyis for the full picture
 
-FORMATTING: Pure HTML. <b>bold</b> only for names or key terms. No bullet points. No headers. No **asterisks**. 3-4 sentences per paragraph max. This appears as a Telegram message on a phone — keep it readable at a glance."""
+FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <b>bold</b> key names/terms inline. No bullet points. No **asterisks**. This appears as a Telegram message on a phone — keep it readable at a glance."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -3911,8 +3926,8 @@ FORMATTING: Pure HTML. <b>bold</b> only for names or key terms. No bullet points
                     if tid not in seen_personal:
                         seen_personal.add(tid)
                         personal[assigned].append(t)
-                # Shared with no specific assignee → shared section
-                elif t.get("visibility") == "shared":
+                # Shared with no specific assignee → shared section (exclude baby tasks — they live in /baby)
+                elif t.get("visibility") == "shared" and t.get("category") not in ("baby", "baby_questions"):
                     if tid not in seen_shared:
                         seen_shared.add(tid)
                         shared.append(t)

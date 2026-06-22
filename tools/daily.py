@@ -102,6 +102,11 @@ def get_completed_today(user_id: int) -> list[dict]:
     return [r for r in rows if r["visibility"] == "shared" or r["user_id"] == user_id]
 
 
+def update_task_date(task_id: str, new_date: str) -> bool:
+    result = get_client().table("daily_tasks").update({"due_date": new_date}).eq("id", task_id).execute()
+    return bool(result.data)
+
+
 def get_all_tasks_for_brief(user_id: int) -> dict:
     """Return structured task data for brief generation."""
     today = date.today().isoformat()

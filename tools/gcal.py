@@ -33,7 +33,7 @@ def _get_service():
     return _service
 
 
-def get_events(days_ahead: int = 7) -> list[dict]:
+def get_events(days_ahead: int = 7, max_results: int = 20) -> list[dict]:
     now = datetime.now(timezone.utc)
     end = now + timedelta(days=days_ahead)
     result = (
@@ -45,7 +45,7 @@ def get_events(days_ahead: int = 7) -> list[dict]:
             timeMax=end.isoformat(),
             singleEvents=True,
             orderBy="startTime",
-            maxResults=20,
+            maxResults=max_results,
         )
         .execute()
     )

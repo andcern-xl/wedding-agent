@@ -35,11 +35,12 @@ except Exception:
 REMINDER_TIME   = dtime(hour=9,  minute=0, tzinfo=REMINDER_TIMEZONE)   # 9am  — tasks, FYIs, baby, shows
 _evening_hour   = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
 EVENING_TIME    = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — recap, knowledge sweep
-_proactive_hour = int(os.getenv("PROACTIVE_HOUR", "14"))
-PROACTIVE_TIME  = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 2pm — proactive intelligence
+_proactive_hour = int(os.getenv("PROACTIVE_HOUR", "23"))
+PROACTIVE_TIME  = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 11pm — proactive intelligence (tomorrow review)
 CRYPTO_TIME     = dtime(hour=20, minute=0, tzinfo=REMINDER_TIMEZONE)               # 8pm — stocks & crypto
-BABY_WEEKLY_TIME = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
-APPOINTMENT_TIME = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
+BABY_WEEKLY_TIME   = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
+APPOINTMENT_TIME   = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
+CAL_SYNC_TIME      = dtime(hour=8, minute=50, tzinfo=REMINDER_TIMEZONE)  # 8:50am — calendar reconciliation before morning brief
 
 # Medical/appointment keywords for event title detection
 APPOINTMENT_KEYWORDS = {
@@ -1343,6 +1344,56 @@ async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error sending combined daily brief")
 
 
+async def send_calendar_reconciliation(context: ContextTypes.DEFAULT_TYPE):
+    """Detect when calendar events move and sync open task due_dates. Runs before morning brief."""
+    import asyncio
+    from datetime import date as _date
+    from tools.gcal import get_events
+    from tools.daily import get_tasks, update_task_date
+    from tools.calendar_sync import reconcile_task_dates
+
+    try:
+        events = await asyncio.to_thread(get_events, 90, 50)
+    except Exception:
+        logger.exception("calendar_sync: failed to fetch events")
+        return
+
+    all_tasks: list[dict] = []
+    seen: set = set()
+    for uid in ALLOWED_IDS:
+        try:
+            for t in get_tasks(uid, include_done=False):
+                tid = t.get("id")
+                if tid not in seen and t.get("due_date"):
+                    seen.add(tid)
+                    all_tasks.append(t)
+        except Exception:
+            pass
+
+    changes = reconcile_task_dates(all_tasks, events)
+    if not changes:
+        return
+
+    def _fmt(d: str) -> str:
+        try:
+            return _date.fromisoformat(d).strftime("%-d %b")
+        except Exception:
+            return d
+
+    lines = []
+    for c in changes:
+        name = (c["task"].get("task") or "")[:60].strip()
+        update_task_date(c["task"]["id"], c["new_date"])
+        lines.append(f"• {name}  {_fmt(c['old_date'])} → {_fmt(c['new_date'])}")
+
+    msg = "📅 <b>Calendar sync</b>\n\nThese task dates were updated to match your calendar:\n\n" + "\n".join(lines)
+    for uid in ALLOWED_IDS:
+        try:
+            await context.bot.send_message(chat_id=uid, text=msg, parse_mode="HTML")
+        except Exception:
+            logger.exception(f"calendar_sync: failed to notify {uid}")
+
+
 async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
     try:
         pending = get_pending_notifications()
@@ -1696,6 +1747,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
 
     if app.job_queue is not None:
+        # ── PRE-MORNING 8:50am ───────────────────────────────────────
+        # Calendar reconciliation — sync task due_dates to match calendar changes
+        app.job_queue.run_daily(send_calendar_reconciliation, time=CAL_SYNC_TIME)
         # ── MORNING 9am ──────────────────────────────────────────────
         # Unified narrative morning brief per user (tasks + FYIs + calendar synthesized)
         app.job_queue.run_daily(send_morning_brief, time=REMINDER_TIME)
