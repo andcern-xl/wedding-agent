@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from dateutil.relativedelta import relativedelta
 from tools.db import get_client
 
 
@@ -43,8 +44,16 @@ def mark_notification_sent(notification_id: str) -> None:
     recurrence = row.get("recurrence", "none")
     if recurrence and recurrence != "none":
         old_dt = datetime.fromisoformat(row["scheduled_at"])
-        next_dt = old_dt + (timedelta(days=1) if recurrence == "daily" else timedelta(weeks=1))
-        schedule_notification(row["user_id"], row["message"], next_dt, recurrence)
+        if recurrence == "daily":
+            next_dt = old_dt + timedelta(days=1)
+        elif recurrence == "weekly":
+            next_dt = old_dt + timedelta(weeks=1)
+        elif recurrence == "monthly":
+            next_dt = old_dt + relativedelta(months=1)
+        else:
+            next_dt = None
+        if next_dt:
+            schedule_notification(row["user_id"], row["message"], next_dt, recurrence)
 
 
 def list_notifications(user_id: int) -> list[dict]:

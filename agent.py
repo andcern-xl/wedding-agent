@@ -1096,6 +1096,7 @@ HOW TO USE TOOLS
 - Wedding questions → read_wedding_drops (filter by category when relevant)
 - Task / date-based reminder (no specific clock time) → add_daily_task — appears in the morning brief
 - Reminder with a specific time ("at 3pm", "in 2 hours", "tonight at 8", "tomorrow at noon") → schedule_notification — fires as a Telegram push at that exact moment. NEVER use add_daily_task for these.
+- Monthly recurring reminders ("every 1st", "each month", "monthly") → schedule_notification with recurrence="monthly", scheduled for the next occurrence. Just do it — don't ask which approach they prefer.
 - Budget/spending → read_payments + read_wedding_drops("budget")
 - "what should I do" / "what's on" → call both read_wedding_drops and read_daily_tasks, synthesise one answer
 - Adding a task about a wedding vendor → read relevant drops first, bake context into the task description. Always set category="wedding" so it stays out of the daily reminders list.
@@ -1449,7 +1450,7 @@ TOOLS = [
             "properties": {
                 "message": {"type": "string", "description": "The message text to send"},
                 "scheduled_at": {"type": "string", "description": "When to send — ISO 8601 datetime with timezone offset e.g. 2026-06-03T15:00:00+08:00"},
-                "recurrence": {"type": "string", "enum": ["none", "daily", "weekly"], "description": "Repeat cadence. Default none."},
+                "recurrence": {"type": "string", "enum": ["none", "daily", "weekly", "monthly"], "description": "Repeat cadence. Default none. Use monthly for things like medication, subscriptions, bills."},
                 "for_all_users": {"type": "boolean", "description": "If true, send to both Ansen and Jess. Default false (only the current user)."},
             },
             "required": ["message", "scheduled_at"],
