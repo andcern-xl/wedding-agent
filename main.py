@@ -28,6 +28,20 @@ ANSEN_ID = 63756531
 
 load_dotenv()
 
+
+async def _transcribe_voice(file_bytes: bytes) -> str:
+    """Transcribe a Telegram voice message (ogg/opus) using OpenAI Whisper."""
+    import openai
+    client = openai.AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    audio_file = io.BytesIO(file_bytes)
+    audio_file.name = "voice.ogg"
+    result = await client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file,
+        language="en",
+    )
+    return result.text.strip()
+
 try:
     REMINDER_TIMEZONE = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
 except Exception:
@@ -326,6 +340,22 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             result = await agent.handle_image(image_bytes=bytes(photo_bytes), caption=caption, user_id=user_id, history=history)
             if result.get("notify_partner"):
                 await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption, analysis=result.get("text"))
+
+        elif update.message.voice:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            voice_file = await update.message.voice.get_file()
+            voice_bytes = await voice_file.download_as_bytearray()
+            try:
+                transcript = await _transcribe_voice(bytes(voice_bytes))
+            except Exception as e:
+                await update.message.reply_text(f"Couldn't transcribe that — {e}")
+                return
+            # Echo transcript so user can see what was heard
+            await update.message.reply_text(f"🎙 <i>{escape(transcript)}</i>", parse_mode="HTML")
+            # Process transcript exactly like a text message
+            result = await agent.handle_message(text=transcript, user_id=user_id, history=history)
+            if result.get("notify_partner"):
+                await notify_partner(context, update, text=transcript, analysis=result.get("text"), is_fyi=result.get("fyi", False))
 
         else:
             text = update.message.text or ""
@@ -1744,7 +1774,7 @@ def main():
         app.add_handler(CommandHandler(key, cmd_category_status))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
 
     if app.job_queue is not None:
         # ── PRE-MORNING 8:50am ───────────────────────────────────────
