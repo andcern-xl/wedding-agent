@@ -3418,12 +3418,14 @@ Extract facts worth adding to the permanent shared brain. Focus on:
 - Facts about their life together that future conversations should know
 - Patterns in what they're working on or worried about
 
-Output ONLY a JSON array of fact strings to add. Each fact: one clear sentence, max 120 chars. Output nothing if nothing new is worth adding.
+Output ONLY a JSON object grouped by category. Categories: "baby", "wedding", "travel", "money", "life". Each fact: one clear sentence, max 120 chars. Only include categories that have new facts. If nothing new, output {}.
 
 Example output:
-["Jess is taking Ritual prenatal vitamins (Folate), arriving Jun 16.", "They've booked La Varche as a regular dinner spot — fits 4 pax, June 27 confirmed.", "StashAway account designated as baby fund, current value SGD 16,627."]
-
-If nothing new: output []"""
+{
+  "baby": ["Dr Joycelyn Wong appointment confirmed 3 Jul 2026, 2:45pm at Thomson Fertility Orchard."],
+  "travel": ["TML Belgium trip 22 Jul–2 Aug; Jess will be ~10 weeks pregnant during festival."],
+  "money": ["StashAway General Investing designated as baby fund, SGD 16,627 as of Jun 2026."]
+}"""
 
         resp = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -3432,27 +3434,28 @@ If nothing new: output []"""
         )
         raw = resp.content[0].text.strip()
 
-        # Parse the JSON array
+        # Parse the JSON object grouped by category
         import re as _re
-        match = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+        match = _re.search(r'\{.*?\}', raw, _re.DOTALL)
         if not match:
-            return []
+            return {}
         try:
-            facts = json.loads(match.group())
+            grouped = json.loads(match.group())
         except Exception:
-            return []
+            return {}
 
-        if not facts:
-            return []
+        if not grouped:
+            return {}
 
         # Append each fact to the shared brain
-        for fact in facts:
-            try:
-                append_shared_summary(fact)
-            except Exception:
-                pass
+        for facts in grouped.values():
+            for fact in facts:
+                try:
+                    append_shared_summary(fact)
+                except Exception:
+                    pass
 
-        return facts
+        return grouped
 
     async def brain_synthesis(self) -> str:
         """Synthesise shared brain + all budget buckets + recent FYIs into a unified knowledge base."""

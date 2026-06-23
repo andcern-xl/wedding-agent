@@ -1620,13 +1620,26 @@ async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
     try:
-        facts = await agent.knowledge_sweep()
-        if not facts:
+        grouped = await agent.knowledge_sweep()
+        if not grouped:
             return
-        lines = ["🧠 <b>Knowledge update</b>\n", "<i>I've added these to our shared brain from this week's conversations:</i>\n"]
-        for f in facts:
-            lines.append(f"• {f}")
-        text = "\n".join(lines)
+        _CAT_HEADERS = {
+            "baby":    "🍼 <b>Baby</b>",
+            "wedding": "💍 <b>Wedding</b>",
+            "travel":  "✈️ <b>Travel</b>",
+            "money":   "💰 <b>Money</b>",
+            "life":    "🌿 <b>Life</b>",
+        }
+        lines = ["🧠 <b>Weekly brain update</b>\n"]
+        for cat, facts in grouped.items():
+            if not facts:
+                continue
+            header = _CAT_HEADERS.get(cat, f"📌 <b>{cat.title()}</b>")
+            lines.append(header)
+            for f in facts:
+                lines.append(f"• {f}")
+            lines.append("")
+        text = "\n".join(lines).rstrip()
         for uid in ALLOWED_IDS:
             await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
     except Exception:
