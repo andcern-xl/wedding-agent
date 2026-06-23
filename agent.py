@@ -1239,6 +1239,11 @@ log_fyi when:
 - "Ask X about Y" with no specific deadline or urgency → log_fyi, NOT a task
 - Anything that's just good to know, even if it has a soft "might want to" action attached
 
+RESOLVE STALE FYIs — when something gets confirmed or completed, archive the old pending FYI:
+- Appointment confirmed → call read_fyis, find any "awaiting response / awaiting clinic / sent enquiry" FYIs for that same doctor/venue → archive them immediately
+- Booking confirmed → archive any "looking into / pending / waiting to hear back" FYIs for that vendor
+- Always clean up behind yourself: new confirmed info makes old pending info junk
+
 add_daily_task when:
 - Concrete future action with real intent to do it: "remind me to call", "we need to book", "don't forget to pay"
 - Request directed at the other person: "can you follow up with the venue?", "Jess can you call the florist?"
