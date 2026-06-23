@@ -9,8 +9,9 @@ def add_trip(
     end_date: str | None = None,
     status: str = "planning",
     notes: str | None = None,
+    visibility: str = "shared",
 ) -> dict:
-    row: dict = {"destination": destination, "status": status}
+    row: dict = {"destination": destination, "status": status, "visibility": visibility}
     if country:
         row["country"] = country
     if start_date:
@@ -49,7 +50,7 @@ def find_trips_by_destination(destination: str) -> list[dict]:
 
 
 def update_trip(trip_id: str, **kwargs) -> bool:
-    allowed = {"destination", "country", "start_date", "end_date", "status", "visa_ansen", "visa_jess", "notes"}
+    allowed = {"destination", "country", "start_date", "end_date", "status", "visa_ansen", "visa_jess", "notes", "visibility"}
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
         return False

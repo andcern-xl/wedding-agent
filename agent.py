@@ -1625,6 +1625,7 @@ TOOLS = [
                 "end_date": {"type": "string", "description": "Return date in YYYY-MM-DD format"},
                 "status": {"type": "string", "enum": ["planning", "booked", "completed", "cancelled"], "description": "Trip status. Default: planning"},
                 "notes": {"type": "string", "description": "Any initial notes — flight refs, hotel, purpose of trip"},
+                "visibility": {"type": "string", "enum": ["shared", "ansen", "jess"], "description": "Who this trip belongs to. Default shared. Use 'ansen' or 'jess' if only one person is going."},
             },
             "required": ["destination"],
         },
@@ -1998,6 +1999,7 @@ class UnifiedAgent:
                 end_date=inputs.get("end_date"),
                 status=inputs.get("status", "planning"),
                 notes=inputs.get("notes"),
+                visibility=inputs.get("visibility", "shared"),
             )
             return {"status": "saved", "id": str(trip["id"]), "destination": inputs["destination"]}
 

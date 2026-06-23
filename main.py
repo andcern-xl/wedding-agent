@@ -1035,24 +1035,32 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
                 return
             STATUS_ICON = {"planning": "🗓", "booked": "✅", "completed": "🏁", "cancelled": "❌"}
-            count = len(trips)
-            lines = [f"✈️ <b>Upcoming Trips</b>  ·  {count}\n"]
+            SECTIONS = [
+                ("shared", "👫 <b>Together</b>"),
+                ("ansen",  "👤 <b>Ansen</b>"),
+                ("jess",   "👤 <b>Jess</b>"),
+            ]
+            def _fmt_date(d):
+                try:
+                    return _dt.strptime(d, "%Y-%m-%d").strftime("%-d %b '%y")
+                except Exception:
+                    return d or "TBC"
+
+            lines = ["✈️ <b>Travel</b>\n"]
             rows = []
-            for t in trips:
-                dest = t["destination"]
-                status = t.get("status") or "planning"
-                icon = STATUS_ICON.get(status, "🗓")
-                start = t.get("start_date") or ""
-                if start:
-                    try:
-                        start = _dt.strptime(start, "%Y-%m-%d").strftime("%-d %b '%y")
-                    except Exception:
-                        pass
-                date_preview = start or "dates TBC"
-                lines.append(f"{icon} <b>{escape(dest)}</b>  ·  {date_preview}")
-                label = f"{icon} {dest[:24]}  {date_preview} →"
-                rows.append([InlineKeyboardButton(label, callback_data=f"trip_expand:{t['id']}")])
-            text = "\n".join(lines)
+            for vis, header in SECTIONS:
+                section_trips = [t for t in trips if (t.get("visibility") or "shared") == vis]
+                if not section_trips:
+                    continue
+                lines.append(header)
+                for t in section_trips:
+                    dest = t["destination"]
+                    icon = STATUS_ICON.get(t.get("status") or "planning", "🗓")
+                    date_str = _fmt_date(t.get("start_date") or "")
+                    lines.append(f"{icon} <b>{escape(dest)}</b>  ·  {date_str}")
+                    rows.append([InlineKeyboardButton(f"{icon} {dest[:24]}  {date_str} →", callback_data=f"trip_expand:{t['id']}")])
+                lines.append("")
+            text = "\n".join(lines).rstrip()
             keyboard = InlineKeyboardMarkup(rows)
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
