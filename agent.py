@@ -3418,14 +3418,14 @@ Extract facts worth adding to the permanent shared brain. Focus on:
 - Facts about their life together that future conversations should know
 - Patterns in what they're working on or worried about
 
-Output ONLY a JSON object grouped by category. Categories: "baby", "wedding", "travel", "money", "life". Each fact: one clear sentence, max 120 chars. Only include categories that have new facts. If nothing new, output {}.
+Output ONLY a JSON object grouped by category. Categories: "baby", "wedding", "travel", "money", "life". Each fact: one clear sentence, max 120 chars. Only include categories that have new facts. If nothing new, output {{}}.
 
 Example output:
-{
+{{
   "baby": ["Dr Joycelyn Wong appointment confirmed 3 Jul 2026, 2:45pm at Thomson Fertility Orchard."],
   "travel": ["TML Belgium trip 22 Jul–2 Aug; Jess will be ~10 weeks pregnant during festival."],
   "money": ["StashAway General Investing designated as baby fund, SGD 16,627 as of Jun 2026."]
-}"""
+}}"""
 
         resp = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
