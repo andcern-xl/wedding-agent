@@ -3618,12 +3618,15 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         except Exception:
             pass
 
-        # Unread FYIs
+        # Unread FYIs — only recent ones (last 7 days), skip pending/awaiting items superseded by confirmed info
         try:
-            fyis = _get_fyis_unacked(user_id, limit=10)
+            from datetime import timedelta as _td
+            cutoff = (_date.today() - _td(days=7)).isoformat()
+            fyis = [f for f in _get_fyis_unacked(user_id, limit=20)
+                    if (f.get("created_at") or "")[:10] >= cutoff]
             if fyis:
-                fyi_lines = "\n".join(f"  [{f.get('category','misc')}] {f['content']}" for f in fyis)
-                parts.append("UNREAD FYIs:\n" + fyi_lines)
+                fyi_lines = "\n".join(f"  [{f.get('category','misc')}] {f['content']}" for f in fyis[:8])
+                parts.append("UNREAD FYIs (last 7 days only):\n" + fyi_lines)
         except Exception:
             pass
 
@@ -3678,6 +3681,10 @@ WHAT TO DO:
 - Look for connections: a FYI that relates to a task, a trip that links to a visa question. Weave them within the relevant section.
 - Skip sections entirely if nothing meaningful to say — don't pad.
 - Last line (outside sections): → /tasks /fyis for the full picture
+
+STALENESS — before surfacing any FYI, cross-check it:
+- If a FYI says "awaiting / enquiry sent / pending / looking into" AND the shared brain or calendar confirms that thing is now booked/confirmed → skip the stale FYI, use the confirmed version only
+- Never surface both the pending and confirmed version of the same thing
 
 FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <b>bold</b> key names/terms inline. No bullet points. No **asterisks**. This appears as a Telegram message on a phone — keep it readable at a glance."""
 
