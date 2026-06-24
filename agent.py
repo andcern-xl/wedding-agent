@@ -3921,7 +3921,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
         return await self._daily.evening_brief(user_ids, user_names)
 
     async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
-        """Private tasks + tasks assigned to me. Excludes wedding and baby categories."""
+        """Private tasks grouped by daily category, urgency-sorted within each."""
         from datetime import date as _date, datetime as _dt
         today_str = _date.today().isoformat()
         try:
@@ -3955,50 +3955,69 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
         if not mine:
             return f"<b>👤 My Tasks{name_str}</b>\n\nNothing personal on your list.", []
 
-        overdue, today, upcoming, someday = [], [], [], []
-        for t in mine:
-            due = t.get("due_date")
-            if not due:
-                someday.append(t)
-            elif due < today_str:
-                overdue.append(t)
-            elif due == today_str:
-                today.append(t)
-            else:
-                upcoming.append(t)
+        # Category metadata — emoji + display name
+        try:
+            all_cats = get_all_categories()
+        except Exception:
+            all_cats = {}
 
-        def _fmt(t, show_date=False) -> str:
+        _CAT_META = {slug: (v.get("emoji", "📌"), v.get("name", slug.title())) for slug, v in all_cats.items()}
+        _CAT_META.setdefault("personal", ("🙋", "Personal"))
+
+        def _urgency_key(t: dict) -> tuple:
+            due = t.get("due_date") or ""
+            if not due:
+                return (2, "")
+            if due < today_str:
+                return (0, due)  # overdue first
+            return (1, due)  # future, sorted by date
+
+        def _fmt(t: dict) -> str:
             raw = (t.get("task") or "").strip()
             if raw.upper().startswith("TASK:"):
                 raw = raw[5:].strip()
-            if show_date and t.get("due_date"):
+            due = t.get("due_date") or ""
+            if not due:
+                return f"• {raw}"
+            if due < today_str:
                 try:
-                    d = _dt.strptime(t["due_date"], "%Y-%m-%d")
-                    raw += f" <i>({d.strftime('%-d %b')})</i>"
+                    d = _dt.strptime(due, "%Y-%m-%d")
+                    return f"• 🔴 {raw} <i>({d.strftime('%-d %b')})</i>"
                 except Exception:
-                    pass
-            return raw
+                    return f"• 🔴 {raw}"
+            if due == today_str:
+                return f"• {raw} <i>(today)</i>"
+            try:
+                d = _dt.strptime(due, "%Y-%m-%d")
+                return f"• {raw} <i>({d.strftime('%-d %b')})</i>"
+            except Exception:
+                return f"• {raw}"
+
+        # Group by category
+        by_cat: dict[str, list] = {}
+        for t in mine:
+            cat = (t.get("category") or "personal").lower()
+            by_cat.setdefault(cat, []).append(t)
+
+        # Sort within each category by urgency
+        for cat in by_cat:
+            by_cat[cat].sort(key=_urgency_key)
+
+        # Preferred category order; uncategorised buckets go last
+        _ORDER = ["work", "finance", "health", "social", "travel", "home", "personal"]
+        ordered_cats = [c for c in _ORDER if c in by_cat]
+        ordered_cats += [c for c in sorted(by_cat) if c not in _ORDER and c in by_cat]
 
         blocks = [f"<b>👤 My Tasks{name_str}</b>"]
-        ordered = []
+        ordered: list = []
 
-        if overdue:
-            items = sorted(overdue, key=lambda x: x.get("due_date") or "")
-            blocks.append("🔴 <b>Overdue</b>\n\n" + "\n\n".join(f"• {_fmt(t, show_date=True)}" for t in items))
-            ordered += items
-
-        if today:
-            blocks.append("📅 <b>Today</b>\n\n" + "\n\n".join(f"• {_fmt(t)}" for t in today))
-            ordered += today
-
-        if upcoming:
-            items = sorted(upcoming, key=lambda x: x.get("due_date") or "")
-            blocks.append("📆 <b>Coming up</b>\n\n" + "\n\n".join(f"• {_fmt(t, show_date=True)}" for t in items))
-            ordered += items
-
-        if someday:
-            blocks.append("🗒 <b>No date</b>\n\n" + "\n\n".join(f"• {_fmt(t)}" for t in someday))
-            ordered += someday
+        for cat in ordered_cats:
+            tasks = by_cat[cat]
+            emoji, cat_name = _CAT_META.get(cat, ("📌", cat.title()))
+            header = f"{emoji} <b>{cat_name}</b>"
+            lines = "\n\n".join(_fmt(t) for t in tasks)
+            blocks.append(f"{header}\n\n{lines}")
+            ordered += tasks
 
         return "\n\n".join(blocks), ordered
 
