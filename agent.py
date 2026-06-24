@@ -3459,9 +3459,49 @@ Format as Telegram HTML:
                 max_tokens=1200,
                 messages=[{"role": "user", "content": synth_prompt}],
             )
-            return _fix_md(s_resp.content[0].text)
+            text = _fix_md(s_resp.content[0].text)
         except Exception:
-            return "⚠️ Synthesis step failed."
+            text = "⚠️ Synthesis step failed."
+
+        # Return structured data so callers can attach build buttons
+        return {"text": text, "gaps": [g for g in researched]}
+
+    async def developer_build(self, request: str) -> str:
+        """Generate implementation code for a new feature/integration.
+
+        Returns Telegram-formatted message with code blocks, file edit instructions,
+        and any env vars or DB changes needed.
+        """
+        bot_context = """You are a senior developer assistant for a Python Telegram bot called wedding-agent.
+
+STACK:
+- Python 3.11, python-telegram-bot 21.10 (async), Supabase PostgREST, Claude API (anthropic SDK)
+- Deployed on Railway (auto-deploy on git push to main)
+- Key files: main.py (handlers + jobs), agent.py (LLM methods), tools/*.py (data access)
+- Formatting: Telegram HTML only (<b>, <i>, •, code), parse_mode=HTML
+
+PATTERNS:
+- New data tool → new file in tools/, import in agent.py
+- New agent capability → new async method on UnifiedAgent class in agent.py
+- New command → async cmd_X() in main.py, registered via app.add_handler(CommandHandler("x", cmd_x))
+- New scheduled job → async send_X() in main.py, registered via app.job_queue.run_daily/run_monthly
+- Supabase: get_client().table("x").select("*").execute().data — DDL via SQL Editor only
+
+When asked to build something:
+1. Identify the approach (new tool file / agent method / command / job)
+2. Show complete, runnable code — no placeholders, no pseudocode
+3. List exact file edits needed (file path, what to add and where)
+4. List any new env vars required
+5. Any Supabase SQL to run in the SQL Editor
+6. Estimated complexity: S / M / L"""
+
+        response = await self.client.messages.create(
+            model=SYNTHESIS_MODEL,
+            max_tokens=2500,
+            system=bot_context,
+            messages=[{"role": "user", "content": request}],
+        )
+        return response.content[0].text
 
     async def knowledge_sweep(self) -> dict:
         """Three-phase maker-checker knowledge sweep.

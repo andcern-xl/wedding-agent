@@ -1253,6 +1253,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
 
+    elif data.startswith("skill_build:"):
+        await query.answer()
+        idx_str = data[12:]
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return
+        gaps = _skills_gaps.get(ANSEN_ID, [])
+        if idx >= len(gaps):
+            await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ Skill cache expired — run /skills again.")
+            return
+        gap = gaps[idx]
+        request = f"Build this integration for the wedding-agent bot: {gap.get('gap', '')}\n\nExample use case: {gap.get('example', '')}"
+        msg = await context.bot.send_message(chat_id=query.message.chat_id, text="🔨 Generating implementation code...")
+        try:
+            code = await agent.developer_build(request)
+            sections = _split_sections(code)
+            await msg.edit_text(sections[0], parse_mode="HTML")
+            for section in sections[1:]:
+                try:
+                    await context.bot.send_message(chat_id=query.message.chat_id, text=section, parse_mode="HTML")
+                except Exception:
+                    import re as _re
+                    await context.bot.send_message(chat_id=query.message.chat_id, text=_re.sub(r"<[^>]+>", "", section))
+        except Exception as e:
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
     elif data.startswith("trip_del:"):
         await query.answer()
         trip_id = data[9:]
@@ -1623,6 +1650,10 @@ async def _handle_fyi_callback(query, context, data: str):
             )
 
 
+# In-memory cache: Ansen's latest skill gaps for build buttons (keyed by user_id)
+_skills_gaps: dict[int, list[dict]] = {}
+
+
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ansen-only: self-audit bot capabilities and propose new integrations."""
     if not allowed(update):
@@ -1633,12 +1664,53 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Auditing my capabilities and researching what I'm missing...")
     try:
         result = await agent.capability_gap_sweep()
-        sections = _split_sections(result)
+        text = result.get("text", "⚠️ No output.")
+        gaps = result.get("gaps", [])
+
+        # Cache gaps so build callbacks can retrieve them
+        _skills_gaps[ANSEN_ID] = gaps
+
+        # Build one button per gap
+        rows = []
+        for i, g in enumerate(gaps[:5]):
+            label = (g.get("gap") or "")[:38]
+            rows.append([InlineKeyboardButton(f"🔨 Build: {label}", callback_data=f"skill_build:{i}")])
+        keyboard = InlineKeyboardMarkup(rows) if rows else None
+
+        sections = _split_sections(text)
         await _safe_send(msg, sections[0])
         for section in sections[1:]:
             await update.message.reply_text(section, parse_mode="HTML")
+        if keyboard:
+            await update.message.reply_text("Tap one to generate the implementation code:", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_skills failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ansen-only: describe a feature and get full implementation code back in chat."""
+    if not allowed(update):
+        return
+    if update.effective_user.id != ANSEN_ID:
+        return
+    request = " ".join(context.args) if context.args else ""
+    if not request.strip():
+        await update.message.reply_text("Usage: /build <what to build>\nExample: /build weather tool for trip pre-briefs")
+        return
+    msg = await update.message.reply_text("🔨 Generating implementation code...")
+    try:
+        code = await agent.developer_build(request)
+        sections = _split_sections(code)
+        await _safe_send(msg, sections[0])
+        for section in sections[1:]:
+            try:
+                await update.message.reply_text(section, parse_mode="HTML")
+            except Exception:
+                import re as _re
+                await update.message.reply_text(_re.sub(r"<[^>]+>", "", section))
+    except Exception as e:
+        logger.exception("cmd_build failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
@@ -1646,10 +1718,26 @@ async def send_capability_gap_sweep(context: ContextTypes.DEFAULT_TYPE):
     """Monthly: bot self-audits and proposes new integrations to Ansen."""
     try:
         result = await agent.capability_gap_sweep()
-        sections = _split_sections(result)
+        text = result.get("text", "")
+        gaps = result.get("gaps", [])
+        _skills_gaps[ANSEN_ID] = gaps
+
+        rows = []
+        for i, g in enumerate(gaps[:5]):
+            label = (g.get("gap") or "")[:38]
+            rows.append([InlineKeyboardButton(f"🔨 Build: {label}", callback_data=f"skill_build:{i}")])
+        keyboard = InlineKeyboardMarkup(rows) if rows else None
+
+        sections = _split_sections(text)
         await context.bot.send_message(chat_id=ANSEN_ID, text=sections[0], parse_mode="HTML")
         for section in sections[1:]:
             await context.bot.send_message(chat_id=ANSEN_ID, text=section, parse_mode="HTML")
+        if keyboard:
+            await context.bot.send_message(
+                chat_id=ANSEN_ID,
+                text="Tap one to generate the implementation code:",
+                reply_markup=keyboard,
+            )
     except Exception:
         logger.exception("send_capability_gap_sweep failed")
 
@@ -1825,6 +1913,7 @@ def main():
     app.add_handler(CommandHandler("shows", cmd_shows))
     app.add_handler(CommandHandler("groceries", cmd_groceries))
     app.add_handler(CommandHandler("skills", cmd_skills))
+    app.add_handler(CommandHandler("build", cmd_build))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
