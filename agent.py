@@ -3357,20 +3357,26 @@ RULES:
         except Exception:
             return None
 
-    async def knowledge_sweep(self) -> list[str]:
-        """Weekly agentic sweep across all knowledge silos. Extracts new cross-domain facts
-        and appends them to the shared brain. Returns list of facts added."""
+    async def knowledge_sweep(self) -> dict:
+        """Three-phase maker-checker knowledge sweep.
+
+        Phase 1 — Extract: four parallel domain specialists propose candidate facts.
+        Phase 2 — Verify: one checker gates each fact against the existing brain.
+        Phase 3 — Write: only approved facts are written; report includes rejection stats.
+
+        Returns {approved: {category: [facts]}, rejected_count: int}
+        """
+        import re as _re
         from tools.fyis import get_fyis as _get_fyis
         from tools.baby_knowledge import get_entries as _get_baby
         from tools.log import get_recent_drops
         from tools.daily import get_tasks
 
-        # Gather all recent knowledge
+        # ── Gather raw data ──────────────────────────────────────────
         fyis = _get_fyis(limit=40)
         baby_entries = _get_baby(limit=30)
         wedding_drops = get_recent_drops(limit=20)
 
-        # Completed tasks from both users (signals what's been actioned)
         all_user_ids = list(self._USER_NAMES.keys())
         completed_tasks = []
         for uid in all_user_ids:
@@ -3382,82 +3388,143 @@ RULES:
 
         existing_brain = get_shared_summary() or ""
 
-        def _fmt_list(items, key_fn):
-            return "\n".join(key_fn(i) for i in items) if items else "None."
+        def _fmt(items, key_fn):
+            return "\n".join(key_fn(i) for i in items) if items else "None this period."
 
-        fyi_text = _fmt_list(fyis, lambda f: f"[{f.get('category','misc')}] {f['content']}")
-        baby_text = _fmt_list(baby_entries, lambda e: f"[{', '.join(e.get('tags') or [])}] {e['summary']}")
-        wedding_text = _fmt_list(wedding_drops, lambda d: f"[{d.get('category','wedding')}] {d['content'][:200]}")
-        tasks_text = _fmt_list(completed_tasks, lambda t: f"✓ {t.get('task','')[:100]}")
+        fyi_text     = _fmt(fyis, lambda f: f"[{f.get('category','misc')}] {f['content']}")
+        baby_text    = _fmt(baby_entries, lambda e: f"[{', '.join(e.get('tags') or [])}] {e['summary']}")
+        wedding_text = _fmt(wedding_drops, lambda d: f"[{d.get('category','wedding')}] {d['content'][:200]}")
+        tasks_text   = _fmt(completed_tasks, lambda t: f"✓ {t.get('task','')[:100]}")
 
-        prompt = f"""You are the knowledge curator for Ansen and Jess, a couple planning their wedding (due date Feb 2027, expecting their first baby).
-
-You have access to everything they've shared with their personal assistant bot this week across all domains. Your job: identify meaningful facts about them as a couple that should be permanently remembered.
-
-EXISTING SHARED BRAIN (already saved — do NOT re-add these):
+        context_block = f"""EXISTING SHARED BRAIN (do NOT re-propose anything already here):
 {existing_brain or "(empty)"}
 
---- NEW INFORMATION THIS PERIOD ---
-
-FYIS (casual notes and updates):
+FYIs this period:
 {fyi_text}
 
-BABY KNOWLEDGE (pregnancy and parenting knowledge they've saved):
+Baby knowledge this period:
 {baby_text}
 
-WEDDING DROPS (wedding planning notes and decisions):
+Wedding drops this period:
 {wedding_text}
 
-RECENTLY COMPLETED TASKS:
-{tasks_text}
+Completed tasks this period:
+{tasks_text}"""
 
----
+        DOMAINS = [
+            ("baby",    "pregnancy, health, OBGYN appointments, baby gear, parenting decisions"),
+            ("wedding", "venue, vendors, guest list, ceremony, logistics, confirmed bookings"),
+            ("travel",  "trips, flights, hotels, visas, destinations, travel dates"),
+            ("money",   "payments, investments, budgets, accounts, bills, financial decisions"),
+            ("life",    "preferences, habits, cross-domain insights, anything that doesn't fit above"),
+        ]
 
-Extract facts worth adding to the permanent shared brain. Focus on:
-- New decisions made or confirmed
-- Preferences revealed about either person
-- Cross-domain insights (e.g. timing clashes between wedding and baby)
-- Facts about their life together that future conversations should know
-- Patterns in what they're working on or worried about
+        EXTRACTOR_TMPL = """You are a specialist fact extractor for Ansen and Jess's shared brain. Your domain: {domain} ({scope}).
 
-Output ONLY a JSON object grouped by category. Categories: "baby", "wedding", "travel", "money", "life". Each fact: one clear sentence, max 120 chars. Only include categories that have new facts. If nothing new, output {{}}.
+Your job: read the raw data below and propose facts worth permanently remembering — things that are NEW (not in the existing brain), CONFIRMED (not speculative), and MEANINGFUL (future conversations should know this).
 
-Example output:
-{{
-  "baby": ["Dr Joycelyn Wong appointment confirmed 3 Jul 2026, 2:45pm at Thomson Fertility Orchard."],
-  "travel": ["TML Belgium trip 22 Jul–2 Aug; Jess will be ~10 weeks pregnant during festival."],
-  "money": ["StashAway General Investing designated as baby fund, SGD 16,627 as of Jun 2026."]
-}}"""
+One sentence per fact, max 120 chars. Output a JSON array of strings. If nothing new in your domain: output [].
 
-        resp = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
-            max_tokens=800,
-            messages=[{"role": "user", "content": prompt}],
+{context}
+
+Output only the JSON array."""
+
+        # ── Phase 1: Parallel domain extractors ─────────────────────
+        async def _extract(domain: str, scope: str) -> tuple[str, list[str]]:
+            prompt = EXTRACTOR_TMPL.format(domain=domain, scope=scope, context=context_block)
+            try:
+                resp = await self.client.messages.create(
+                    model=SYNTHESIS_MODEL,
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = resp.content[0].text.strip()
+                match = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+                if not match:
+                    return domain, []
+                return domain, json.loads(match.group())
+            except Exception:
+                return domain, []
+
+        extract_results = await asyncio.gather(*[_extract(d, s) for d, s in DOMAINS])
+
+        candidates: dict[str, list[str]] = {}
+        all_candidates: list[tuple[str, str]] = []  # (domain, fact)
+        for domain, facts in extract_results:
+            valid = [f for f in facts if isinstance(f, str) and f.strip()]
+            if valid:
+                candidates[domain] = valid
+                for f in valid:
+                    all_candidates.append((domain, f))
+
+        if not all_candidates:
+            return {"approved": {}, "rejected_count": 0}
+
+        # ── Phase 2: Verifier (the gate) ─────────────────────────────
+        candidate_lines = "\n".join(
+            f"[{i}] ({dom}) {fact}" for i, (dom, fact) in enumerate(all_candidates)
         )
-        raw = resp.content[0].text.strip()
 
-        # Parse the JSON object grouped by category
-        import re as _re
-        match = _re.search(r'\{.*?\}', raw, _re.DOTALL)
-        if not match:
-            return {}
+        verifier_prompt = f"""You are a strict fact verifier for Ansen and Jess's shared brain. Your job: gate each proposed fact before it enters permanent memory.
+
+For each fact, output one of:
+- NEW       — genuinely new, accurate, worth keeping
+- DUPLICATE — already in the brain (same or equivalent information)
+- STALE     — contradicted by newer confirmed info in the brain (e.g. 'awaiting response' when brain shows confirmed booking)
+- WEAK      — too vague, too obvious, or not worth permanent storage
+
+EXISTING SHARED BRAIN:
+{existing_brain or "(empty)"}
+
+PROPOSED FACTS:
+{candidate_lines}
+
+Output a JSON array with one object per fact, in order:
+[
+  {{"index": 0, "verdict": "NEW"}},
+  {{"index": 1, "verdict": "DUPLICATE"}},
+  ...
+]
+
+Be strict. When in doubt, reject."""
+
+        approved_grouped: dict[str, list[str]] = {{}}
+        rejected_count = 0
+
         try:
-            grouped = json.loads(match.group())
+            v_resp = await self.client.messages.create(
+                model=SYNTHESIS_MODEL,
+                max_tokens=600,
+                messages=[{"role": "user", "content": verifier_prompt}],
+            )
+            v_raw = v_resp.content[0].text.strip()
+            match = _re.search(r'\[.*?\]', v_raw, _re.DOTALL)
+            verdicts: list[dict] = json.loads(match.group()) if match else []
+
+            for v in verdicts:
+                idx = v.get("index")
+                verdict = v.get("verdict", "WEAK")
+                if idx is None or idx >= len(all_candidates):
+                    continue
+                domain, fact = all_candidates[idx]
+                if verdict == "NEW":
+                    approved_grouped.setdefault(domain, []).append(fact)
+                else:
+                    rejected_count += 1
         except Exception:
-            return {}
+            # Verifier failed — fall back to writing all candidates
+            for domain, fact in all_candidates:
+                approved_grouped.setdefault(domain, []).append(fact)
 
-        if not grouped:
-            return {}
-
-        # Append each fact to the shared brain
-        for facts in grouped.values():
+        # ── Phase 3: Write approved facts ────────────────────────────
+        for facts in approved_grouped.values():
             for fact in facts:
                 try:
                     append_shared_summary(fact)
                 except Exception:
                     pass
 
-        return grouped
+        return {"approved": approved_grouped, "rejected_count": rejected_count}
 
     async def brain_synthesis(self) -> str:
         """Synthesise shared brain + all budget buckets + recent FYIs into a unified knowledge base."""

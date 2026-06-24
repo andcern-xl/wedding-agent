@@ -1624,12 +1624,14 @@ async def _handle_fyi_callback(query, context, data: str):
 
 
 async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
-    """Weekly sweep across all knowledge silos — extracts facts into shared brain."""
+    """Weekly 3-phase maker-checker knowledge sweep."""
     if not ALLOWED_IDS:
         return
     try:
-        grouped = await agent.knowledge_sweep()
-        if not grouped:
+        result = await agent.knowledge_sweep()
+        approved = result.get("approved", {})
+        rejected_count = result.get("rejected_count", 0)
+        if not approved:
             return
         _CAT_HEADERS = {
             "baby":    "🍼 <b>Baby</b>",
@@ -1638,8 +1640,9 @@ async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
             "money":   "💰 <b>Money</b>",
             "life":    "🌿 <b>Life</b>",
         }
-        lines = ["🧠 <b>Weekly brain update</b>\n"]
-        for cat, facts in grouped.items():
+        total = sum(len(v) for v in approved.values())
+        lines = [f"🧠 <b>Weekly brain update</b>  ·  {total} added, {rejected_count} filtered\n"]
+        for cat, facts in approved.items():
             if not facts:
                 continue
             header = _CAT_HEADERS.get(cat, f"📌 <b>{cat.title()}</b>")
