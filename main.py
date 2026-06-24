@@ -1623,6 +1623,37 @@ async def _handle_fyi_callback(query, context, data: str):
             )
 
 
+async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ansen-only: self-audit bot capabilities and propose new integrations."""
+    if not allowed(update):
+        return
+    if update.effective_user.id != ANSEN_ID:
+        await update.message.reply_text("This command is for Ansen only.")
+        return
+    msg = await update.message.reply_text("🔍 Auditing my capabilities and researching what I'm missing...")
+    try:
+        result = await agent.capability_gap_sweep()
+        sections = _split_sections(result)
+        await _safe_send(msg, sections[0])
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_skills failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+async def send_capability_gap_sweep(context: ContextTypes.DEFAULT_TYPE):
+    """Monthly: bot self-audits and proposes new integrations to Ansen."""
+    try:
+        result = await agent.capability_gap_sweep()
+        sections = _split_sections(result)
+        await context.bot.send_message(chat_id=ANSEN_ID, text=sections[0], parse_mode="HTML")
+        for section in sections[1:]:
+            await context.bot.send_message(chat_id=ANSEN_ID, text=section, parse_mode="HTML")
+    except Exception:
+        logger.exception("send_capability_gap_sweep failed")
+
+
 async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
     """Weekly 3-phase maker-checker knowledge sweep."""
     if not ALLOWED_IDS:
@@ -1793,6 +1824,7 @@ def main():
     app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
     app.add_handler(CommandHandler("shows", cmd_shows))
     app.add_handler(CommandHandler("groceries", cmd_groceries))
+    app.add_handler(CommandHandler("skills", cmd_skills))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
@@ -1830,6 +1862,8 @@ def main():
         app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
         # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
+        # Capability gap sweep — 1st of each month, Ansen only
+        app.job_queue.run_monthly(send_capability_gap_sweep, when=dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE), day=1)
         # ── ALWAYS ───────────────────────────────────────────────────
         # Scheduled notification check every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)

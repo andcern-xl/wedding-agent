@@ -3357,6 +3357,112 @@ RULES:
         except Exception:
             return None
 
+    async def capability_gap_sweep(self) -> str:
+        """Self-skill discovery: identify capability gaps and research integrations that fill them.
+
+        Phase 1 — Audit: Claude reviews its tool inventory and proposes gaps.
+        Phase 2 — Research: parallel web searches per gap.
+        Phase 3 — Synthesize: actionable proposals for Ansen.
+        """
+        current_tools = """CURRENT TOOLS:
+- Google Calendar: read/create/delete events
+- Gmail: search + read emails
+- Supabase: tasks, reminders, FYIs, trips, shared brain, budget, groceries, shows
+- Tavily web search: general queries
+- OpenAI Whisper: voice message transcription
+- Baby tracking: milestones, knowledge base, budget
+- Stocks: newsletter digest + buy/hold/skip analysis
+- Trip planning: destination, dates, visa, flights, notes, visibility
+- Notifications: one-time + recurring (daily/weekly/monthly) via Telegram
+- Grocery lists with inline done buttons"""
+
+        user_context = """WHO THEY ARE:
+- Ansen + Jess — Singapore-based couple, 20s–30s
+- Getting married (planning wedding), expecting first baby (due Feb 2027)
+- Frequent travelers: Tomorrowland Belgium (Jul 2025), Korea planned
+- Ansen: entrepreneur, runs EDM/rave event app (Front Left), active in crypto/stocks
+- Jess: WhatsApp Business account owner
+- Primary interface: Telegram — they drop voice memos, screenshots, quick notes"""
+
+        gap_prompt = f"""You are a self-aware AI assistant. Audit your own capabilities and identify where you're weakest relative to your users' needs.
+
+{current_tools}
+
+{user_context}
+
+Think about what Ansen and Jess need daily and for their big life events: wedding, baby, travel, finances.
+
+Identify the 5 most impactful capability gaps — things you genuinely cannot do today that would make you meaningfully more useful. Prioritise by frequency of need + pain of the missing capability.
+
+For each gap, return a JSON object:
+{{
+  "gap": "one sentence: what you can't do",
+  "example": "concrete situation where this would help",
+  "search_query": "specific web search query to find the best API or integration"
+}}
+
+Return ONLY a JSON array of 5 objects. No other text."""
+
+        try:
+            resp = await self.client.messages.create(
+                model=SYNTHESIS_MODEL,
+                max_tokens=800,
+                messages=[{"role": "user", "content": gap_prompt}],
+            )
+            import re as _re
+            raw = resp.content[0].text.strip()
+            match = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+            gaps: list[dict] = json.loads(match.group()) if match else []
+        except Exception:
+            return "⚠️ Capability gap audit failed — couldn't parse the response."
+
+        if not gaps:
+            return "⚠️ No capability gaps identified."
+
+        # Phase 2: parallel web search per gap
+        async def _research(gap: dict) -> dict:
+            query = gap.get("search_query", gap.get("gap", ""))
+            if not query:
+                return {**gap, "research": []}
+            try:
+                results = await asyncio.to_thread(web_search, query, 3)
+                return {**gap, "research": [r for r in results if "error" not in r]}
+            except Exception:
+                return {**gap, "research": []}
+
+        researched = await asyncio.gather(*[_research(g) for g in gaps[:5]])
+
+        # Phase 3: synthesize proposals
+        research_block = ""
+        for i, g in enumerate(researched, 1):
+            research_block += f"\nGAP {i}: {g['gap']}\nExample: {g['example']}\n"
+            for r in g.get("research", [])[:2]:
+                title = r.get("title", "")
+                content = (r.get("content") or "")[:200]
+                if title or content:
+                    research_block += f"  Found: {title} — {content}\n"
+
+        synth_prompt = f"""You audited an AI assistant's capabilities and researched solutions for each gap. Now write a crisp proposal card for Ansen (the developer / power user).
+
+{research_block}
+
+Format as Telegram HTML:
+- Header: 🔍 <b>Skill Gaps — what I could learn next</b>
+- For each gap: one emoji, <b>what's missing</b>, then a • bullet with the best integration found + why it fits
+- After all gaps: a short "🗳 Which should we build first?" line
+- Use <b>, <i>, •, blank lines between sections. Never markdown asterisks.
+- Be concrete — name actual APIs, not categories. Max 5 proposals."""
+
+        try:
+            s_resp = await self.client.messages.create(
+                model=SYNTHESIS_MODEL,
+                max_tokens=1200,
+                messages=[{"role": "user", "content": synth_prompt}],
+            )
+            return _fix_md(s_resp.content[0].text)
+        except Exception:
+            return "⚠️ Synthesis step failed."
+
     async def knowledge_sweep(self) -> dict:
         """Three-phase maker-checker knowledge sweep.
 
