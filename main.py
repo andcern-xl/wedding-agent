@@ -1253,6 +1253,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
 
+    elif data.startswith("goal_step:"):
+        await query.answer()
+        step_id = data[10:]
+        try:
+            from tools.goals import complete_step as _complete_step
+            result = _complete_step(step_id)
+            if "error" in result:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"⚠️ {result['error']}")
+                return
+            # Remove the tapped button
+            current = query.message.reply_markup
+            if current:
+                new_rows = [row for row in current.inline_keyboard if not any(btn.callback_data == data for btn in row)]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None)
+            step_title = result.get("step_completed", "step")
+            if result.get("goal_complete"):
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"🎯 <b>Goal complete!</b>\n\n✅ {escape(step_title)}\n\nAll steps done.",
+                    parse_mode="HTML",
+                )
+            else:
+                unblocked = result.get("newly_unblocked", [])
+                remaining = result.get("remaining_steps", 0)
+                msg = f"✅ Done: <i>{escape(step_title)}</i>"
+                if unblocked:
+                    msg += "\n\n🔓 <b>Now unblocked:</b>\n" + "\n".join(f"• {escape(s['title'])}" for s in unblocked)
+                msg += f"\n\n<i>{remaining} step{'s' if remaining != 1 else ''} remaining</i>"
+                await context.bot.send_message(chat_id=query.message.chat_id, text=msg, parse_mode="HTML")
+        except Exception as e:
+            logger.exception("goal_step callback failed")
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
     elif data.startswith("skill_build:"):
         await query.answer()
         idx_str = data[12:]
@@ -1654,6 +1687,20 @@ async def _handle_fyi_callback(query, context, data: str):
 _skills_gaps: dict[int, list[dict]] = {}
 
 
+async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    msg = await update.message.reply_text("Loading goals...")
+    try:
+        text, button_steps = await agent.goals_brief()
+        rows = [[InlineKeyboardButton(f"✅ {s['label']}", callback_data=f"goal_step:{s['id']}")] for s in button_steps]
+        keyboard = InlineKeyboardMarkup(rows) if rows else None
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.exception("cmd_goals failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ansen-only: self-audit bot capabilities and propose new integrations."""
     if not allowed(update):
@@ -1912,6 +1959,7 @@ def main():
     app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
     app.add_handler(CommandHandler("shows", cmd_shows))
     app.add_handler(CommandHandler("groceries", cmd_groceries))
+    app.add_handler(CommandHandler("goals", cmd_goals))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("build", cmd_build))
 

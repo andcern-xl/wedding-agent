@@ -1750,6 +1750,67 @@ TOOLS = [
             "required": ["list_name"],
         },
     },
+    {
+        "name": "create_goal",
+        "description": "Create a multi-step goal with sequential steps and dependencies. Use when someone describes a complex task that has distinct stages (e.g. 'book the venue', 'apply for Korea visa', 'plan the babymoon'). Prefer this over a pile of individual tasks when steps must happen in order.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "What you're trying to achieve"},
+                "visibility": {"type": "string", "enum": ["private", "shared"]},
+                "category": {"type": "string", "description": "Category slug: wedding, baby, travel, finance, health, work, social, personal"},
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered steps. List in execution order — step 0 first.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "due_date": {"type": "string", "description": "YYYY-MM-DD or omit"},
+                            "assigned_to": {"type": "integer", "description": "Ansen=63756531, Jess=6927468999"},
+                            "blocked_by_index": {"type": "integer", "description": "0-based index of the step in this list that must complete before this one starts. Omit if this step can start immediately."},
+                        },
+                        "required": ["title"],
+                    },
+                },
+            },
+            "required": ["title", "visibility"],
+        },
+    },
+    {
+        "name": "get_goals",
+        "description": "List goals and their next available steps. Call when user asks about their goals, what's in progress, or what to do next on a multi-step project.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["active", "paused", "done"], "description": "Default: active"},
+            },
+        },
+    },
+    {
+        "name": "complete_goal_step",
+        "description": "Mark a step in a goal as done. Call when the user says they've completed a specific step. Returns what's newly unblocked.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal_title": {"type": "string", "description": "Goal title — used to find the right goal"},
+                "step_title": {"type": "string", "description": "The step to mark done — fuzzy matched against step titles"},
+            },
+            "required": ["goal_title", "step_title"],
+        },
+    },
+    {
+        "name": "update_goal",
+        "description": "Change a goal's status — pause it, reactivate it, or mark it done.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal_title": {"type": "string"},
+                "status": {"type": "string", "enum": ["active", "paused", "done"]},
+            },
+            "required": ["goal_title", "status"],
+        },
+    },
 ]
 
 
@@ -2137,6 +2198,75 @@ class UnifiedAgent:
                 return {"error": f"No active list named '{inputs['list_name']}'"}
             close_list(lst["id"])
             return {"status": "closed", "list": lst["name"]}
+
+        if name == "create_goal":
+            from tools.goals import create_goal as _create_goal, add_step as _add_step
+            goal = _create_goal(
+                user_id=user_id,
+                title=inputs["title"],
+                visibility=inputs.get("visibility", "shared"),
+                category=inputs.get("category"),
+            )
+            goal_id = goal["id"]
+            steps_input = inputs.get("steps") or []
+            step_ids: list[str] = []
+            created_steps = []
+            for i, s in enumerate(steps_input):
+                bi = s.get("blocked_by_index")
+                blocked_by_id = step_ids[bi] if (bi is not None and 0 <= bi < len(step_ids)) else None
+                step = _add_step(
+                    goal_id=goal_id,
+                    title=s["title"],
+                    sort_order=i,
+                    blocked_by=blocked_by_id,
+                    due_date=s.get("due_date"),
+                    assigned_to=s.get("assigned_to"),
+                )
+                step_ids.append(step["id"])
+                created_steps.append({"title": s["title"], "blocked_by_index": bi})
+            return {"status": "created", "goal_id": str(goal_id), "title": inputs["title"], "steps_created": len(created_steps), "steps": created_steps}
+
+        if name == "get_goals":
+            from tools.goals import get_goals as _get_goals, get_next_steps as _get_next
+            goals = _get_goals(status=inputs.get("status", "active"))
+            result = []
+            for g in goals:
+                all_steps = g.get("goal_steps", [])
+                done_count = sum(1 for s in all_steps if s["status"] == "done")
+                next_steps = _get_next(g["id"])
+                result.append({
+                    "id": str(g["id"]),
+                    "title": g["title"],
+                    "category": g.get("category"),
+                    "visibility": g["visibility"],
+                    "progress": f"{done_count}/{len(all_steps)} steps done",
+                    "next_steps": [{"id": str(s["id"]), "title": s["title"], "due_date": s.get("due_date")} for s in next_steps],
+                })
+            return result
+
+        if name == "complete_goal_step":
+            from tools.goals import get_goals as _get_goals, complete_step as _complete_step, find_step_by_title as _find_step
+            goals = _get_goals(status="active")
+            goal_title_lower = inputs["goal_title"].lower()
+            matched = next((g for g in goals if goal_title_lower in g["title"].lower() or g["title"].lower() in goal_title_lower), None)
+            if not matched:
+                return {"error": f"No active goal matching '{inputs['goal_title']}'"}
+            step = _find_step_by_title(matched["id"], inputs["step_title"])
+            if not step:
+                return {"error": f"No step matching '{inputs['step_title']}' in goal '{matched['title']}'"}
+            result = _complete_step(step["id"])
+            flags.setdefault("completed_tasks", []).append(f"[{matched['title']}] {step['title']}")
+            return result
+
+        if name == "update_goal":
+            from tools.goals import get_goals as _get_goals, update_goal_status as _upd
+            all_goals = _get_goals("active") + _get_goals("paused") + _get_goals("done")
+            title_lower = inputs["goal_title"].lower()
+            matched = next((g for g in all_goals if title_lower in g["title"].lower()), None)
+            if not matched:
+                return {"error": f"No goal matching '{inputs['goal_title']}'"}
+            _upd(matched["id"], inputs["status"])
+            return {"status": "updated", "goal": matched["title"], "new_status": inputs["status"]}
 
         return {"error": f"Unknown tool: {name}"}
 
@@ -3370,6 +3500,54 @@ RULES:
         except Exception:
             return None
 
+    async def goals_brief(self) -> tuple[str, list[dict]]:
+        """All active goals with next unblocked steps. Returns (text, steps_for_buttons)."""
+        from tools.goals import get_goals, get_next_steps
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+
+        goals = get_goals(status="active")
+        if not goals:
+            return (
+                "🎯 <b>Goals</b>\n\nNo active goals.\n\nTell me about a multi-step project — like \"break down booking the venue into steps\" — and I'll track it for you.",
+                [],
+            )
+
+        lines = ["🎯 <b>Goals</b>\n"]
+        button_steps: list[dict] = []
+
+        for g in goals:
+            all_steps = g.get("goal_steps", [])
+            total = len(all_steps)
+            done = sum(1 for s in all_steps if s["status"] == "done")
+            next_steps = get_next_steps(g["id"])
+            vis = "👥" if g["visibility"] == "shared" else "🔒"
+            progress_bar = "▓" * done + "░" * (total - done)
+
+            lines.append(f"{vis} <b>{g['title']}</b>")
+            lines.append(f"  {progress_bar}  {done}/{total} done")
+
+            if not next_steps:
+                lines.append("  ✅ All steps complete — mark goal done")
+            else:
+                for s in next_steps[:3]:
+                    due = s.get("due_date") or ""
+                    try:
+                        from datetime import date as _d
+                        d = _d.fromisoformat(due)
+                        if due < today_str:
+                            due_str = f" 🔴 <i>({d.strftime('%-d %b')})</i>"
+                        else:
+                            due_str = f" <i>({d.strftime('%-d %b')})</i>"
+                    except Exception:
+                        due_str = ""
+                    lines.append(f"  → {s['title']}{due_str}")
+                    button_steps.append({"id": str(s["id"]), "label": s["title"][:38], "goal": g["title"]})
+
+            lines.append("")
+
+        return "\n".join(lines).rstrip(), button_steps
+
     async def capability_gap_sweep(self) -> str:
         """Self-skill discovery: identify capability gaps and research integrations that fill them.
 
@@ -3891,6 +4069,25 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         except Exception:
             pass
 
+        # Active goals — next unblocked step per goal
+        try:
+            from tools.goals import get_goals as _get_goals, get_next_steps as _get_next
+            goals = _get_goals(status="active")
+            if goals:
+                goal_lines = []
+                for g in goals:
+                    all_steps = g.get("goal_steps", [])
+                    done = sum(1 for s in all_steps if s["status"] == "done")
+                    nxt = _get_next(g["id"])
+                    if nxt:
+                        goal_lines.append(f"  {g['title']} ({done}/{len(all_steps)}): next → {nxt[0]['title']}")
+                    else:
+                        goal_lines.append(f"  {g['title']}: all steps done, mark complete")
+                if goal_lines:
+                    parts.append("ACTIVE GOALS (next step per goal):\n" + "\n".join(goal_lines))
+        except Exception:
+            pass
+
         context = "\n\n".join(parts)
 
         prompt = f"""{context}
@@ -3904,6 +4101,7 @@ STRUCTURE: Use emoji section headers to break the brief into 3–5 scannable sec
 💍 <b>Wedding</b> — active wedding tasks or upcoming decisions (only if relevant)
 ✈️ <b>Trips</b> — upcoming travel, open gaps (only if relevant)
 🎵 <b>Shows</b> — upcoming events (Ansen only, only if relevant)
+🎯 <b>Goals</b> — next step on any active multi-step project (only if there's an active goal)
 💰 <b>Money</b> — financial items, payments, DBS/investments (only if relevant)
 ⚠️ <b>Heads up</b> — overdue items, expiring things, urgent flags (only if there's something)
 
