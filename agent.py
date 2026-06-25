@@ -1058,7 +1058,7 @@ SHARED BRAIN — confirmed couple decisions and permanent memories:
 RECENT FYIs — notes and updates from the last 30 days. Reference naturally when relevant — don't quote back verbatim:
 {recent_fyis}
 
-BABY KNOWLEDGE — what the couple has saved about pregnancy, birth, and parenting. Use when giving advice or answering questions:
+BABY — current pregnancy status and saved knowledge. The CURRENT PREGNANCY week/trimester at the top is calculated live and is always correct. Never override it with recalled memories or guesses:
 {baby_context}
 
 RECALLED MEMORIES — discrete facts retrieved from all past conversations, relevant to this message:
@@ -2485,14 +2485,27 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
 
         async def _get_baby():
             try:
+                from tools.baby import pregnancy_summary as _ps
+                ps = _ps()
+                header = (
+                    f"CURRENT PREGNANCY: Week {ps['week']}, Day {ps['day']} of this week. "
+                    f"Trimester {ps['trimester']}. Due date: {ps['due_date']}. "
+                    f"{ps['days_until_due']} days until due. "
+                    f"LMP: {ps['lmp']}. "
+                    f"ALWAYS use this week number — never guess or recall a different one."
+                )
+            except Exception:
+                header = ""
+            try:
                 from tools.baby_knowledge import get_entries as _gb
                 _baby = _gb(limit=10)
-                return "\n".join(
+                entries = "\n".join(
                     f"[{', '.join(e.get('tags') or [])}] {e['summary']}"
                     for e in _baby
                 )
             except Exception:
-                return ""
+                entries = ""
+            return (header + "\n\n" + entries).strip() if header else entries
 
         async def _get_mem0():
             try:
