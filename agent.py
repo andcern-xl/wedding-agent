@@ -42,6 +42,13 @@ def _fix_md(text: str) -> str:
     text = re.sub(r'__(.+?)__', r'<b>\1</b>', text, flags=re.DOTALL)
     # _italic_ → <i>italic</i>
     text = re.sub(r'(?<!\w)_([^_\n]+?)_(?!\w)', r'<i>\1</i>', text)
+    # Strip pipe-table rows — Telegram renders them as raw pipe characters
+    def _strip_pipe_table(m: re.Match) -> str:
+        cells = [c.strip() for c in m.group(0).split('|') if c.strip() and not re.match(r'^[-:]+$', c.strip())]
+        return ' • '.join(cells) if cells else ''
+    text = re.sub(r'^\|.+\|[ \t]*$', _strip_pipe_table, text, flags=re.MULTILINE)
+    # Remove separator lines (|---|---|)
+    text = re.sub(r'^\|[-| :]+\|[ \t]*$', '', text, flags=re.MULTILINE)
     # Strip any HTML tags that Telegram doesn't support (e.g. <zen:*>, <div>, <p>, <br>)
     # Strategy: escape < that starts an unsupported tag into &lt;
     def _escape_bad_tag(m: re.Match) -> str:
@@ -1281,6 +1288,24 @@ Telegram uses parse_mode=HTML. **Asterisks and underscores are NOT rendered** �
 - Bullets: • (not - or *)
 - Blank line between every bullet — not just between sections. Dense walls of text are unreadable on mobile.
 - Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🥂 after-party, 🗓️ logistics, 🔥 urgent, ✅ confirmed, 🔍 in progress, ❌ untouched, 📅 calendar, 🎉 social/parties, 💪 task, 🚨 overdue
+
+NEVER USE MARKDOWN TABLES — Telegram does not render them. Pipe characters (|) and dashes show up as raw ugly text.
+WRONG (do not do this):
+  | Okinawa | Nepal | Uzbekistan |
+  |---------|-------|------------|
+  | beaches | hiking | culture  |
+
+For comparisons, ALWAYS use per-option sections instead:
+  🇯🇵 <b>Okinawa</b>
+  • 🏖 Vibe: beach resort, laid-back
+  • 💰 Cost: high
+  • ✈️ Visa: none
+
+  🇳🇵 <b>Nepal</b>
+  • 🏔 Vibe: adventure, trekking
+  • 💰 Cost: mid
+  • ✈️ Visa: on arrival
+
 - Example of correct formatting:
 
   🚨 <b>Overdue</b>
