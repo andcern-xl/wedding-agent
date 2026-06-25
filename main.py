@@ -1840,12 +1840,12 @@ async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
 async def send_trip_milestones(context: ContextTypes.DEFAULT_TYPE):
     """Daily check — fire pre-trip intelligence briefs at milestone days before departure."""
     from tools.trips import get_upcoming_trips
-    from datetime import date as _date
+    from datetime import datetime as _datetime
 
     if not ALLOWED_IDS:
         return
 
-    today = _date.today()
+    today = _datetime.now(REMINDER_TIMEZONE).date()
     try:
         trips = get_upcoming_trips()
     except Exception:
@@ -1875,12 +1875,12 @@ async def send_trip_milestones(context: ContextTypes.DEFAULT_TYPE):
 async def send_appointment_prebrief(context: ContextTypes.DEFAULT_TYPE):
     """Nightly check — synthesise pre-brief for tomorrow's medical/health appointments."""
     from tools.gcal import get_events as _get_events
-    from datetime import date as _date, timedelta as _td
+    from datetime import datetime as _datetime, timedelta as _td
 
     if not ALLOWED_IDS:
         return
 
-    tomorrow_str = (_date.today() + _td(days=1)).isoformat()
+    tomorrow_str = (_datetime.now(REMINDER_TIMEZONE).date() + _td(days=1)).isoformat()
     try:
         all_events = await asyncio.to_thread(_get_events, 2)
         tomorrow_events = [e for e in all_events if (e.get("start") or "").startswith(tomorrow_str)]

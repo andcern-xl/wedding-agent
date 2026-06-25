@@ -5,6 +5,7 @@ import os
 import re
 from html import escape as _html_escape
 from datetime import datetime, date, timezone, timedelta
+from zoneinfo import ZoneInfo
 from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
 from tools.memory import get_all_memory, get_category_memory
@@ -23,6 +24,14 @@ from tools.baby import pregnancy_summary, upcoming_milestones
 from tools.baby_knowledge import save_entry as save_baby_entry, get_entries as get_baby_entries, search_entries as search_baby_entries
 from tools.baby_budget import add_item as add_baby_budget_item, summary as baby_budget_summary
 from tools.shared_budget import add_item as add_shared_budget_item, summary as shared_budget_summary
+
+_LOCAL_TZ = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
+
+
+def _local_today() -> date:
+    """Today's date in the configured local timezone (not Railway UTC)."""
+    return datetime.now(_LOCAL_TZ).date()
+
 
 # Model constants — swap here to change globally
 CHAT_MODEL = "claude-haiku-4-5-20251001"      # conversations, briefs, tool routing
@@ -610,7 +619,7 @@ class DailyAgent:
         self.client = AsyncAnthropic()
 
     async def _parse_task(self, text: str) -> dict | None:
-        today = date.today()
+        today = _local_today()
         cats = get_all_categories()
         cat_list = ", ".join(f"{slug} ({v['emoji']} {v['name']})" for slug, v in cats.items())
         prompt = TASK_PARSE_PROMPT.format(
@@ -685,7 +694,7 @@ class DailyAgent:
             return {"text": reply, "history": updated_history}
 
         # General daily chat — show task context
-        today_str = date.today().isoformat()
+        today_str = _local_today().isoformat()
         tasks = get_tasks(user_id, include_done=False)
         task_lines = [_task_label(t, today_str) for t in tasks[:20]]
         context = "CURRENT TASKS:\n" + "\n".join(task_lines) if task_lines else "No open tasks."
@@ -704,8 +713,8 @@ class DailyAgent:
         return {"text": reply, "history": updated_history}
 
     async def daily_brief(self, user_id: int) -> str:
-        today_str = date.today().isoformat()
-        weekday = date.today().strftime("%A")
+        today_str = _local_today().isoformat()
+        weekday = _local_today().strftime("%A")
         data = get_all_tasks_for_brief(user_id)
         cats = get_all_categories()
 
@@ -776,8 +785,8 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
     async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """Generate one combined daily brief for all users, sent to both.
         Returns (text, open_tasks) where open_tasks is the full deduped task list."""
-        today_str = date.today().isoformat()
-        weekday = date.today().strftime("%A")
+        today_str = _local_today().isoformat()
+        weekday = _local_today().strftime("%A")
         cats = get_all_categories()
         names = user_names or {}
 
@@ -880,9 +889,9 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
 
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
         """End-of-day recap: what was done today, what's coming tomorrow."""
-        today_str = date.today().isoformat()
-        tomorrow_str = (date.today() + timedelta(days=1)).isoformat()
-        tomorrow_weekday = (date.today() + timedelta(days=1)).strftime("%A")
+        today_str = _local_today().isoformat()
+        tomorrow_str = (_local_today() + timedelta(days=1)).isoformat()
+        tomorrow_weekday = (_local_today() + timedelta(days=1)).strftime("%A")
         names = user_names or {}
 
         # Completed tasks today — deduplicated
@@ -1858,7 +1867,7 @@ class UnifiedAgent:
         current_user_line = f"CURRENT USER: You are talking to {current_name}. Address them as \"you\". Never refer to them in third person. The other person is {other_name}."
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
-            today=date.today().isoformat(),
+            today=_local_today().isoformat(),
             timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=shared_summary or "Nothing shared yet.",
@@ -2414,7 +2423,7 @@ class UnifiedAgent:
         """Investment brief: read newsletters → extract assets → web research → analyst brief."""
         import logging as _log
         log = _log.getLogger("stocks_brief")
-        today = date.today()
+        today = _local_today()
 
         def _source_label(from_addr: str) -> str:
             lower = from_addr.lower()
@@ -2773,7 +2782,7 @@ Rules:
         import os, json as _json
         from datetime import date as _date, datetime as _datetime
 
-        today = _date.today()
+        today = __local_today()
         today_str = today.isoformat()
         tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
         wedding_days = (_date(2026, 11, 7) - today).days
@@ -3529,7 +3538,7 @@ RULES:
         """All active goals with next unblocked steps. Returns (text, steps_for_buttons)."""
         from tools.goals import get_goals, get_next_steps
         from datetime import date as _date
-        today_str = _date.today().isoformat()
+        today_str = __local_today().isoformat()
 
         goals = get_goals(status="active")
         if not goals:
@@ -3978,7 +3987,7 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         if not events:
             return wedding_brief
 
-        today_str = _date.today().isoformat()
+        today_str = __local_today().isoformat()
         ev_lines = []
         for e in events[:14]:
             start = e["start"]
@@ -4009,8 +4018,8 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         """Unified personalized morning brief — narrative prose, not a bullet dump."""
         from tools.fyis import get_fyis_unacked as _get_fyis_unacked
         from datetime import date as _date, datetime as _dt
-        today_str = _date.today().isoformat()
-        weekday = _date.today().strftime("%A")
+        today_str = __local_today().isoformat()
+        weekday = __local_today().strftime("%A")
         _ANSEN_ID = 63756531
 
         parts = [f"TODAY: {weekday}, {today_str}", f"USER: {user_name}"]
@@ -4055,7 +4064,7 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         # Unread FYIs — only recent ones (last 7 days), skip pending/awaiting items superseded by confirmed info
         try:
             from datetime import timedelta as _td
-            cutoff = (_date.today() - _td(days=7)).isoformat()
+            cutoff = (__local_today() - _td(days=7)).isoformat()
             fyis = [f for f in _get_fyis_unacked(user_id, limit=20)
                     if (f.get("created_at") or "")[:10] >= cutoff]
             if fyis:
@@ -4159,7 +4168,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
     async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
         """Private tasks grouped by daily category, urgency-sorted within each."""
         from datetime import date as _date, datetime as _dt
-        today_str = _date.today().isoformat()
+        today_str = __local_today().isoformat()
         try:
             all_tasks = get_tasks(user_id, include_done=False)
         except Exception:
@@ -4260,7 +4269,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
     async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """All open tasks tagged category='baby', grouped by urgency."""
         from datetime import date as _date
-        today_str = _date.today().isoformat()
+        today_str = __local_today().isoformat()
         if user_names is None:
             user_names = {uid: str(uid) for uid in user_ids}
         seen: set = set()
@@ -4392,7 +4401,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
         """Two-column view: each person's private tasks + a shared section.
         Returns (text, ordered_tasks) where ordered_tasks is the flat list in display order."""
         from datetime import date as _date
-        today_str = _date.today().isoformat()
+        today_str = __local_today().isoformat()
         if user_names is None:
             user_names = {uid: str(uid) for uid in user_ids}
 
