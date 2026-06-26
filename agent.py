@@ -33,6 +33,34 @@ def _local_today() -> date:
     return datetime.now(_LOCAL_TZ).date()
 
 
+def _trip_gap_check(trip: dict) -> str | None:
+    """Return a proactive gap question if something critical is missing before departure."""
+    notes = (trip.get("notes") or "").lower()
+    status = trip.get("status") or "planning"
+    start = trip.get("start_date")
+    if not start or status in ("completed", "cancelled"):
+        return None
+    try:
+        days_until = (date.fromisoformat(start) - _local_today()).days
+    except Exception:
+        return None
+    if days_until < 0 or days_until > 90:
+        return None
+    dest = trip.get("destination", "the trip")
+    depart_label = date.fromisoformat(start).strftime("%-d %b")
+    gaps = []
+    has_flights = any(k in notes for k in ["flight", "sg →", "→ sg", "fly", "airline", "depart", "transit", "stopover"])
+    if not has_flights and days_until <= 60:
+        gaps.append("flights")
+    has_hotel = any(k in notes for k in ["hotel", "airbnb", "hostel", "accommodation", "check-in", "resort", "stay", "booking"])
+    if not has_hotel and days_until <= 30:
+        gaps.append("accommodation")
+    if not gaps:
+        return None
+    gap_str = " and ".join(gaps)
+    return f"⚠️ {dest} is {days_until} days away ({depart_label}) — {gap_str} not captured yet. Want me to look up options or set a reminder?"
+
+
 # Model constants — swap here to change globally
 CHAT_MODEL = "claude-haiku-4-5-20251001"      # conversations, briefs, tool routing
 SYNTHESIS_MODEL = "claude-sonnet-4-6"          # knowledge synthesis, compression, complex reasoning
@@ -1216,8 +1244,15 @@ Do not save generic explanations or information that didn't result in a recommen
 TRAVEL
 Ansen and Jess travel frequently. Track trips in the shared trips list.
 
-Saving a trip: "we're going to X", "I booked flights to X", "planning a trip to X" → save_trip, then IMMEDIATELY search_web for visa requirements for BOTH Singapore passport (Ansen) AND US passport (Jess), then call update_trip to store visa_ansen and visa_jess. Do this automatically — don't wait to be asked.
-Updating: booked flights/hotel, dates changed, adding context → update_trip
+Saving a new trip: "we're going to X", "I booked flights to X", "planning a trip to X" → save_trip, then AUTOMATICALLY (without being asked):
+1. search_web for visa requirements for Singapore passport (Ansen) AND US passport (Jess) → update_trip with visa_ansen and visa_jess
+2. search_web for practical tips (best areas, transport, weather for the travel month) → update_trip notes with key findings
+3. Check if any critical info is missing — flights booked? hotel? — and ask about gaps if departure is within 60 days
+4. Offer to set a reminder for key pre-trip actions (e.g. "Want me to set a reminder to book the hotel 8 weeks out?")
+
+This is the same proactive pattern used for the baby brain — research, save, flag gaps, offer reminders.
+
+Updating: booked flights/hotel, dates changed, adding context → update_trip. After updating, check for remaining gaps and flag them.
 Viewing: "what trips do we have", "travel plans" → get_trips
 Visa check: "what visa do we need for X" → search_web for both passports, update_trip with results
 
@@ -2096,10 +2131,14 @@ class UnifiedAgent:
                 notes=inputs.get("notes"),
                 visibility=inputs.get("visibility", "shared"),
             )
-            return {"status": "saved", "id": str(trip["id"]), "destination": inputs["destination"]}
+            result: dict = {"status": "saved", "id": str(trip["id"]), "destination": inputs["destination"]}
+            gap = _trip_gap_check(trip)
+            if gap:
+                result["gap_warning"] = gap
+            return result
 
         if name == "update_trip":
-            from tools.trips import find_trips_by_destination, update_trip as _update_trip, append_trip_note
+            from tools.trips import find_trips_by_destination, update_trip as _update_trip, append_trip_note, get_trip_by_id as _get_trip_by_id
             matches = find_trips_by_destination(inputs["destination"])
             if not matches:
                 return {"status": "not_found", "destination": inputs["destination"]}
@@ -2112,7 +2151,12 @@ class UnifiedAgent:
                 _update_trip(trip["id"], **kwargs)
             if inputs.get("notes"):
                 append_trip_note(trip["id"], inputs["notes"])
-            return {"status": "updated", "destination": trip["destination"]}
+            updated = _get_trip_by_id(str(trip["id"])) or trip
+            result: dict = {"status": "updated", "destination": updated["destination"]}
+            gap = _trip_gap_check(updated)
+            if gap:
+                result["gap_warning"] = gap
+            return result
 
         if name == "get_trips":
             from tools.trips import get_upcoming_trips, get_all_trips
@@ -3264,6 +3308,73 @@ RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size compar
             messages=[{"role": "user", "content": prompt}],
         )
         return _fix_md(resp.content[0].text)
+
+    async def trip_card(self, trip: dict) -> str:
+        """Render a trip's notes as structured Telegram HTML sections using Claude."""
+        from html import escape as _esc
+        dest = trip.get("destination", "Trip")
+        status = trip.get("status") or "planning"
+        start = trip.get("start_date") or ""
+        end = trip.get("end_date") or ""
+        notes = (trip.get("notes") or "").strip()
+        visa_a = trip.get("visa_ansen") or ""
+        visa_j = trip.get("visa_jess") or ""
+
+        STATUS_ICON = {"planning": "🗓", "booked": "✅", "completed": "🏁", "cancelled": "❌"}
+        icon = STATUS_ICON.get(status, "🗓")
+
+        def _fmt(d: str) -> str:
+            try:
+                return datetime.strptime(d, "%Y-%m-%d").strftime("%-d %b %Y")
+            except Exception:
+                return d
+
+        date_str = f"{_fmt(start)} – {_fmt(end)}" if start and end else (_fmt(start) if start else "Dates TBC")
+        header = f"✈️ <b>{_esc(dest)}</b>  {icon} {status.title()}\n📅 {date_str}"
+
+        sections: list[str] = []
+        if notes:
+            prompt = f"""Format these trip notes into structured Telegram HTML sections.
+
+Trip: {dest}
+Notes:
+{notes}
+
+Rules:
+- Use ONLY sections that have actual data (no empty sections, no placeholders)
+- Section header format: emoji <b>Label</b>
+  🛫 <b>Flights</b> — routes, times, flight numbers, transit
+  🏨 <b>Hotel</b> — name, check-in time, booking ref
+  🚗 <b>Car Rental</b> — provider, pickup, return
+  💰 <b>Budget</b> — costs, deposits, refundability
+  📅 <b>Itinerary</b> — day plans, detours, timeline highlights
+  📝 <b>Notes</b> — anything else worth keeping
+- Each section: header on its own line, then • bullets (one fact per bullet)
+- Telegram HTML only: <b>bold</b>, <i>italic</i>, • bullets — NO markdown, NO asterisks, NO pipes
+- Blank line between sections
+- Keep it tight — no filler text, just the facts"""
+
+            response = await self.client.messages.create(
+                model=CHAT_MODEL,
+                max_tokens=700,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            body = _fix_md(response.content[0].text.strip())
+            sections.append(body)
+
+        if visa_a or visa_j:
+            if "🛂" not in (sections[0] if sections else ""):
+                visa_lines = ["🛂 <b>Visa</b>"]
+                if visa_a:
+                    visa_lines.append(f"• Ansen: {_esc(visa_a)}")
+                if visa_j:
+                    visa_lines.append(f"• Jess: {_esc(visa_j)}")
+                sections.append("\n".join(visa_lines))
+
+        if not sections:
+            return header + "\n\n<i>No details captured yet — just mention anything about the trip and I'll save it.</i>"
+
+        return header + "\n\n" + "\n\n".join(sections)
 
     async def trip_milestone_brief(self, trip: dict, days_until: int) -> str | None:
         """Pre-trip intelligence fired at milestone days (56/28/14/7/2 before departure)."""

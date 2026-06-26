@@ -1334,32 +1334,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trip_id = data[12:]
         try:
             from tools.trips import get_trip_by_id
-            from datetime import datetime as _dt2
             t = get_trip_by_id(trip_id)
             if not t:
                 await context.bot.send_message(chat_id=query.message.chat_id, text="Trip not found.")
                 return
-            def _fmt_d(d):
-                try:
-                    return _dt2.strptime(d, "%Y-%m-%d").strftime("%-d %b %Y")
-                except Exception:
-                    return d
-            STATUS_ICON = {"planning": "🗓", "booked": "✅", "completed": "🏁", "cancelled": "❌"}
-            dest = t["destination"]
-            status = t.get("status") or "planning"
-            icon = STATUS_ICON.get(status, "🗓")
-            start_str = _fmt_d(t["start_date"]) if t.get("start_date") else "TBC"
-            end_str = _fmt_d(t["end_date"]) if t.get("end_date") else "TBC"
-            date_str = f"{start_str} – {end_str}" if t.get("start_date") and t.get("end_date") else start_str
-            lines = [f"✈️ <b>{escape(dest)}</b>  {icon} {status.title()}", f"\n📅 {date_str}"]
-            va = t.get("visa_ansen")
-            vj = t.get("visa_jess")
-            if va or vj:
-                lines.append(f"🛂 Ansen: {va or '—'}  |  Jess: {vj or '—'}")
-            notes = t.get("notes") or ""
-            if notes:
-                lines.append(f"\n📝 <i>{escape(notes[:600])}</i>")
-            text = "\n".join(lines)
+            await context.bot.send_message(chat_id=query.message.chat_id, text="⏳ Building trip card…", parse_mode="HTML")
+            text = await agent.trip_card(t)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🗑 Delete trip", callback_data=f"trip_del:{trip_id}")]
             ])
