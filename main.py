@@ -1313,6 +1313,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
+    elif data.startswith("notif_ack:"):
+        await query.answer("✅ Got it")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
     elif data.startswith("trip_del:"):
         await query.answer()
         trip_id = data[9:]
@@ -1480,7 +1488,12 @@ async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
         return
     for notif in pending:
         try:
-            await context.bot.send_message(chat_id=notif["user_id"], text=notif["message"])
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Got it", callback_data=f"notif_ack:{notif['id']}")
+            ]])
+            await context.bot.send_message(
+                chat_id=notif["user_id"], text=notif["message"], reply_markup=keyboard
+            )
             mark_notification_sent(notif["id"])
         except Exception:
             logger.exception(f"Failed to send notification {notif['id']} to {notif['user_id']}")

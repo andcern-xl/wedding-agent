@@ -40,3 +40,19 @@ def search_entries(query: str) -> list[dict]:
         ]
     except Exception:
         return []
+
+
+def delete_entry(entry_id: str) -> bool:
+    try:
+        result = get_client().table("baby_knowledge").delete().eq("id", entry_id).execute()
+        return bool(result.data)
+    except Exception:
+        return False
+
+
+def update_entry(entry_id: str, new_summary: str) -> bool:
+    try:
+        result = get_client().table("baby_knowledge").update({"summary": new_summary}).eq("id", entry_id).execute()
+        return bool(result.data)
+    except Exception:
+        return False

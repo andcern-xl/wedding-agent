@@ -1265,6 +1265,9 @@ Adding: ticket screenshot or "I got tickets to X" → save_show (extract name, v
 Removing: "I can't go to X", "remove X", "sold my tickets to X" → delete_show
 Updating: "might not make X", "sold the ticket", "got upgraded" → update_show with appropriate status (going/maybe/cant_go/sold) and/or notes
 
+CORRECTIONS — ALWAYS PERSIST, NEVER JUST VERBALLY ACKNOWLEDGE
+When the user corrects something you stated — "no that's wrong", "actually it's X", "that's not right", "you got that wrong", "look at internal database to reconcile" — you MUST call correct_knowledge immediately. Never just say "Got it!" or "Reconciled" without writing the fix to persistent storage. Verbal acknowledgement alone means the same mistake reappears every future session. The tool searches baby_knowledge, shared_summary, user_summary, and trips for stale data and replaces it. After calling it, confirm exactly what was found and updated: "✅ Fixed in [store] — removed: [old]. Now stored: [correct]."
+
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
 
@@ -1665,6 +1668,24 @@ TOOLS = [
                 "query": {"type": "string", "description": "Topic or question to search for (e.g. 'epidurals', 'supplements', 'hospital')"},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "correct_knowledge",
+        "description": "ALWAYS call this when the user corrects something you stated ('no that's wrong', 'actually it's X', 'that's not right', 'you got that wrong'). Finds stale data across all persistent stores and replaces it with the correct version. Never just verbally acknowledge a correction without calling this — verbal acknowledgement alone means the same mistake will reappear next session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Short label for what's being corrected, e.g. 'Dr Janice appointment date', 'pregnancy week count'"},
+                "wrong_claim": {"type": "string", "description": "The incorrect information that was stated or stored. Use key phrases that would appear in stored text."},
+                "correct_claim": {"type": "string", "description": "The accurate information the user provided. This will be written to persistent storage."},
+                "stores": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["baby_knowledge", "shared_summary", "user_summary", "trips"]},
+                    "description": "Which stores to search and correct. If unsure, include all relevant ones.",
+                },
+            },
+            "required": ["topic", "correct_claim"],
         },
     },
     {
@@ -2119,6 +2140,97 @@ class UnifiedAgent:
                 "found": len(results),
                 "entries": [{"summary": e["summary"], "tags": e.get("tags", [])} for e in results],
             }
+
+        if name == "correct_knowledge":
+            from tools.baby_knowledge import (
+                get_entries as _bk_get, delete_entry as _bk_del,
+                update_entry as _bk_update, save_entry as _bk_save,
+            )
+            from tools.user_memory import (
+                get_summary as _um_get, save_summary as _um_save,
+                get_shared_summary as _shared_get, append_shared_summary as _shared_append,
+                get_message_count as _um_count,
+            )
+            topic = inputs["topic"]
+            wrong = (inputs.get("wrong_claim") or "").lower()
+            correct = inputs["correct_claim"]
+            stores = inputs.get("stores") or ["baby_knowledge", "shared_summary", "user_summary", "trips"]
+            report: dict = {"topic": topic, "fixed_in": [], "removed": [], "added": []}
+
+            # --- baby_knowledge ---
+            if "baby_knowledge" in stores:
+                all_entries = _bk_get(limit=200)
+                wrong_words = [w for w in wrong.split() if len(w) > 3]
+                stale = []
+                for e in all_entries:
+                    text = (e.get("summary") or "") + " " + (e.get("raw_text") or "")
+                    if wrong and any(w in text.lower() for w in wrong_words):
+                        stale.append(e)
+                for e in stale:
+                    _bk_del(str(e["id"]))
+                    report["removed"].append(e["summary"][:120])
+                if stale or "baby_knowledge" in stores:
+                    new_entry = _bk_save(
+                        summary=f"[CORRECTION — {topic}] {correct}",
+                        tags=["correction", topic.lower().replace(" ", "_")],
+                        source="correction",
+                    )
+                    report["added"].append(f"baby_knowledge: {correct[:120]}")
+                    report["fixed_in"].append("baby_knowledge")
+
+            # --- shared_summary ---
+            if "shared_summary" in stores:
+                shared = _shared_get()
+                if wrong and any(w in shared.lower() for w in (wrong.split() if wrong else [])):
+                    # Replace the wrong line(s) in the summary
+                    lines = shared.split("\n")
+                    wrong_words_set = set(w for w in wrong.split() if len(w) > 3)
+                    cleaned = [l for l in lines if not any(w in l.lower() for w in wrong_words_set)]
+                    if len(cleaned) < len(lines):
+                        new_shared = "\n".join(cleaned).strip()
+                        from tools.db import get_client as _gc
+                        from datetime import datetime as _dt2, timezone as _tz2
+                        _gc().table("user_summaries").upsert({
+                            "user_id": 0, "summary": new_shared,
+                            "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
+                        }).execute()
+                        report["fixed_in"].append("shared_summary")
+                _shared_append(f"[CORRECTION — {topic}] {correct}")
+                report["added"].append(f"shared_summary: {correct[:120]}")
+
+            # --- user_summary for both users ---
+            if "user_summary" in stores:
+                for uid in self._USER_NAMES:
+                    summary = _um_get(uid)
+                    if wrong and summary and any(w in summary.lower() for w in (wrong.split() if wrong else [])):
+                        wrong_words_set = set(w for w in wrong.split() if len(w) > 3)
+                        lines = summary.split("\n")
+                        cleaned = [l for l in lines if not any(w in l.lower() for w in wrong_words_set)]
+                        if len(cleaned) < len(lines):
+                            _um_save(uid, "\n".join(cleaned).strip(), _um_count(uid))
+                            report["fixed_in"].append(f"user_summary:{uid}")
+
+            # --- trips ---
+            if "trips" in stores and wrong:
+                from tools.trips import get_all_trips, append_trip_note as _atn
+                all_trips = get_all_trips()
+                wrong_words_set = set(w for w in wrong.split() if len(w) > 3)
+                for t in all_trips:
+                    notes = (t.get("notes") or "").lower()
+                    if any(w in notes for w in wrong_words_set):
+                        _atn(str(t["id"]), f"[CORRECTION — {topic}] {correct}")
+                        report["fixed_in"].append(f"trip:{t['destination']}")
+
+            if not report["fixed_in"]:
+                _bk_save(
+                    summary=f"[CORRECTION — {topic}] {correct}",
+                    tags=["correction", topic.lower().replace(" ", "_")],
+                    source="correction",
+                )
+                report["added"].append(f"baby_knowledge (new): {correct[:120]}")
+                report["fixed_in"].append("baby_knowledge")
+
+            return report
 
         if name == "save_trip":
             from tools.trips import add_trip
