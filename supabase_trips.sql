@@ -8,5 +8,9 @@ create table if not exists trips (
   visa_ansen text,
   visa_jess text,
   notes text,
+  visibility text default 'shared',
   created_at timestamptz default now()
 );
+
+-- Migration: add visibility if table already exists
+alter table trips add column if not exists visibility text default 'shared';
