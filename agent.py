@@ -2987,7 +2987,7 @@ Rules:
         import os, json as _json
         from datetime import date as _date, datetime as _datetime
 
-        today = __local_today()
+        today = _local_today()
         today_str = today.isoformat()
         tz_name = os.getenv("REMINDER_TZ", "Asia/Singapore")
         wedding_days = (_date(2026, 11, 7) - today).days
@@ -3810,7 +3810,7 @@ RULES:
         """All active goals with next unblocked steps. Returns (text, steps_for_buttons)."""
         from tools.goals import get_goals, get_next_steps
         from datetime import date as _date
-        today_str = __local_today().isoformat()
+        today_str = _local_today().isoformat()
 
         goals = get_goals(status="active")
         if not goals:
@@ -4259,7 +4259,7 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         if not events:
             return wedding_brief
 
-        today_str = __local_today().isoformat()
+        today_str = _local_today().isoformat()
         ev_lines = []
         for e in events[:14]:
             start = e["start"]
@@ -4290,8 +4290,8 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         """Unified personalized morning brief — narrative prose, not a bullet dump."""
         from tools.fyis import get_fyis_unacked as _get_fyis_unacked
         from datetime import date as _date, datetime as _dt
-        today_str = __local_today().isoformat()
-        weekday = __local_today().strftime("%A")
+        today_str = _local_today().isoformat()
+        weekday = _local_today().strftime("%A")
         _ANSEN_ID = 63756531
 
         parts = [f"TODAY: {weekday}, {today_str}", f"USER: {user_name}"]
@@ -4336,7 +4336,7 @@ Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between
         # Unread FYIs — only recent ones (last 7 days), skip pending/awaiting items superseded by confirmed info
         try:
             from datetime import timedelta as _td
-            cutoff = (__local_today() - _td(days=7)).isoformat()
+            cutoff = (_local_today() - _td(days=7)).isoformat()
             fyis = [f for f in _get_fyis_unacked(user_id, limit=20)
                     if (f.get("created_at") or "")[:10] >= cutoff]
             if fyis:
@@ -4440,7 +4440,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
     async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
         """Private tasks grouped by daily category, urgency-sorted within each."""
         from datetime import date as _date, datetime as _dt
-        today_str = __local_today().isoformat()
+        today_str = _local_today().isoformat()
         try:
             all_tasks = get_tasks(user_id, include_done=False)
         except Exception:
@@ -4541,7 +4541,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
     async def baby_reminders_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         """All open tasks tagged category='baby', grouped by urgency."""
         from datetime import date as _date
-        today_str = __local_today().isoformat()
+        today_str = _local_today().isoformat()
         if user_names is None:
             user_names = {uid: str(uid) for uid in user_ids}
         seen: set = set()
@@ -4673,7 +4673,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
         """Two-column view: each person's private tasks + a shared section.
         Returns (text, ordered_tasks) where ordered_tasks is the flat list in display order."""
         from datetime import date as _date
-        today_str = __local_today().isoformat()
+        today_str = _local_today().isoformat()
         if user_names is None:
             user_names = {uid: str(uid) for uid in user_ids}
 
