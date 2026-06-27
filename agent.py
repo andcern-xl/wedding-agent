@@ -33,6 +33,31 @@ def _local_today() -> date:
     return datetime.now(_LOCAL_TZ).date()
 
 
+def _relevant_bullets(query: str, shared_brain: str, max_bullets: int = 18) -> str:
+    """Return the most relevant shared brain bullets for a given query, always keeping recent ones."""
+    if not shared_brain:
+        return shared_brain
+    bullets = [l for l in shared_brain.split('\n') if l.strip()]
+    if len(bullets) <= max_bullets:
+        return shared_brain
+
+    cutoff = (_local_today() - timedelta(days=14)).isoformat()
+    recent, older = [], []
+    for b in bullets:
+        date_part = b[2:12] if len(b) > 12 and b.startswith('•') else ''
+        (recent if date_part >= cutoff else older).append(b)
+
+    query_words = set(re.findall(r'\b\w{3,}\b', query.lower()))
+    scored = sorted(
+        older,
+        key=lambda b: len(query_words & set(re.findall(r'\b\w{3,}\b', b.lower()))),
+        reverse=True,
+    )
+    n_from_older = max(0, max_bullets - len(recent))
+    selected = recent + [b for b in scored[:n_from_older] if any(w in b.lower() for w in query_words)] or recent + scored[:n_from_older]
+    return '\n'.join(selected)
+
+
 def _trip_gap_check(trip: dict) -> str | None:
     """Return a proactive gap question if something critical is missing before departure."""
     notes = (trip.get("notes") or "").lower()
@@ -1265,6 +1290,14 @@ Adding: ticket screenshot or "I got tickets to X" → save_show (extract name, v
 Removing: "I can't go to X", "remove X", "sold my tickets to X" → delete_show
 Updating: "might not make X", "sold the ticket", "got upgraded" → update_show with appropriate status (going/maybe/cant_go/sold) and/or notes
 
+LINKS AND URLS — ALWAYS FETCH AND OFFER TO SAVE
+When the user shares a URL (any https:// link), ALWAYS:
+1. Use search_web or fetch the content to extract what's there
+2. Summarise what you found — be specific (prices, dates, options, key facts)
+3. Decide audience: shared if both Ansen and Jess would benefit (baby info, wedding, finances, travel), private if it's personal to just the sender
+4. Call save_to_brain automatically — don't wait to be asked. Tell them where you saved it: "Saved to shared brain" or "Saved to your personal brain"
+Never just acknowledge a link without fetching and saving useful content from it.
+
 CORRECTIONS — ALWAYS PERSIST, NEVER JUST VERBALLY ACKNOWLEDGE
 When the user corrects something you stated — "no that's wrong", "actually it's X", "that's not right", "you got that wrong", "look at internal database to reconcile" — you MUST call correct_knowledge immediately. Never just say "Got it!" or "Reconciled" without writing the fix to persistent storage. Verbal acknowledgement alone means the same mistake reappears every future session. The tool searches baby_knowledge, shared_summary, user_summary, and trips for stale data and replaces it. After calling it, confirm exactly what was found and updated: "✅ Fixed in [store] — removed: [old]. Now stored: [correct]."
 
@@ -1618,6 +1651,19 @@ TOOLS = [
         },
     },
     {
+        "name": "save_to_brain",
+        "description": "Save useful information to the shared or personal brain. Call this automatically when: (1) the user shares a URL and the fetched content has useful information worth keeping, (2) the user explicitly asks to save something, (3) you find genuinely useful facts during research. Do NOT wait to be asked — if the info is useful, save it. audience='shared' if both Ansen and Jess would benefit; audience='private' if it's personal to the current user only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The key information to save — concise, factual, one clear paragraph or a few bullet points."},
+                "audience": {"type": "string", "enum": ["shared", "private"], "description": "Who this is for: 'shared' = both Ansen and Jess; 'private' = current user only."},
+                "topic": {"type": "string", "description": "Short topic label, e.g. 'confinement nanny options', 'prenatal supplements', 'venue deposit policy'"},
+            },
+            "required": ["content", "audience"],
+        },
+    },
+    {
         "name": "log_baby_expense",
         "description": "Log a baby-related expense or planned purchase to the baby budget. Use when someone mentions buying, ordering, or planning to buy something for the baby, or shares a quote/price for baby gear, medical, or hospital costs.",
         "input_schema": {
@@ -1912,7 +1958,7 @@ class UnifiedAgent:
 
     _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
 
-    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> str:
+    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", query: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -1921,12 +1967,14 @@ class UnifiedAgent:
         current_name = self._USER_NAMES.get(user_id, "the user")
         other_name = next((n for uid, n in self._USER_NAMES.items() if uid != user_id), "the other person")
         current_user_line = f"CURRENT USER: You are talking to {current_name}. Address them as \"you\". Never refer to them in third person. The other person is {other_name}."
+        # Relevance-filter shared brain — inject top-relevant bullets, not full dump
+        filtered_shared = _relevant_bullets(query, shared_summary) if query and shared_summary else shared_summary
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
             today=_local_today().isoformat(),
             timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
-            shared_summary=shared_summary or "Nothing shared yet.",
+            shared_summary=filtered_shared or "Nothing shared yet.",
             recent_fyis=recent_fyis or "No recent FYIs.",
             baby_context=baby_context or "No baby knowledge saved yet.",
             mem0_context=mem0_context or "No specific memories recalled for this query.",
@@ -2087,6 +2135,21 @@ class UnifiedAgent:
         if name == "search_web":
             results = await asyncio.to_thread(web_search, inputs["query"], inputs.get("num_results", 5))
             return results
+
+        if name == "save_to_brain":
+            content = inputs["content"].strip()
+            audience = inputs.get("audience", "shared")
+            topic = inputs.get("topic", "")
+            label = f"[{topic}] {content}" if topic else content
+            if audience == "shared":
+                await self._upsert_shared(label)
+                return {"status": "saved", "audience": "shared", "topic": topic}
+            else:
+                from tools.user_memory import get_summary as _get_sum, save_summary as _save_sum, get_message_count as _mc
+                existing = _get_sum(user_id) or ""
+                updated = (existing + f"\n• {_local_today().isoformat()}: {label}").strip()
+                _save_sum(user_id, updated, _mc(user_id))
+                return {"status": "saved", "audience": "private", "topic": topic}
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
@@ -2557,7 +2620,8 @@ Rules:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": [], "grocery_update": None}
         messages = self._sanitize_history(history) + [{"role": "user", "content": user_content}]
-        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context)
+        query_text = user_content if isinstance(user_content, str) else (user_content[-1].get("text", "") if isinstance(user_content, list) else "")
+        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context, query=query_text)
         last_response = None
 
         for _ in range(10):
@@ -3536,6 +3600,87 @@ Rules:
             return header + "\n\n<i>No details captured yet — just mention anything about the trip and I'll save it.</i>"
 
         return header + "\n\n" + "\n\n".join(sections)
+
+    async def brain_search(self, query: str, user_id: int) -> str:
+        """Conversational search across all knowledge stores — answers the question directly."""
+        from tools.user_memory import get_shared_summary as _get_shared, get_summary as _get_user
+        from tools.baby_knowledge import search_entries as _search_baby, get_entries as _get_baby
+        from tools.fyis import get_fyis as _get_fyis
+
+        shared = _get_shared() or ""
+        personal = _get_user(user_id) or ""
+        relevant_shared = _relevant_bullets(query, shared, max_bullets=25)
+
+        baby_hits = _search_baby(query)
+        baby_section = ""
+        if baby_hits:
+            baby_section = "\n\nBaby knowledge base:\n" + "\n".join(f"• {e['summary']}" for e in baby_hits[:10])
+
+        fyis = _get_fyis(limit=30) or []
+        fyi_hits = [f for f in fyis if any(w in (f.get("content") or "").lower() for w in query.lower().split() if len(w) > 3)]
+        fyi_section = ""
+        if fyi_hits:
+            fyi_section = "\n\nRecent FYIs:\n" + "\n".join(f"• {f['content'][:120]}" for f in fyi_hits[:5])
+
+        prompt = f"""Search query: "{query}"
+
+Shared brain (confirmed facts about us):
+{relevant_shared or "Nothing in shared brain yet."}
+
+Personal context:
+{personal or "Nothing saved yet."}
+{baby_section}{fyi_section}
+
+Answer the query conversationally and specifically. If you find the information, synthesise it cleanly — quote dates, names, amounts, and sources. If you find related but not exact info, say what you DID find and flag the gap. If nothing is found, say so honestly.
+
+Format in Telegram HTML. Short and specific — don't pad."""
+
+        response = await self.client.messages.create(
+            model=SYNTHESIS_MODEL,
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _fix_md(response.content[0].text)
+
+    async def compress_shared_brain(self) -> str:
+        """Compress shared brain — merge related entries, remove stale/past ones."""
+        from tools.user_memory import get_shared_summary as _get_shared
+        from tools.db import get_client as _gc
+        from datetime import datetime as _dt2, timezone as _tz2
+
+        shared = _get_shared()
+        if not shared:
+            return "Shared brain is empty."
+        bullets = [l for l in shared.split('\n') if l.strip()]
+        if len(bullets) < 10:
+            return f"Shared brain is lean ({len(bullets)} entries — no compression needed)."
+
+        prompt = f"""Compress this shared brain — a list of facts for a couple (Ansen and Jess).
+
+{shared}
+
+Rules:
+1. MERGE related entries on the same topic into one bullet (keep the most recent/specific version)
+2. REMOVE entries about past events that are now irrelevant (e.g. a dinner that already happened, a task that was resolved)
+3. KEEP all unique facts that are still current and relevant
+4. KEEP all future-dated items (upcoming trips, appointments, reminders)
+5. KEEP financial and legal facts (visa status, insurance decisions, account info)
+6. One fact per bullet — no redundancy
+7. Format: • YYYY-MM-DD: [fact]  (use the most recent relevant date)
+8. Return ONLY the compressed bullets, nothing else"""
+
+        response = await self.client.messages.create(
+            model=SYNTHESIS_MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        compressed = response.content[0].text.strip()
+        compressed_count = len([l for l in compressed.split('\n') if l.strip()])
+        _gc().table("user_summaries").upsert({
+            "user_id": 0, "summary": compressed,
+            "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
+        }).execute()
+        return f"✅ Compressed: {len(bullets)} → {compressed_count} entries."
 
     async def trip_milestone_brief(self, trip: dict, days_until: int) -> str | None:
         """Pre-trip intelligence fired at milestone days (56/28/14/7/2 before departure)."""

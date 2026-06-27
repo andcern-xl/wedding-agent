@@ -1728,6 +1728,47 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Natural language search across all knowledge stores — shared brain, baby brain, FYIs, personal."""
+    if not allowed(update):
+        return
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        await update.message.reply_text(
+            "What do you want to find? Try:\n"
+            "/search confinement nanny options\n"
+            "/search Dr Joycelyn appointment\n"
+            "/search babymoon timing\n"
+            "/search venue deposit"
+        )
+        return
+    msg = await update.message.reply_text("🔍 Searching...")
+    try:
+        result = await agent.brain_search(query, update.effective_user.id)
+        sections = _split_sections(result)
+        await _safe_send(msg, sections[0])
+        for section in sections[1:]:
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_search failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
+
+async def cmd_compress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ansen-only: compress the shared brain — merge related entries, remove stale ones."""
+    if not allowed(update):
+        return
+    if update.effective_user.id != ANSEN_ID:
+        return
+    msg = await update.message.reply_text("🧠 Compressing shared brain...")
+    try:
+        result = await agent.compress_shared_brain()
+        await msg.edit_text(result, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("cmd_compress failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+
+
 async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ansen-only: describe a feature and get full implementation code back in chat."""
     if not allowed(update):
@@ -1780,6 +1821,15 @@ async def send_capability_gap_sweep(context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception:
         logger.exception("send_capability_gap_sweep failed")
+
+
+async def send_brain_compress(context: ContextTypes.DEFAULT_TYPE):
+    """Monthly: compress shared brain — merge related entries, remove stale ones."""
+    try:
+        result = await agent.compress_shared_brain()
+        await context.bot.send_message(chat_id=ANSEN_ID, text=f"🧠 <b>Brain compression</b>\n\n{result}", parse_mode="HTML")
+    except Exception:
+        logger.exception("send_brain_compress failed")
 
 
 async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
@@ -1955,6 +2005,8 @@ def main():
     app.add_handler(CommandHandler("goals", cmd_goals))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("build", cmd_build))
+    app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("compress", cmd_compress))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
@@ -1994,6 +2046,8 @@ def main():
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
         # Capability gap sweep — 1st of each month, Ansen only
         app.job_queue.run_monthly(send_capability_gap_sweep, when=dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE), day=1)
+        # Shared brain compression — 15th of each month (merge/dedupe accumulated entries)
+        app.job_queue.run_monthly(send_brain_compress, when=dtime(hour=3, minute=0, tzinfo=REMINDER_TIMEZONE), day=15)
         # ── ALWAYS ───────────────────────────────────────────────────
         # Scheduled notification check every 60 seconds
         app.job_queue.run_repeating(check_and_send_notifications, interval=60, first=10)
