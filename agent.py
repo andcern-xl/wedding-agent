@@ -2090,7 +2090,7 @@ class UnifiedAgent:
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
-            append_shared_summary(content)
+            await self._upsert_shared(content)
             return {"status": "saved", "content": content}
 
         if name == "save_baby_knowledge":
@@ -2195,7 +2195,7 @@ class UnifiedAgent:
                             "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
                         }).execute()
                         report["fixed_in"].append("shared_summary")
-                _shared_append(f"[CORRECTION — {topic}] {correct}")
+                await self._upsert_shared(f"[CORRECTION — {topic}] {correct}")
                 report["added"].append(f"shared_summary: {correct[:120]}")
 
             # --- user_summary for both users ---
@@ -2503,6 +2503,56 @@ class UnifiedAgent:
                     return messages[i:]
         return []  # nothing clean — start fresh
 
+    async def _upsert_shared(self, new_content: str) -> str:
+        """Write to shared brain with conflict resolution — replaces stale entries on the same topic."""
+        from tools.user_memory import get_shared_summary as _get_shared, save_summary as _save_sum, get_message_count as _mc
+        from tools.db import get_client as _gc
+        from datetime import datetime as _dt2, timezone as _tz2
+
+        existing = _get_shared()
+        today = _local_today().isoformat()
+        new_bullet = f"• {today}: {new_content}"
+
+        if not existing:
+            _gc().table("user_summaries").upsert({
+                "user_id": 0, "summary": new_bullet,
+                "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
+            }).execute()
+            return new_bullet
+
+        prompt = f"""You maintain a shared brain — a list of confirmed facts for a couple. Each entry is a bullet: • YYYY-MM-DD: [fact]
+
+Current shared brain:
+{existing}
+
+New information to incorporate:
+{new_content}
+
+Task: Return the updated shared brain.
+Rules:
+1. If the new info updates something already present (same topic, same entity, new value) → REPLACE the old bullet with the new one. Do NOT keep both.
+2. If the new info contradicts an existing entry → keep ONLY the new one.
+3. If the new info is genuinely new (no related entry exists) → ADD it as a new bullet with today's date ({today}).
+4. Keep entries lean — one fact per bullet, no commentary.
+5. Return ONLY the bullets, nothing else. No headers, no explanation."""
+
+        try:
+            response = await self.client.messages.create(
+                model=CHAT_MODEL,
+                max_tokens=1200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            updated = response.content[0].text.strip()
+        except Exception:
+            # Fallback: plain append
+            updated = f"{existing}\n{new_bullet}".strip()
+
+        _gc().table("user_summaries").upsert({
+            "user_id": 0, "summary": updated,
+            "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
+        }).execute()
+        return updated
+
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": [], "grocery_update": None}
@@ -2751,8 +2801,7 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
         try:
             sigs = [f"{a.get('ticker') or a['name']} {'🟢' if a['sentiment']=='bullish' else '🔴' if a['sentiment']=='bearish' else '🟡'}"
                     for a in researched[:5]]
-            await asyncio.to_thread(append_shared_summary,
-                f"📊 Stocks {today}: {', '.join(sigs)}")
+            await self._upsert_shared(f"📊 Stocks {today}: {', '.join(sigs)}")
         except Exception:
             pass
 
@@ -4114,7 +4163,7 @@ Be strict. When in doubt, reject."""
         for facts in approved_grouped.values():
             for fact in facts:
                 try:
-                    append_shared_summary(fact)
+                    await self._upsert_shared(fact)
                 except Exception:
                     pass
 
