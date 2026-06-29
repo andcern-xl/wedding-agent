@@ -385,6 +385,18 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         asyncio.create_task(asyncio.to_thread(save_history, chat_id, updated_history))
         await update.message.reply_text(result["text"], parse_mode="HTML")
 
+        # Direct partner messages from message_partner tool — send immediately
+        for partner_id, partner_msg in result.get("partner_messages", []):
+            try:
+                sender_name = update.effective_user.first_name or "Your partner"
+                await context.bot.send_message(
+                    chat_id=partner_id,
+                    text=f"📨 <b>{escape(sender_name)}:</b> {escape(partner_msg)}",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.error(f"partner message delivery failed for {partner_id}: {e}")
+
         # Notify partner when tasks are marked done by the agent
         for task_name in result.get("completed_tasks", []):
             sender = update.effective_user.first_name or "Your partner"
@@ -1875,6 +1887,8 @@ async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
         try:
             msg = await agent.proactive_check(uid, name)
             if msg:
+                import re as _re
+                msg = _re.sub(r'\n?---+\n?', '\n\n', msg).strip()
                 await context.bot.send_message(chat_id=uid, text=f"🌙 <b>Tonight's check-in</b>\n\n{msg}", parse_mode="HTML")
         except Exception:
             logger.exception(f"proactive_check failed for {uid}")

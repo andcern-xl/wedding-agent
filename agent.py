@@ -1148,7 +1148,7 @@ NOTIFICATION MESSAGE STYLE — always write notification messages with:
 - No "Reminder:" prefix — the emoji does that job
 
 MESSAGING THE PARTNER — DO THIS PROPERLY
-When asked to "notify", "tell", "message", "ping", "let Jess know", "tell Ansen" etc → call message_partner immediately. It fires within 30 seconds.
+When asked to "notify", "tell", "message", "ping", "let Jess know", "tell Ansen" etc → call message_partner immediately. It fires within seconds.
 NEVER claim to have notified someone without calling message_partner. Do not say "Done", "Sent", or "Jess got the notification" unless the tool returned {{"status": "sent"}}. If you haven't called the tool, you haven't sent anything.
 
 PROACTIVE LONG-TERM REMINDERS — DO THIS WITHOUT BEING ASKED
@@ -2068,20 +2068,14 @@ class UnifiedAgent:
             return [{"id": str(f["id"]), "user_id": f["user_id"], "content": f["content"], "category": f.get("category"), "created_at": f["created_at"][:16]} for f in fyis]
 
         if name == "message_partner":
-            import os
-            from zoneinfo import ZoneInfo
-            from datetime import timezone as _tz, timedelta as _td
-            tz = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
             partner_ids = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip() and int(x.strip()) != user_id]
             if not partner_ids:
                 return {"error": "No partner found in ALLOWED_USER_IDS"}
-            fire_at = datetime.now(_tz.utc) + _td(seconds=30)
-            ids_sent = []
+            message = inputs["message"]
             for pid in partner_ids:
-                notif = _sched_notif(pid, inputs["message"], fire_at, "none")
-                ids_sent.append(str(notif["id"]))
+                flags.setdefault("partner_messages", []).append((pid, message))
             partner_name = next((n for uid, n in self._USER_NAMES.items() if uid != user_id), "your partner")
-            return {"status": "sent", "to": partner_name, "fires_in": "30 seconds"}
+            return {"status": "sent", "to": partner_name, "fires_in": "~5 seconds"}
 
         if name == "schedule_notification":
             import os
@@ -2626,7 +2620,7 @@ Rules:
 
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> dict:
         import logging as _logging
-        flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": [], "grocery_update": None}
+        flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": [], "grocery_update": None, "partner_messages": []}
         messages = self._sanitize_history(history) + [{"role": "user", "content": user_content}]
         query_text = user_content if isinstance(user_content, str) else (user_content[-1].get("text", "") if isinstance(user_content, list) else "")
         system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context, query=query_text)
@@ -2664,12 +2658,12 @@ Rules:
                 except Exception:
                     pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"]}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
 
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "grocery_update": flags["grocery_update"]}
+                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
 
             if last_response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]
@@ -3135,7 +3129,7 @@ Rules:
                         label = raw_start
                 loc = f" @ {e['location']}" if e.get("location") else ""
                 entry = f"  • {label} — {e['title']}{loc}"
-                if days_until <= 2:
+                if days_until <= 1:
                     _within_48h.append(entry)
                 elif days_until <= 7:
                     _within_7d.append(entry)
@@ -3288,8 +3282,8 @@ SHARED BRAIN:
 YOUR JOB: Scan all context above and surface anything genuinely worth flagging to {user_name}. Work in priority order — imminent events first, then this week, then general intelligence.
 
 PRIORITY ORDER:
-1. ⚡ IMMINENT (calendar events within 48h): check EACH imminent event against every data source — do they need to bring anything? Are there questions to ask? Visa issues? Related tasks still open? Pregnancy considerations?
-2. 📅 THIS WEEK (events in next 3–7 days): flag prep items, visa applications needing lead time, booking deadlines, OBGYN sign-off for travel
+1. ⚡ IMMINENT (calendar events today or tomorrow only): check EACH imminent event against every data source — do they need to bring anything? Are there questions to ask? Visa issues? Related tasks still open? Pregnancy considerations?
+2. 📅 THIS WEEK (events in next 2–7 days): flag prep items, visa applications needing lead time, booking deadlines, OBGYN sign-off for travel
 3. 🔍 GENERAL: wedding urgency, baby milestones, stale tasks, finance
 
 INTELLIGENCE TRIGGERS — actively look for these:
@@ -3328,11 +3322,11 @@ INTELLIGENCE TRIGGERS — actively look for these:
 
 RULES:
 - Use search_web when you detect a travel destination, visa question, or anything needing real-time info — don't guess
-- Lead with imminent events if any — give each one a named header: ⚡ <b>Tomorrow: [Event Name]</b>
+- Lead with imminent events if any — give each one a named header using the ACTUAL day name from the calendar date, e.g. ⚡ <b>Tomorrow: [Event Name]</b> only if it's genuinely the next calendar day; otherwise use the weekday name: ⚡ <b>Tuesday: [Event Name]</b>. Never label something "Tomorrow" unless it falls on tomorrow's date.
 - Be selective — max 5 bullets total. If nothing is genuinely worth flagging, say NOTHING
 - Don't repeat what the morning brief already covers (today's due tasks)
 - Sound like a sharp friend who notices things, not a notification bot
-- FORMATTING: Telegram HTML only — <b>bold</b>, • bullets, emojis. Never use ** or _
+- FORMATTING: Telegram HTML only — <b>bold</b>, • bullets, emojis. Never use ** or _ or --- separators. Use a blank line between sections instead of ---.
 
 CALENDAR IS SOURCE OF TRUTH:
 - If a task date and a calendar event date differ — the calendar is correct, full stop. Do NOT flag this as a question or ask for confirmation. Simply note "Task updated to match calendar" if relevant, and move on. Never say "one of these is wrong" or ask which date is right.
