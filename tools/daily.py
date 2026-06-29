@@ -74,6 +74,8 @@ def complete_task(task_id: str, user_id: int) -> bool:
     r = row[0]
     if r["visibility"] == "private" and r["user_id"] != user_id:
         return False
+    if r.get("assigned_to") and r["assigned_to"] != user_id and r["visibility"] == "shared":
+        return False
     get_client().table("daily_tasks").update({
         "done": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),

@@ -30,12 +30,12 @@ def get_upcoming_trips() -> list[dict]:
         .gte("end_date", today)
         .neq("status", "cancelled")
         .order("start_date")
-        .execute().data
+        .execute().data or []
     )
 
 
 def get_all_trips() -> list[dict]:
-    return get_client().table("trips").select("*").order("start_date", desc=True).execute().data
+    return get_client().table("trips").select("*").order("start_date", desc=True).execute().data or []
 
 
 def get_trip_by_id(trip_id: str) -> dict | None:
@@ -44,7 +44,7 @@ def get_trip_by_id(trip_id: str) -> dict | None:
 
 
 def find_trips_by_destination(destination: str) -> list[dict]:
-    all_trips = get_client().table("trips").select("*").order("start_date").execute().data
+    all_trips = get_client().table("trips").select("*").order("start_date").execute().data or []
     dest_lower = destination.lower()
     return [t for t in all_trips if dest_lower in (t.get("destination") or "").lower()]
 

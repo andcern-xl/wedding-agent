@@ -38,11 +38,11 @@ def get_show_by_id(show_id: str) -> dict | None:
 
 def get_shows_in_n_days(n: int) -> list[dict]:
     target = (date.today() + timedelta(days=n)).isoformat()
-    return get_client().table("shows").select("*").eq("show_date", target).execute().data
+    return get_client().table("shows").select("*").eq("show_date", target).execute().data or []
 
 
 def find_shows_by_name(name: str) -> list[dict]:
-    all_shows = get_client().table("shows").select("*").eq("user_id", ANSEN_ID).execute().data
+    all_shows = get_client().table("shows").select("*").eq("user_id", ANSEN_ID).execute().data or []
     name_lower = name.lower()
     return [s for s in all_shows if name_lower in (s.get("show_name") or "").lower()]
 

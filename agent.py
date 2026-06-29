@@ -2506,7 +2506,7 @@ class UnifiedAgent:
             matched = next((g for g in goals if goal_title_lower in g["title"].lower() or g["title"].lower() in goal_title_lower), None)
             if not matched:
                 return {"error": f"No active goal matching '{inputs['goal_title']}'"}
-            step = _find_step_by_title(matched["id"], inputs["step_title"])
+            step = _find_step(matched["id"], inputs["step_title"])
             if not step:
                 return {"error": f"No step matching '{inputs['step_title']}' in goal '{matched['title']}'"}
             result = _complete_step(step["id"])
@@ -2658,12 +2658,12 @@ Rules:
                 except Exception:
                     pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
 
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
+                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
 
             if last_response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]
@@ -2689,7 +2689,7 @@ Rules:
         _logging.getLogger(__name__).error(
             f"_run_loop exhausted for user {user_id}. Last stop_reason: {last_reason}. Messages len: {len(messages)}"
         )
-        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._strip_image_data(messages[-40:])}
+        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
 
     async def stocks_brief(self) -> str:
         """Investment brief: read newsletters → extract assets → web research → analyst brief."""

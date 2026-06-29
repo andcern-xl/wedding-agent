@@ -1,17 +1,24 @@
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
+
+_SGT = ZoneInfo("Asia/Singapore")
 
 # ── Pregnancy constants ────────────────────────────────────────────────────────
 LMP = date(2026, 5, 14)       # Last menstrual period
 DUE_DATE = LMP + timedelta(days=280)  # 40 weeks
 
 
+def _today() -> date:
+    return datetime.now(_SGT).date()
+
+
 def current_week() -> int:
-    days = (date.today() - LMP).days
+    days = (_today() - LMP).days
     return max(1, min(42, days // 7 + 1))
 
 
 def current_day_in_week() -> int:
-    return (date.today() - LMP).days % 7 + 1
+    return (_today() - LMP).days % 7 + 1
 
 
 def trimester() -> int:
@@ -24,7 +31,7 @@ def trimester() -> int:
 
 
 def days_until_due() -> int:
-    return max(0, (DUE_DATE - date.today()).days)
+    return max(0, (DUE_DATE - _today()).days)
 
 
 def pregnancy_summary() -> dict:
@@ -37,6 +44,7 @@ def pregnancy_summary() -> dict:
         "week": week,
         "day": day,
         "trimester": tri,
+        "total_weeks": 40,
         "due_date": due.strftime("%-d %B %Y"),
         "days_until_due": days_left,
         "lmp": LMP.strftime("%-d %B %Y"),

@@ -1897,7 +1897,7 @@ async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
 async def send_trip_milestones(context: ContextTypes.DEFAULT_TYPE):
     """Daily check — fire pre-trip intelligence briefs at milestone days before departure."""
     from tools.trips import get_upcoming_trips
-    from datetime import datetime as _datetime
+    from datetime import datetime as _datetime, date as _date
 
     if not ALLOWED_IDS:
         return
