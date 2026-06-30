@@ -1105,8 +1105,8 @@ finance 💳, health 🏥, home 🏠, work 💼, social 🎉, travel ✈️, per
 PRIVACY RULE
 Tasks with visibility "private" belong only to the person who created them. Never reveal private tasks from one person to the other. Tasks with visibility "shared" are visible to both.
 
-TODAY'S DATE: {today}
-CURRENT TIMEZONE: {timezone}
+NOW (Singapore time): {now_sgt}
+TIMEZONE: Asia/Singapore (SGT = UTC+8)
 
 WHAT YOU KNOW ABOUT THIS PERSON (persistent memory — survives restarts)
 {user_summary}
@@ -1977,10 +1977,11 @@ class UnifiedAgent:
         current_user_line = f"CURRENT USER: You are talking to {current_name}. Address them as \"you\". Never refer to them in third person. The other person is {other_name}."
         # Relevance-filter shared brain — inject top-relevant bullets, not full dump
         filtered_shared = _relevant_bullets(query, shared_summary) if query and shared_summary else shared_summary
+        _now_sg = datetime.now(_LOCAL_TZ)
+        _now_sgt_str = _now_sg.strftime("%A, %-d %B %Y %H:%M SGT")
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
-            today=_local_today().isoformat(),
-            timezone=os.getenv("REMINDER_TZ", "Asia/Singapore"),
+            now_sgt=_now_sgt_str,
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=filtered_shared or "Nothing shared yet.",
             recent_fyis=recent_fyis or "No recent FYIs.",
