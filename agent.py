@@ -3180,6 +3180,14 @@ Rules:
                 baby_block += "UPCOMING MILESTONES:\n" + "\n".join(f"  • {m}" for m in milestones[:5])
         except Exception:
             pass
+        try:
+            from tools.baby_knowledge import get_entries as _get_baby_proactive
+            _baby_entries = _get_baby_proactive(limit=20)
+            if _baby_entries:
+                baby_brain_lines = "\n".join(f"  [{','.join(e.get('tags') or [])}] {e['summary']}" for e in _baby_entries)
+                baby_block += f"\nBABY BRAIN:\n{baby_brain_lines}"
+        except Exception:
+            pass
 
         # Upcoming trips
         trips_block = ""
@@ -3299,6 +3307,7 @@ INTELLIGENCE TRIGGERS — actively look for these:
 - Upcoming milestones or appointments that need prep
 - Things that should be booked/done by this gestational week but aren't
 - Cross-domain: wedding is 3 months before due date — flag planning conflicts
+- IMPORTANT: Never infer a doctor's specialty from a calendar event title alone. If the baby brain says a doctor is an OBGYN, they ARE an OBGYN — even if the appointment is called "fertility follow-up" or "clinic visit". Trust the brain over the calendar title.
 
 💒 WEDDING
 - Categories with no activity that book out fast (venues, photographers, caterers)
