@@ -1311,7 +1311,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         gap = gaps[idx]
         request = f"Build this integration for the wedding-agent bot: {gap.get('gap', '')}\n\nExample use case: {gap.get('example', '')}"
-        msg = await context.bot.send_message(chat_id=query.message.chat_id, text="🔨 Generating implementation code...")
+        msg = await context.bot.send_message(chat_id=query.message.chat_id, text="📋 Drafting implementation plan...")
         try:
             code = await agent.developer_build(request)
             sections = _split_sections(code)
@@ -1322,6 +1322,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     import re as _re
                     await context.bot.send_message(chat_id=query.message.chat_id, text=_re.sub(r"<[^>]+>", "", section))
+            await context.bot.send_message(chat_id=query.message.chat_id, text="💡 <i>This plan lives in chat only — paste it to Claude Code to actually deploy it.</i>", parse_mode="HTML")
         except Exception as e:
             await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
@@ -1726,7 +1727,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = []
         for i, g in enumerate(gaps[:5]):
             label = (g.get("gap") or "")[:38]
-            rows.append([InlineKeyboardButton(f"🔨 Build: {label}", callback_data=f"skill_build:{i}")])
+            rows.append([InlineKeyboardButton(f"📋 Draft plan: {label}", callback_data=f"skill_build:{i}")])
         keyboard = InlineKeyboardMarkup(rows) if rows else None
 
         sections = _split_sections(text)
@@ -1791,7 +1792,7 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not request.strip():
         await update.message.reply_text("Usage: /build <what to build>\nExample: /build weather tool for trip pre-briefs")
         return
-    msg = await update.message.reply_text("🔨 Generating implementation code...")
+    msg = await update.message.reply_text("📋 Drafting implementation plan...")
     try:
         code = await agent.developer_build(request)
         sections = _split_sections(code)
@@ -1802,6 +1803,7 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 import re as _re
                 await update.message.reply_text(_re.sub(r"<[^>]+>", "", section))
+        await update.message.reply_text("💡 <i>This plan lives in chat only — paste it to Claude Code to actually deploy it.</i>", parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_build failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1818,7 +1820,7 @@ async def send_capability_gap_sweep(context: ContextTypes.DEFAULT_TYPE):
         rows = []
         for i, g in enumerate(gaps[:5]):
             label = (g.get("gap") or "")[:38]
-            rows.append([InlineKeyboardButton(f"🔨 Build: {label}", callback_data=f"skill_build:{i}")])
+            rows.append([InlineKeyboardButton(f"📋 Draft plan: {label}", callback_data=f"skill_build:{i}")])
         keyboard = InlineKeyboardMarkup(rows) if rows else None
 
         sections = _split_sections(text)
