@@ -17,13 +17,20 @@ Deployed on Railway (auto-deploys on push to `main`).
 - `agent.py` — LLM agent, system prompt, tool execution, brief generation
 - `tools/daily.py` — task CRUD (Supabase `daily_tasks` table)
 - `tools/user_memory.py` — per-user summaries + shared brain (`user_id=0` sentinel)
-- `tools/fyis.py` — FYI log
+- `tools/fyis.py` — FYI log (lifecycle: active → archived/promoted, per-user acks, 30-day TTL)
+- `tools/check_ins.py` — check-ins: decision questions the agent asks via button cards (lifecycle: open → answered/dismissed/snoozed/expired)
 - `tools/notifications.py` — scheduled notifications
 
 ## Database (Supabase)
-Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`
+Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`
 
 `daily_tasks` columns: `id, user_id, task, due_date, repeat, visibility, done, created_at, completed_at, assigned_to, category`
+
+## Task categories (domains)
+Every task gets exactly one: `baby` / `baby_questions` / `wedding` / `life` (enum on the `add_daily_task` tool; `normalize_category()` in tools/daily.py maps legacy slugs). Agent picks `unsure` when ambiguous → user gets 👶/💍/🏠 tap buttons (`taskcat:` callback). `/reminders` groups domain-first: Baby, Wedding, then per-person, then Shared. One-time backfill: `backfill_categories.py` (dry-run by default, `--apply` to write — already applied Jul 2026).
+
+## Check-ins (agent feedback loop)
+When the agent needs a decision, it calls `ask_check_in` (chat loop + proactive check) → card with tap buttons via `_send_check_in_cards` in main.py. Callbacks: `ci:{id}:{idx}` answers (atomic first-tap-wins for audience=both), `cisnz:{id}` snoozes 3 days. Actions: `save_decision` (→ shared brain, baby also → baby knowledge), `create_task`, `remind`, `dismiss`. Open check-ins are injected into system prompts so the agent never re-asks; lapsed snoozes re-send cards and 7-day-old unanswered ones expire to FYIs (housekeeping runs in `send_proactive_checks`).
 
 `user_summaries`: stores per-user compressed memory. `user_id=0` = shared brain (visible to both users).
 

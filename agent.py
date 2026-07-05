@@ -33,6 +33,26 @@ def _local_today() -> date:
     return datetime.now(_LOCAL_TZ).date()
 
 
+def _date_reference(now: datetime) -> str:
+    """Explicit resolved date table so the model never has to compute weekday→date itself.
+
+    LLMs reliably mis-count named weekdays ("Friday") into calendar dates, causing
+    off-by-one reminder scheduling. We resolve every upcoming weekday deterministically
+    and hand the model a lookup table instead of asking it to do arithmetic.
+    """
+    today = now.date()
+    lines = [
+        f"- today = {today.isoformat()} ({today.strftime('%A')})",
+        f"- tomorrow = {(today + timedelta(days=1)).isoformat()} ({(today + timedelta(days=1)).strftime('%A')})",
+    ]
+    # Next occurrence of each weekday name (1–7 days out). "Friday" always means the
+    # soonest upcoming Friday; if today IS Friday, that's 7 days out, not today.
+    for offset in range(1, 8):
+        d = today + timedelta(days=offset)
+        lines.append(f"- {d.strftime('%A')} = {d.isoformat()}")
+    return "\n".join(lines)
+
+
 def _relevant_bullets(query: str, shared_brain: str, max_bullets: int = 18) -> str:
     """Return the most relevant shared brain bullets for a given query, always keeping recent ones."""
     if not shared_brain:
@@ -1108,6 +1128,10 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 NOW (Singapore time): {now_sgt}
 TIMEZONE: Asia/Singapore (SGT = UTC+8)
 
+DATE REFERENCE — resolve relative dates by LOOKING THEM UP here. Do NOT compute weekday→date yourself; you get it wrong. "Friday", "next Monday", "this weekend" → use the ISO date from this table. A named weekday always means its SOONEST upcoming occurrence.
+{date_reference}
+When you schedule_notification or add a task, the scheduled_at / due_date MUST match the ISO date from this table for the day the user named.
+
 WHAT YOU KNOW ABOUT THIS PERSON (persistent memory — survives restarts)
 {user_summary}
 
@@ -1126,6 +1150,9 @@ SHARED BRAIN — confirmed couple decisions and permanent memories:
 
 RECENT FYIs — notes and updates from the last 30 days. Reference naturally when relevant — don't quote back verbatim:
 {recent_fyis}
+
+OPEN CHECK-INS — questions you already asked via buttons, still unanswered. NEVER re-ask these (in prose or via ask_check_in). If the user's message answers one, acknowledge it — the button card will resolve separately. If one is stale and now urgent, you may nudge once in prose:
+{open_check_ins}
 
 BABY — current pregnancy status and saved knowledge. The CURRENT PREGNANCY week/trimester at the top is calculated live and is always correct. Never override it with recalled memories or guesses:
 {baby_context}
@@ -1344,6 +1371,22 @@ add_daily_task when:
 - Request directed at the other person: "can you follow up with the venue?", "Jess can you call the florist?"
 - Has a clear owner and should appear on a to-do list
 
+TASK CATEGORIES — every task gets exactly one domain:
+- baby → pregnancy, hospital, scans, OBGYN, baby gear, baby insurance/admin (PruMom, LTVP for baby). Always visibility="shared".
+- baby_questions → a question to ask at a medical appointment. Always visibility="shared".
+- wedding → venue, vendors, guests, gifts, attire, room blocks, wedding payments.
+- life → everything else: errands, home, social, finance, work, travel.
+- unsure → ONLY when it genuinely straddles domains and context doesn't settle it. The user gets tap buttons to pick. Use sparingly — a wrong guess you're 80% sure of is worse than asking, but most tasks are obvious.
+The same domains route information: baby facts → save_baby_knowledge, wedding facts → log_wedding_drop, couple decisions → save_shared_context. A task's category decides which section of /reminders it appears in.
+
+CHECK-INS — closing the loop on decisions:
+When you need the USER'S decision to proceed (which option, who handles it, before/after, book or skip), call ask_check_in instead of asking rhetorically in your reply text. The question arrives as a card with tap buttons, and the tapped answer is saved automatically — so never duplicate the question or the options in your reply.
+- Good: "Sixt has Airport and City Centre pickup — which?" with options that create the booking task
+- Good: "MAB filing — organiser or self?" audience="both", one option scheduling a reminder for arrival day
+- Bad: anything you can infer, look up, or decide yourself; rhetorical questions; small talk
+- audience="both" for couple decisions — first tap wins, the other person is notified
+- Max 2 per turn. If the OPEN CHECK-INS list above already covers it, don't ask again.
+
 When in doubt: if it's something that already happened or is just good to know → FYI. If it needs someone to act → task. A soft curiosity ("I wonder if X", "might be worth asking about Y") is always an FYI, never a task.
 
 TASK QUALITY RULES — enforce these strictly:
@@ -1457,11 +1500,50 @@ TOOLS = [
                     "enum": ["private", "shared"],
                     "description": "private = only this user sees it. shared = both see it. Infer from me/I (private) vs us/we/both (shared).",
                 },
-                "category": {"type": "string", "description": "Category slug: finance, health, home, work, social, travel, personal, or a custom slug"},
+                "category": {
+                    "type": "string",
+                    "enum": ["baby", "baby_questions", "wedding", "life", "unsure"],
+                    "description": "Domain bucket. baby = pregnancy/hospital/scans/baby gear/baby insurance. baby_questions = a question to ask at a medical appointment. wedding = venue/vendors/guests/gifts/attire. life = everything else (errands, home, social, finance, work, travel). unsure = ONLY if genuinely ambiguous — the user will be asked to pick.",
+                },
                 "repeat": {"type": "string", "enum": ["none", "daily", "weekly"]},
                 "assigned_to": {"type": "integer", "description": "User ID to assign this task to. Use when the sender says 'remind Jess to X' or 'remind Ansen to X'. Ansen=63756531, Jess=6927468999."},
             },
-            "required": ["task", "visibility"],
+            "required": ["task", "visibility", "category"],
+        },
+    },
+    {
+        "name": "ask_check_in",
+        "description": "Ask the user a decision question as a Telegram card with tap buttons. Use when you need THEIR call to proceed (which option, who handles it, before/after) instead of asking rhetorically in prose. Each option carries an action that fires when tapped. Do NOT use for yes/no small talk or anything you can decide yourself. Max 2 per conversation turn.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The decision question, short and specific. e.g. 'NIPT opens ~26 Jul, mid-Tomorrowland — book before or after Belgium?'"},
+                "context": {"type": "string", "description": "Optional one line of why this matters now."},
+                "category": {"type": "string", "enum": ["baby", "wedding", "life"], "description": "Domain — decides which brain the answer is saved to."},
+                "audience": {"type": "string", "enum": ["me", "both"], "description": "'both' sends the card to Ansen AND Jess; first tap wins and the other is notified. Use for couple decisions."},
+                "options": {
+                    "type": "array",
+                    "description": "2-4 tap options. A '💤 Later' snooze button is added automatically — don't include one.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "Button text, under 40 chars"},
+                            "action": {"type": "string", "enum": ["save_decision", "create_task", "remind", "dismiss"], "description": "save_decision = record the answer in the right brain. create_task = also create a task. remind = also schedule a reminder. dismiss = drop the question, nothing saved."},
+                            "payload": {
+                                "type": "object",
+                                "properties": {
+                                    "decision": {"type": "string", "description": "For save_decision: the sentence to record, e.g. 'NIPT will be booked after the Belgium trip'. Defaults to question + label."},
+                                    "task": {"type": "string", "description": "For create_task: short task name"},
+                                    "due_date": {"type": "string", "description": "For create_task/remind: YYYY-MM-DD"},
+                                    "message": {"type": "string", "description": "For remind: the reminder text"},
+                                },
+                            },
+                        },
+                        "required": ["label", "action"],
+                    },
+                },
+            },
+            "required": ["question", "category", "options"],
         },
     },
     {
@@ -1966,7 +2048,7 @@ class UnifiedAgent:
 
     _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
 
-    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", query: str = "") -> str:
+    def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", query: str = "", open_check_ins: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
             for k, v in CATEGORIES.items()
@@ -1982,11 +2064,13 @@ class UnifiedAgent:
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
             now_sgt=_now_sgt_str,
+            date_reference=_date_reference(_now_sg),
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=filtered_shared or "Nothing shared yet.",
             recent_fyis=recent_fyis or "No recent FYIs.",
             baby_context=baby_context or "No baby knowledge saved yet.",
             mem0_context=mem0_context or "No specific memories recalled for this query.",
+            open_check_ins=open_check_ins or "None.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
@@ -2023,7 +2107,25 @@ class UnifiedAgent:
                 category=inputs.get("category"),
                 assigned_to=assigned_to,
             )
-            return {"status": "created", "id": str(task["id"]), "task": inputs["task"], "assigned_to": assigned_to}
+            # Agent couldn't classify → ask the user with tap buttons after the reply
+            if not task.get("category"):
+                flags.setdefault("category_asks", []).append({"id": str(task["id"]), "task": inputs["task"]})
+            return {"status": "created", "id": str(task["id"]), "task": inputs["task"], "assigned_to": assigned_to, "category": task.get("category") or "pending user pick"}
+
+        if name == "ask_check_in":
+            from tools.check_ins import create_check_in
+            ci = create_check_in(
+                created_by=user_id,
+                question=inputs["question"],
+                options=inputs.get("options") or [],
+                category=inputs.get("category", "life"),
+                audience=inputs.get("audience", "me"),
+                context=inputs.get("context", ""),
+            )
+            if not ci:
+                return {"error": "check-in not created (invalid options or too many open check-ins) — just ask in your reply text instead"}
+            flags.setdefault("check_ins", []).append(ci)
+            return {"status": "asked", "id": str(ci["id"]), "note": "card with buttons will be sent after your reply — do NOT repeat the question or options in your reply text"}
 
         if name == "read_payments":
             fin = payment_summary()
@@ -2619,12 +2721,12 @@ Rules:
         }).execute()
         return updated
 
-    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "") -> dict:
+    async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", open_check_ins: str = "") -> dict:
         import logging as _logging
         flags = {"wedding_drop": False, "fyi": False, "baby_drop": False, "summary_updated": False, "completed_tasks": [], "grocery_update": None, "partner_messages": []}
         messages = self._sanitize_history(history) + [{"role": "user", "content": user_content}]
         query_text = user_content if isinstance(user_content, str) else (user_content[-1].get("text", "") if isinstance(user_content, list) else "")
-        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context, query=query_text)
+        system_prompt = self._build_system(user_summary, shared_summary, user_id, recent_fyis, baby_context, mem0_context, query=query_text, open_check_ins=open_check_ins)
         last_response = None
 
         for _ in range(10):
@@ -2659,12 +2761,12 @@ Rules:
                 except Exception:
                     pass
 
-                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
+                return {"text": reply, "history": updated_history, "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"], "check_ins": flags.get("check_ins", []), "category_asks": flags.get("category_asks", [])}
 
             if last_response.stop_reason == "max_tokens":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "Got it.")
                 messages.append({"role": "assistant", "content": reply})
-                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
+                return {"text": reply, "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"], "check_ins": flags.get("check_ins", []), "category_asks": flags.get("category_asks", [])}
 
             if last_response.stop_reason == "tool_use":
                 tool_use_blocks = [b for b in last_response.content if b.type == "tool_use"]
@@ -2690,7 +2792,7 @@ Rules:
         _logging.getLogger(__name__).error(
             f"_run_loop exhausted for user {user_id}. Last stop_reason: {last_reason}. Messages len: {len(messages)}"
         )
-        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"]}
+        return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._sanitize_history(self._strip_image_data(messages[-40:])), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"], "check_ins": flags.get("check_ins", []), "category_asks": flags.get("category_asks", [])}
 
     async def stocks_brief(self) -> str:
         """Investment brief: read newsletters → extract assets → web research → analyst brief."""
@@ -2950,12 +3052,23 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
             except Exception:
                 return ""
 
-        user_summary, shared_summary, recent_fyis, baby_context, mem0_context = await asyncio.gather(
-            _get_user_summary(), _get_shared(), _get_fyis(), _get_baby(), _get_mem0()
+        async def _get_open_check_ins():
+            try:
+                from tools.check_ins import get_open_check_ins
+                rows = await asyncio.to_thread(get_open_check_ins, 10)
+                return "\n".join(
+                    f"[{r.get('category', 'life')}] ({(r.get('created_at') or '')[:10]}) {r['question']}"
+                    for r in rows
+                )
+            except Exception:
+                return ""
+
+        user_summary, shared_summary, recent_fyis, baby_context, mem0_context, open_check_ins = await asyncio.gather(
+            _get_user_summary(), _get_shared(), _get_fyis(), _get_baby(), _get_mem0(), _get_open_check_ins()
         )
 
         result = await self._run_loop(
-            text, user_id, history, user_summary, shared_summary, recent_fyis, baby_context, mem0_context
+            text, user_id, history, user_summary, shared_summary, recent_fyis, baby_context, mem0_context, open_check_ins
         )
 
         # Async: store this exchange in mem0 for future recall (non-blocking)
@@ -3049,7 +3162,7 @@ Rules:
         except Exception:
             pass  # compression failure is non-critical
 
-    async def proactive_check(self, user_id: int, user_name: str) -> str | None:
+    async def proactive_check(self, user_id: int, user_name: str) -> dict | None:
         """Agentic proactive intelligence check — can use tools to research and surface insights."""
         import os, json as _json
         from datetime import date as _date, datetime as _datetime
@@ -3242,6 +3355,20 @@ Rules:
         except Exception:
             pass
 
+        open_ci_block = ""
+        try:
+            from tools.check_ins import get_open_check_ins as _get_open_cis
+            _open_cis = _get_open_cis(limit=10)
+            if _open_cis:
+                _ci_lines = "\n".join(
+                    f"• [{c.get('category', 'life')}] asked {(c.get('created_at') or '')[:10]}: {c['question']}"
+                    for c in _open_cis
+                )
+                open_ci_block = f"""OPEN CHECK-INS — questions already sent as button cards, still unanswered. NEVER re-ask these via ask_check_in or in prose. If one is now urgent (event within 3 days), you may mention it once as a nudge:
+{_ci_lines}"""
+        except Exception:
+            pass
+
         prev_block = ""
         if prev_output and prev_date:
             prev_block = f"""PREVIOUSLY FLAGGED — you said this on {prev_date}:
@@ -3254,7 +3381,7 @@ OPEN GAP RULES — apply before deciding what to surface:
 • Gaps NOT in the previous list → surface as normal if actionable"""
 
         # --- Proactive tools available to this check ---
-        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis")]
+        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in")]
 
         system = f"""You are a proactive intelligence agent for {user_name}. Today is {today_str} ({tz_name}).
 
@@ -3283,6 +3410,8 @@ SHARED BRAIN:
 {trips_block}
 
 {shows_block}
+
+{open_ci_block}
 
 {prev_block}
 
@@ -3332,6 +3461,7 @@ INTELLIGENCE TRIGGERS — actively look for these:
 
 RULES:
 - Use search_web when you detect a travel destination, visa question, or anything needing real-time info — don't guess
+- DECISION QUESTIONS: when a flag needs {user_name}'s call (which option, who handles it, before/after, book or skip), call ask_check_in — it sends a separate card with tap buttons and the answer is saved automatically. Do NOT also pose the question in your text; mention the topic in one line and move on. Max 2 ask_check_in calls per run. Purely informational flags stay as prose.
 - Lead with imminent events if any — give each one a named header using the ACTUAL day name from the calendar date, e.g. ⚡ <b>Tomorrow: [Event Name]</b> only if it's genuinely the next calendar day; otherwise use the weekday name: ⚡ <b>Tuesday: [Event Name]</b>. Never label something "Tomorrow" unless it falls on tomorrow's date.
 - Be selective — max 5 bullets total. If nothing is genuinely worth flagging, say NOTHING
 - Don't repeat what the morning brief already covers (today's due tasks)
@@ -3346,6 +3476,7 @@ TRIPS — only surface a trip if it's within 28 days OR has a specific open gap 
 If nothing is worth flagging: respond with exactly: NOTHING"""
 
         # --- Run agentic loop (max 4 tool calls) ---
+        proactive_flags: dict = {}
         messages: list[dict] = [{"role": "user", "content": "Run your proactive intelligence check now. Do not add an intro header or greeting — jump straight into the findings."}]
         for _ in range(4):
             try:
@@ -3361,15 +3492,17 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
 
             if response.stop_reason == "end_turn":
                 result = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
-                if not result or result.upper().startswith("NOTHING"):
+                new_check_ins = proactive_flags.get("check_ins", [])
+                if (not result or result.upper().startswith("NOTHING")) and not new_check_ins:
                     return None
-                fixed = _fix_md(result)
-                try:
-                    from tools.proactive_state import save_state as _save_proactive_state
-                    _save_proactive_state(user_id, result, today_str)
-                except Exception:
-                    pass
-                return fixed
+                fixed = _fix_md(result) if result and not result.upper().startswith("NOTHING") else None
+                if fixed:
+                    try:
+                        from tools.proactive_state import save_state as _save_proactive_state
+                        _save_proactive_state(user_id, result, today_str)
+                    except Exception:
+                        pass
+                return {"text": fixed, "check_ins": new_check_ins}
 
             if response.stop_reason == "tool_use":
                 tool_uses = [b for b in response.content if b.type == "tool_use"]
@@ -3377,7 +3510,7 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
                 tool_results = []
                 for tu in tool_uses:
                     try:
-                        res = await self._execute_tool(tu.name, tu.input, user_id, {})
+                        res = await self._execute_tool(tu.name, tu.input, user_id, proactive_flags)
                     except Exception as e:
                         res = {"error": str(e)}
                     tool_results.append({
@@ -3389,7 +3522,9 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
             else:
                 break
 
-        return None
+        # Loop exhausted mid-tool-use — still deliver any check-ins already created
+        new_check_ins = proactive_flags.get("check_ins", [])
+        return {"text": None, "check_ins": new_check_ins} if new_check_ins else None
 
     async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
@@ -3452,8 +3587,16 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
             )
         except Exception:
             baby_context = ""
+        try:
+            from tools.check_ins import get_open_check_ins as _get_ocis
+            open_check_ins = "\n".join(
+                f"[{r.get('category', 'life')}] ({(r.get('created_at') or '')[:10]}) {r['question']}"
+                for r in _get_ocis(10)
+            )
+        except Exception:
+            open_check_ins = ""
         result, payment = await asyncio.gather(
-            self._run_loop(user_content, user_id, history, user_summary, shared_summary, recent_fyis, baby_context),
+            self._run_loop(user_content, user_id, history, user_summary, shared_summary, recent_fyis, baby_context, open_check_ins=open_check_ins),
             self._wedding._extract_payment(image_bytes, caption),
         )
         if payment:
@@ -4705,9 +4848,10 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
         tasks: list[dict] = []
         for uid in user_ids:
             try:
+                from tools.daily import task_domain as _task_domain
                 for t in get_tasks(uid, include_done=False):
                     tid = t.get("id")
-                    if t.get("category") == "baby" and tid not in seen:
+                    if _task_domain(t) == "baby" and tid not in seen:
                         seen.add(tid)
                         tasks.append(t)
             except Exception:
@@ -4841,31 +4985,40 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
             except Exception:
                 per_person[uid] = []
 
-        seen_shared: set = set()
+        from tools.daily import task_domain
+
+        # Domain-first: baby and wedding tasks get their own sections regardless of
+        # owner; life/uncategorised tasks split by ownership as before.
+        baby: list[dict] = []
+        wedding: list[dict] = []
         shared: list[dict] = []
         personal: dict[int, list[dict]] = {uid: [] for uid in user_ids}
-        seen_personal: set = set()
+        seen: set = set()
 
         for uid, tasks in per_person.items():
             for t in tasks:
                 tid = t.get("id")
-                assigned = t.get("assigned_to")
-                # Tasks assigned to a specific person always go in their section
-                if assigned and assigned in personal:
-                    if tid not in seen_personal:
-                        seen_personal.add(tid)
-                        personal[assigned].append(t)
-                # Shared with no specific assignee → shared section (exclude baby tasks — they live in /baby)
-                elif t.get("visibility") == "shared" and t.get("category") not in ("baby", "baby_questions"):
-                    if tid not in seen_shared:
-                        seen_shared.add(tid)
-                        shared.append(t)
-                # Private → creator's section
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                domain = task_domain(t)
+                if domain in ("baby", "baby_questions"):
+                    baby.append(t)
+                elif domain == "wedding":
+                    wedding.append(t)
                 else:
-                    owner = t.get("user_id")
-                    if owner in personal and tid not in seen_personal:
-                        seen_personal.add(tid)
-                        personal[owner].append(t)
+                    assigned = t.get("assigned_to")
+                    # Tasks assigned to a specific person always go in their section
+                    if assigned and assigned in personal:
+                        personal[assigned].append(t)
+                    # Shared with no specific assignee → shared section
+                    elif t.get("visibility") == "shared":
+                        shared.append(t)
+                    # Private → creator's section
+                    else:
+                        owner = t.get("user_id")
+                        if owner in personal:
+                            personal[owner].append(t)
 
         _is_junk = _is_junk_task
 
@@ -4889,6 +5042,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
                 name = name[5:].strip()
             if len(name) > limit:
                 name = name[:limit].rsplit(" ", 1)[0] + "…"
+            name = _html_escape(name)
             if not due:
                 return f"• {name}"
             elif due < today_str:
@@ -4923,8 +5077,35 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
                 out += [_fmt(t) for t in someday_t]
             return out
 
+        def _owner_tag(t: dict) -> str:
+            """Short name suffix for domain sections so it's clear whose plate it's on."""
+            who = t.get("assigned_to") or (t.get("user_id") if t.get("visibility") == "private" else None)
+            if who and who in user_names:
+                return f" — <i>{user_names[who]}</i>"
+            return ""
+
+        def _dedup_clean(tasks: list[dict]) -> list[dict]:
+            seen_text: set = set()
+            out = []
+            for t in _sort(tasks):
+                if _is_junk(t):
+                    continue
+                key = (t.get("task") or "").strip().lower()[:60]
+                if key and key not in seen_text:
+                    seen_text.add(key)
+                    out.append(t)
+            return out
+
         blocks: list[str] = ["<b>📋 Reminders</b>"]
         ordered_tasks: list[dict] = []
+
+        # Domain sections first — only shown when non-empty
+        for header, tasks in (("👶 <b>Baby</b>", baby), ("💍 <b>Wedding</b>", wedding)):
+            clean = _dedup_clean(tasks)  # already urgency-sorted
+            if clean:
+                blocks.append(f"\n{header}")
+                blocks += [_fmt(t) + _owner_tag(t) for t in clean]
+                ordered_tasks += clean
 
         for uid in user_ids:
             person_name = user_names.get(uid, str(uid))
@@ -4936,17 +5117,7 @@ FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <
             else:
                 blocks.append("• Nothing on the list ✓")
 
-        # Shared: dedup by text, filter junk, urgency sort
-        seen_text: set = set()
-        clean_shared = []
-        for t in _sort(shared):
-            if _is_junk(t):
-                continue
-            key = (t.get("task") or "").strip().lower()[:60]
-            if key and key not in seen_text:
-                seen_text.add(key)
-                clean_shared.append(t)
-
+        clean_shared = _dedup_clean(shared)
         blocks.append("\n👥 <b>Shared</b>")
         if clean_shared:
             blocks += _urgency_blocks(clean_shared)

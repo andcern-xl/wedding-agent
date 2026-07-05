@@ -21,7 +21,11 @@ from tools.notifications import get_pending_notifications, mark_notification_sen
 from tools.user_memory import get_shared_summary, append_shared_summary
 from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi, ack_fyi, get_fyis_unacked
 from tools.conversation import load_history, save_history
-from tools.daily import complete_task
+from tools.daily import complete_task, set_task_category, task_domain, add_task
+from tools.check_ins import (
+    get_check_in, answer_check_in, dismiss_check_in, snooze_check_in,
+    reopen_due_snoozed, expire_stale,
+)
 from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added, delete_show as _delete_show_by_id
 
 ANSEN_ID = 63756531
@@ -217,6 +221,9 @@ def _can_complete(t: dict, user_id: int) -> bool:
         return True  # shared with no specific assignee — anyone can do it
     return t.get("user_id") == user_id  # private — only the creator
 
+_DOMAIN_EMOJI = {"baby": "👶", "baby_questions": "👶", "wedding": "💍", "life": "✅"}
+
+
 def _reminders_keyboard(tasks: list[dict], user_id: int) -> InlineKeyboardMarkup | None:
     mine = [t for t in tasks if _is_task(t) and _can_complete(t, user_id)]
     rows = []
@@ -225,8 +232,60 @@ def _reminders_keyboard(tasks: list[dict], user_id: int) -> InlineKeyboardMarkup
         if raw.upper().startswith("TASK:"):
             raw = raw[5:].strip()
         label = raw[:35] + "…" if len(raw) > 35 else raw
-        rows.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{t['id']}")])
+        emoji = _DOMAIN_EMOJI.get(task_domain(t) or "life", "✅")
+        rows.append([InlineKeyboardButton(f"{emoji} {label}", callback_data=f"done:{t['id']}")])
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+_CHECKIN_EMOJI = {"baby": "👶", "wedding": "💍", "life": "🏠"}
+
+
+def _check_in_card(ci: dict) -> tuple[str, InlineKeyboardMarkup]:
+    emoji = _CHECKIN_EMOJI.get(ci.get("category", "life"), "🏠")
+    lines = [f"{emoji} <b>Quick decision</b>", escape(ci["question"])]
+    if ci.get("context"):
+        lines.append(f"<i>{escape(ci['context'])}</i>")
+    rows = [
+        [InlineKeyboardButton(opt["label"], callback_data=f"ci:{ci['id']}:{i}")]
+        for i, opt in enumerate(ci.get("options") or [])
+    ]
+    rows.append([InlineKeyboardButton("💤 Later", callback_data=f"cisnz:{ci['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _send_check_in_cards(context, check_ins: list[dict], asker_id: int):
+    """Deliver check-in cards — to the asker, or to both partners when audience='both'."""
+    for ci in check_ins[:3]:
+        try:
+            text, keyboard = _check_in_card(ci)
+            targets = ALLOWED_IDS if ci.get("audience") == "both" else [asker_id]
+            for uid in targets:
+                try:
+                    await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML", reply_markup=keyboard)
+                except Exception:
+                    logger.exception(f"check-in card delivery failed for {uid}")
+        except Exception:
+            logger.exception("check-in card build failed")
+
+
+async def _send_category_asks(context, asks: list[dict], chat_id: int):
+    """The agent couldn't classify a task — ask the creator to tap a bucket."""
+    for ask in asks[:3]:
+        try:
+            name = (ask.get("task") or "")[:80]
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("👶 Baby", callback_data=f"taskcat:{ask['id']}:baby"),
+                InlineKeyboardButton("💍 Wedding", callback_data=f"taskcat:{ask['id']}:wedding"),
+                InlineKeyboardButton("🏠 Life", callback_data=f"taskcat:{ask['id']}:life"),
+            ]])
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🗂 Which bucket for: <i>{escape(name)}</i>?",
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception("category ask delivery failed")
 
 
 async def _fetch_user_names(context) -> dict[int, str]:
@@ -384,6 +443,10 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         # Persist to Supabase so history survives restarts/deploys
         asyncio.create_task(asyncio.to_thread(save_history, chat_id, updated_history))
         await update.message.reply_text(result["text"], parse_mode="HTML")
+
+        # Decision cards + category picks from this turn's tool calls
+        await _send_check_in_cards(context, result.get("check_ins", []), user_id)
+        await _send_category_asks(context, result.get("category_asks", []), chat_id)
 
         # Direct partner messages from message_partner tool — send immediately
         for partner_id, partner_msg in result.get("partner_messages", []):
@@ -1254,6 +1317,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await _handle_fyi_callback(query, context, data[4:])
 
+    elif data.startswith("ci:") or data.startswith("cisnz:"):
+        await _handle_check_in_callback(query, context, data)
+
+    elif data.startswith("taskcat:"):
+        parts = data.split(":", 2)
+        if len(parts) == 3:
+            task_id, cat = parts[1], parts[2]
+            ok = set_task_category(task_id, cat)
+            await query.answer("Filed ✅" if ok else "Couldn't update that task.")
+            if ok:
+                emoji = _CHECKIN_EMOJI.get(cat, "🏠")
+                try:
+                    await query.edit_message_text(f"{emoji} Filed under <b>{cat.title()}</b>.", parse_mode="HTML")
+                except Exception:
+                    pass
+
     elif data == "me_shows":
         await query.answer()
         if user_id != ANSEN_ID:
@@ -1689,6 +1768,136 @@ async def _handle_fyi_callback(query, context, data: str):
             )
 
 
+def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
+    """Run the tapped option's action. Returns a short confirmation for the card."""
+    from datetime import datetime as _dt, date as _date, time as _time, timedelta as _td
+    action = opt.get("action", "save_decision")
+    payload = opt.get("payload") or {}
+    question, label = ci["question"], opt["label"]
+    decision = payload.get("decision") or f"{question} → {label}"
+    category = ci.get("category", "life")
+
+    if action == "dismiss":
+        return "dropped, nothing saved"
+
+    notes = []
+    if action == "save_decision":
+        try:
+            append_shared_summary(decision)
+            notes.append("saved to shared brain")
+        except Exception:
+            logger.exception("check-in decision save failed")
+        if category == "baby":
+            try:
+                from tools.baby_knowledge import save_entry
+                save_entry(summary=decision, tags=["decision"], user_id=user_id, source="check_in")
+                notes.append("+ baby brain")
+            except Exception:
+                logger.exception("check-in baby brain save failed")
+    elif action == "create_task":
+        try:
+            due = None
+            if payload.get("due_date"):
+                try:
+                    due = _date.fromisoformat(payload["due_date"])
+                except ValueError:
+                    pass
+            add_task(user_id=user_id, task=payload.get("task") or label, due_date=due,
+                     visibility="shared", category=category)
+            notes.append("task created")
+        except Exception:
+            logger.exception("check-in task creation failed")
+    elif action == "remind":
+        try:
+            from tools.notifications import schedule_notification as _sched
+            when = None
+            if payload.get("due_date"):
+                try:
+                    when = _dt.combine(_date.fromisoformat(payload["due_date"]), _time(hour=9), tzinfo=REMINDER_TIMEZONE)
+                except ValueError:
+                    pass
+            if when is None:
+                when = (_dt.now(REMINDER_TIMEZONE) + _td(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+            _sched(user_id, payload.get("message") or question, when)
+            notes.append(f"reminder set for {when.strftime('%-d %b')}")
+        except Exception:
+            logger.exception("check-in reminder failed")
+    return " · ".join(notes) or "noted"
+
+
+async def _handle_check_in_callback(query, context, data: str):
+    """ci:{id}:{option_index} answers a check-in; cisnz:{id} snoozes it."""
+    user_id = query.from_user.id
+
+    if data.startswith("cisnz:"):
+        snooze_check_in(data[6:], days=3)
+        await query.answer("💤 I'll ask again in a few days.")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    parts = data.split(":", 2)
+    if len(parts) < 3:
+        return
+    ci_id, idx_str = parts[1], parts[2]
+    ci = get_check_in(ci_id)
+    if not ci:
+        await query.answer("This question is gone.")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    try:
+        opt = (ci.get("options") or [])[int(idx_str)]
+    except (ValueError, IndexError):
+        await query.answer("Unknown option.")
+        return
+
+    # Atomic claim — with audience='both', only the first tap wins
+    if opt.get("action") == "dismiss":
+        claimed = dismiss_check_in(ci_id, user_id)
+    else:
+        claimed = answer_check_in(ci_id, opt["label"], user_id)
+    if not claimed:
+        await query.answer("Already answered.")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    confirmation = await asyncio.to_thread(_execute_check_in_action, ci, opt, user_id)
+    await query.answer("✅")
+
+    answerer = query.from_user.first_name or "Answered"
+    card_text, _ = _check_in_card(ci)
+    try:
+        await query.edit_message_text(
+            f"{card_text}\n\n✅ <b>{escape(answerer)}</b>: {escape(opt['label'])} — <i>{escape(confirmation)}</i>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    if ci.get("audience") == "both":
+        for uid in ALLOWED_IDS:
+            if uid != user_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=f"✅ <b>{escape(answerer)}</b> answered: <i>{escape(ci['question'])}</i> → {escape(opt['label'])}",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+
+
 # In-memory cache: Ansen's latest skill gaps for build buttons (keyed by user_id)
 _skills_gaps: dict[int, list[dict]] = {}
 
@@ -1883,15 +2092,38 @@ async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
 async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
+
+    # Check-in lifecycle housekeeping (once daily): lapsed snoozes reopen,
+    # week-old unanswered questions expire and downgrade to an FYI.
+    try:
+        reopened = await asyncio.to_thread(reopen_due_snoozed)
+        for ci in reopened:
+            # Snooze lapsed → re-send the card (its old buttons were removed)
+            await _send_check_in_cards(context, [ci], ci.get("created_by") or ALLOWED_IDS[0])
+        expired = await asyncio.to_thread(expire_stale, 7)
+        for ci in expired:
+            try:
+                from tools.fyis import log_fyi as _log_fyi
+                _log_fyi(ci.get("created_by") or 0, f"Unanswered check-in (expired): {ci['question']}")
+            except Exception:
+                pass
+    except Exception:
+        logger.exception("check-in housekeeping failed")
+
     USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
     for uid in ALLOWED_IDS:
         name = USER_NAMES.get(uid, str(uid))
         try:
-            msg = await agent.proactive_check(uid, name)
+            result = await agent.proactive_check(uid, name)
+            if not result:
+                continue
+            msg = result.get("text") if isinstance(result, dict) else result
             if msg:
                 import re as _re
                 msg = _re.sub(r'\n?---+\n?', '\n\n', msg).strip()
                 await context.bot.send_message(chat_id=uid, text=f"🌙 <b>Tonight's check-in</b>\n\n{msg}", parse_mode="HTML")
+            if isinstance(result, dict):
+                await _send_check_in_cards(context, result.get("check_ins", []), uid)
         except Exception:
             logger.exception(f"proactive_check failed for {uid}")
 

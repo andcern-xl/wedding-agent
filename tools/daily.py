@@ -1,6 +1,45 @@
 from datetime import date, datetime, timezone
 from tools.db import get_client
 
+# Canonical task domains. baby_questions is kept distinct because the
+# appointment prebrief and /baby → Questions views filter on it.
+TASK_DOMAINS = ("baby", "baby_questions", "wedding", "life")
+
+_LEGACY_CATEGORY_MAP = {
+    "finance": "life", "health": "life", "home": "life", "work": "life",
+    "social": "life", "travel": "life", "personal": "life", "misc": "life",
+    "pregnancy": "baby", "medical": "baby",
+}
+
+
+def normalize_category(category: str | None) -> str | None:
+    """Collapse legacy/free-form slugs into the canonical domain set.
+    Returns None for 'unsure' so the task stays uncategorised until the user taps a bucket."""
+    if not category:
+        return None
+    cat = category.strip().lower()
+    if cat in ("unsure", "unknown", ""):
+        return None
+    if cat in TASK_DOMAINS:
+        return cat
+    return _LEGACY_CATEGORY_MAP.get(cat, "life")
+
+
+def task_domain(task: dict) -> str | None:
+    """Domain of an existing task row, tolerating legacy slugs. None = uncategorised."""
+    return normalize_category(task.get("category"))
+
+
+def set_task_category(task_id: str, category: str) -> bool:
+    cat = normalize_category(category)
+    if not cat:
+        return False
+    try:
+        result = get_client().table("daily_tasks").update({"category": cat}).eq("id", task_id).execute()
+        return bool(result.data)
+    except Exception:
+        return False
+
 
 def get_task_by_id(task_id: str) -> dict | None:
     rows = get_client().table("daily_tasks").select("*").eq("id", task_id).execute().data
@@ -25,6 +64,7 @@ def add_task(
     }
     if due_date:
         row["due_date"] = due_date.isoformat()
+    category = normalize_category(category)
     if category:
         row["category"] = category
     if assigned_to:
