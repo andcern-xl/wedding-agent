@@ -3371,13 +3371,14 @@ Rules:
 
         prev_block = ""
         if prev_output and prev_date:
-            prev_block = f"""PREVIOUSLY FLAGGED — you said this on {prev_date}:
+            prev_block = f"""ALREADY SENT — everything the user has already been told (last check-in + this morning's brief), most recent {prev_date}:
 {prev_output}
 
 OPEN GAP RULES — apply before deciding what to surface:
 • If a previous gap now has an OPEN TASK addressing it → being handled, skip it
 • If a previous gap is resolved (visa field now set, booking confirmed in FYIs/brain) → skip it
-• Only re-surface a previous gap if: (a) event is now ≤7 days away, or (b) genuinely new information changes the picture
+• REPEAT OFFENDERS: if a gap above is STILL unresolved and you already described it in prose, do NOT describe it in prose again. Either call ask_check_in ONCE (buttons force a decision and end the nagging) or stay silent about it. Re-explaining the same gap two days running is a failure mode, not diligence.
+• Only re-surface a previous gap in prose if: (a) event is now ≤3 days away, or (b) genuinely new information changes the picture — and even then, one line max
 • Gaps NOT in the previous list → surface as normal if actionable"""
 
         # --- Proactive tools available to this check ---

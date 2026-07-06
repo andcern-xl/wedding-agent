@@ -53,8 +53,6 @@ except Exception:
 REMINDER_TIME   = dtime(hour=9,  minute=0, tzinfo=REMINDER_TIMEZONE)   # 9am  — tasks, FYIs, baby, shows
 _evening_hour   = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
 EVENING_TIME    = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — recap, knowledge sweep
-_proactive_hour = int(os.getenv("PROACTIVE_HOUR", "23"))
-PROACTIVE_TIME  = dtime(hour=_proactive_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 11pm — proactive intelligence (tomorrow review)
 CRYPTO_TIME     = dtime(hour=20, minute=0, tzinfo=REMINDER_TIMEZONE)               # 8pm — stocks & crypto
 BABY_WEEKLY_TIME   = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
 APPOINTMENT_TIME   = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
@@ -1525,6 +1523,14 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         try:
             text = await agent.morning_brief(uid, name)
             await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+            # Feed into proactive state so the nightly wrap doesn't repeat it
+            try:
+                from tools.proactive_state import append_state
+                from datetime import datetime as _dt
+                today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
+                await asyncio.to_thread(append_state, uid, f"MORNING BRIEF (already sent {today} 9am):\n{text}", today)
+            except Exception:
+                logger.exception("morning brief state append failed")
         except Exception:
             logger.exception(f"send_morning_brief failed for uid {uid}")
 
@@ -1612,26 +1618,72 @@ async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"Failed to send notification {notif['id']} to {notif['user_id']}")
 
 
-async def send_evening_brief(context: ContextTypes.DEFAULT_TYPE):
+async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
+    """ONE nightly message per person: evening recap + forward-looking flags.
+    Replaces the separate 9pm recap and 11pm proactive check — they drew from
+    the same sources and repeated each other."""
     if not ALLOWED_IDS:
         return
-    try:
-        user_names: dict[int, str] = {}
-        for uid in ALLOWED_IDS:
-            try:
-                chat = await context.bot.get_chat(uid)
-                user_names[uid] = chat.first_name or str(uid)
-            except Exception:
-                user_names[uid] = str(uid)
 
-        brief = await agent.evening_brief(ALLOWED_IDS, user_names)
-        sections = _split_sections(brief)
-        for uid in ALLOWED_IDS:
-            await context.bot.send_message(chat_id=uid, text="<b>Evening Recap</b>", parse_mode="HTML")
-            for section in sections:
-                await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+    # Check-in lifecycle housekeeping (once daily): lapsed snoozes reopen,
+    # week-old unanswered questions expire and downgrade to an FYI.
+    try:
+        reopened = await asyncio.to_thread(reopen_due_snoozed)
+        for ci in reopened:
+            # Snooze lapsed → re-send the card (its old buttons were removed)
+            await _send_check_in_cards(context, [ci], ci.get("created_by") or ALLOWED_IDS[0])
+        expired = await asyncio.to_thread(expire_stale, 7)
+        for ci in expired:
+            try:
+                from tools.fyis import log_fyi as _log_fyi
+                _log_fyi(ci.get("created_by") or 0, f"Unanswered check-in (expired): {ci['question']}")
+            except Exception:
+                pass
     except Exception:
-        logger.exception("Error sending evening brief")
+        logger.exception("check-in housekeeping failed")
+
+    user_names: dict[int, str] = {}
+    for uid in ALLOWED_IDS:
+        try:
+            chat = await context.bot.get_chat(uid)
+            user_names[uid] = chat.first_name or str(uid)
+        except Exception:
+            user_names[uid] = str(uid)
+
+    try:
+        recap = await agent.evening_brief(ALLOWED_IDS, user_names)
+    except Exception:
+        logger.exception("evening brief generation failed")
+        recap = ""
+
+    USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
+    for uid in ALLOWED_IDS:
+        name = USER_NAMES.get(uid, str(uid))
+        try:
+            lookahead_text, check_ins = "", []
+            try:
+                result = await agent.proactive_check(uid, name)
+                if isinstance(result, dict):
+                    lookahead_text = result.get("text") or ""
+                    check_ins = result.get("check_ins", [])
+                elif result:
+                    lookahead_text = result
+            except Exception:
+                logger.exception(f"proactive_check failed for {uid}")
+
+            parts = ["🌙 <b>Evening wrap</b>"]
+            if recap:
+                parts.append(recap)
+            if lookahead_text:
+                import re as _re
+                lookahead_text = _re.sub(r'\n?---+\n?', '\n\n', lookahead_text).strip()
+                parts.append("🔮 <b>Looking ahead</b>\n\n" + lookahead_text)
+            if len(parts) > 1:
+                for section in _split_sections("\n\n".join(parts)):
+                    await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+            await _send_check_in_cards(context, check_ins, uid)
+        except Exception:
+            logger.exception(f"send_nightly_wrap failed for {uid}")
 
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
@@ -2110,45 +2162,6 @@ async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("send_knowledge_sweep failed")
 
 
-async def send_proactive_checks(context: ContextTypes.DEFAULT_TYPE):
-    if not ALLOWED_IDS:
-        return
-
-    # Check-in lifecycle housekeeping (once daily): lapsed snoozes reopen,
-    # week-old unanswered questions expire and downgrade to an FYI.
-    try:
-        reopened = await asyncio.to_thread(reopen_due_snoozed)
-        for ci in reopened:
-            # Snooze lapsed → re-send the card (its old buttons were removed)
-            await _send_check_in_cards(context, [ci], ci.get("created_by") or ALLOWED_IDS[0])
-        expired = await asyncio.to_thread(expire_stale, 7)
-        for ci in expired:
-            try:
-                from tools.fyis import log_fyi as _log_fyi
-                _log_fyi(ci.get("created_by") or 0, f"Unanswered check-in (expired): {ci['question']}")
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("check-in housekeeping failed")
-
-    USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
-    for uid in ALLOWED_IDS:
-        name = USER_NAMES.get(uid, str(uid))
-        try:
-            result = await agent.proactive_check(uid, name)
-            if not result:
-                continue
-            msg = result.get("text") if isinstance(result, dict) else result
-            if msg:
-                import re as _re
-                msg = _re.sub(r'\n?---+\n?', '\n\n', msg).strip()
-                await context.bot.send_message(chat_id=uid, text=f"🌙 <b>Tonight's check-in</b>\n\n{msg}", parse_mode="HTML")
-            if isinstance(result, dict):
-                await _send_check_in_cards(context, result.get("check_ins", []), uid)
-        except Exception:
-            logger.exception(f"proactive_check failed for {uid}")
-
-
 async def send_trip_milestones(context: ContextTypes.DEFAULT_TYPE):
     """Daily check — fire pre-trip intelligence briefs at milestone days before departure."""
     from tools.trips import get_upcoming_trips
@@ -2298,9 +2311,6 @@ def main():
         app.job_queue.run_daily(send_fyi_graduation, time=REMINDER_TIME, days=(6,))
         # Wedding brief — every Sunday morning
         app.job_queue.run_daily(send_priority_brief, time=REMINDER_TIME, days=(6,))
-        # ── MIDDAY 2pm ───────────────────────────────────────────────
-        # Proactive intelligence check (event-centric, sorted by proximity)
-        app.job_queue.run_daily(send_proactive_checks, time=PROACTIVE_TIME)
         # Trip milestone briefs — fires at 56/28/14/7/2 days before departure
         app.job_queue.run_daily(send_trip_milestones, time=REMINDER_TIME)
         # Appointment pre-brief — nightly check for tomorrow's medical events
@@ -2309,8 +2319,9 @@ def main():
         # Stocks & crypto brief
         app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
         # ── NIGHT 9pm ────────────────────────────────────────────────
-        # Evening recap — every day
-        app.job_queue.run_daily(send_evening_brief, time=EVENING_TIME)
+        # Nightly wrap — recap + forward-looking flags + check-in cards, ONE message
+        # (replaces the old separate 9pm recap and 11pm proactive check)
+        app.job_queue.run_daily(send_nightly_wrap, time=EVENING_TIME)
         # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
         # Capability gap sweep — 1st of each month, Ansen only

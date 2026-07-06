@@ -27,3 +27,15 @@ def save_state(user_id: int, last_output: str, run_date: str) -> None:
         }).execute()
     except Exception:
         pass
+
+
+def append_state(user_id: int, text: str, run_date: str, max_len: int = 6000) -> None:
+    """Append a block (e.g. the morning brief) to last_output so the nightly
+    check can dedup against everything already sent today, not just its own
+    previous output. Keeps the most recent max_len chars."""
+    try:
+        prev = load_state(user_id)
+        combined = ((prev.get("last_output") or "") + "\n\n" + text).strip()
+        save_state(user_id, combined[-max_len:], run_date)
+    except Exception:
+        pass
