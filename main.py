@@ -889,19 +889,31 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
 
 
+_FACTS_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Exact facts", callback_data="shared_facts")]])
+
+
+async def _send_brain_story(context, chat_id: int, placeholder_msg):
+    """Synthesised story view of the shared brain, with a flip to raw facts."""
+    story = await agent.brain_synthesis()
+    sections = _split_sections("<b>🧠 Your story so far</b>\n\n" + story)
+    await placeholder_msg.edit_text(sections[0], parse_mode="HTML",
+                                    reply_markup=_FACTS_BUTTON if len(sections) == 1 else None)
+    for i, section in enumerate(sections[1:], start=2):
+        await context.bot.send_message(
+            chat_id=chat_id, text=section, parse_mode="HTML",
+            reply_markup=_FACTS_BUTTON if i == len(sections) else None,
+        )
+
+
 async def cmd_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     try:
-        summary = get_shared_summary()
-        if not summary.strip():
+        if not (get_shared_summary() or "").strip():
             await update.message.reply_text("Nothing in the shared brain yet. Confirmed decisions will appear here automatically.")
             return
-        text = "<b>🧠 Shared Brain</b>\n\n" + summary
-        sections = _split_sections(text)
-        await update.message.reply_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
+        msg = await update.message.reply_text("Writing your story...")
+        await _send_brain_story(context, update.effective_chat.id, msg)
     except Exception as e:
         logger.exception("cmd_shared failed")
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1014,15 +1026,24 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
     chat_id = query.message.chat_id
 
     if action == "brain":
-        msg = await context.bot.send_message(chat_id=chat_id, text="Synthesising your knowledge base...")
+        msg = await context.bot.send_message(chat_id=chat_id, text="Writing your story...")
         try:
-            text = await agent.brain_synthesis()
-            sections = _split_sections(text)
-            await msg.edit_text(sections[0], parse_mode="HTML")
-            for section in sections[1:]:
-                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+            await _send_brain_story(context, chat_id, msg)
         except Exception as e:
             await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "facts":
+        # Raw shared brain — the exact bullets behind the story
+        try:
+            summary = get_shared_summary()
+            if not (summary or "").strip():
+                await context.bot.send_message(chat_id=chat_id, text="Nothing in the shared brain yet.")
+                return
+            sections = _split_sections("<b>📋 Exact facts — shared brain</b>\n\n" + summary)
+            for section in sections:
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
     elif action == "fyis":
         try:

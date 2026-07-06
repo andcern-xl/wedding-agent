@@ -4524,14 +4524,20 @@ BABY BUDGET:
 LIFE / SHARED BUDGET:
 {shared_budget_text}
 
-Synthesise everything into a clear, organised knowledge base. Group by theme — only include themes that have content:
-🧑‍🤝‍🧑 About Us, 💒 Wedding, 👶 Baby, 🏠 Home & Life, ✈️ Travel & Plans, 💰 Money & Finance, 🍽️ Food & Preferences, 🐾 Pets, 💼 Work
+Write <b>the story of Ansen &amp; Jess, right now</b> — a warm, readable narrative, not a bullet dump. Someone reading it should feel the shape of this season of their lives and how the pieces connect: the wedding, the baby on the way, the plans in motion around both.
 
-For 💰 Money & Finance: give a holistic picture across wedding, baby, and life budgets — total outstanding, what's paid, what's coming. Make it feel like a family finance snapshot.
+STRUCTURE:
+- Open with 2-3 sentences that capture where they are as a couple right now.
+- Then short thematic sections with emoji headers — only themes that have content: 💒 The Wedding, 👶 The Baby, 🏠 Home &amp; Life, ✈️ Travel &amp; Plans, 💰 Money
+- Each section is 1-2 short paragraphs of flowing prose. Connect facts causally and chronologically ("with the wedding 4 months out, ...", "once the baby arrives, ...") instead of listing them.
+- 💰 Money may close with 2-3 snapshot bullets after its prose.
 
-For each other theme, write 2-5 concise bullets of facts. Make it feel like a living document about this couple — not a list of raw messages.
+NON-NEGOTIABLE — EXACT FACTS SURVIVE THE STORY:
+Every concrete fact must appear VERBATIM in the prose: dates, dollar amounts, names, counts, statuses, week numbers. Write "wedding bands came to SGD 2,800", never "a few thousand on bands". Never round, drop, or vague-ify a number or date. If a detail won't flow naturally, tuck it in parentheses rather than lose it. It must be possible to reconstruct every key fact from the story alone.
 
-Format: Telegram HTML only. <b>bold headers</b>. Bullets •. Blank line between sections. Emoji headers. No asterisks."""
+Do not invent details, feelings, or filler. If the data is thin in a theme, keep that section short rather than padding it.
+
+Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line between sections. No asterisks, no markdown."""
 
         resp = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
