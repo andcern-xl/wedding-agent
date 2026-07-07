@@ -1814,7 +1814,7 @@ TOOLS = [
     },
     {
         "name": "save_shared_context",
-        "description": "Save a confirmed fact or decision to the shared brain — injected into BOTH Ansen's and Jess's prompts every single message. Use ONLY for confirmed/decided things: 'we booked X', 'venue confirmed', 'guest cap agreed at N', 'going with vendor Y'. Do NOT use for quotes, maybes, or info that's only useful if asked — those go in log_wedding_drop instead. Keep it to one clear sentence. This should be called IN ADDITION TO log_wedding_drop for wedding decisions, not instead of it.",
+        "description": "Save a confirmed fact or decision to the shared brain — injected into BOTH Ansen's and Jess's prompts every single message. Use ONLY for confirmed/decided things: 'we booked X', 'venue confirmed', 'guest cap agreed at N', 'going with vendor Y'. Do NOT use for quotes, maybes, or info that's only useful if asked — those go in log_wedding_drop instead. QUALITY BAR — a fact must still matter in a month: no transaction logs ('deposited $200'), no todos ('to be logged'), no app-housekeeping ('added categories'), no one-off events that will have passed. Phrase facts so they don't rot: no 'arriving by [date]' or countdown-style numbers; anchor with 'as of [month]' if a figure will drift. Keep it to one clear sentence. This should be called IN ADDITION TO log_wedding_drop for wedding decisions, not instead of it.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -4647,7 +4647,7 @@ For each fact, output one of:
 - NEW       — genuinely new, accurate, worth keeping
 - DUPLICATE — already in the brain (same or equivalent information)
 - STALE     — contradicted by newer confirmed info in the brain (e.g. 'awaiting response' when brain shows confirmed booking)
-- WEAK      — too vague, too obvious, or not worth permanent storage
+- WEAK      — too vague, too obvious, or not worth permanent storage. Also WEAK: transaction logs ('deposited $X'), todos ('to be logged'), app housekeeping, one-off events that will have passed, and anything that stops being true within a month (session counts, arrival dates, 'week N' style counters)
 
 EXISTING SHARED BRAIN:
 {existing_brain or "(empty)"}
