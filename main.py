@@ -502,6 +502,31 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         await update.message.reply_text(f"[DEBUG] {err_type}: {err_msg}")
 
 
+async def _send_or_alert(context, chat_id: int, text: str, job_name: str, **kwargs):
+    """Scheduled-send with delivery-failure detection: HTML send → plain-text
+    retry → DM Ansen the error. A generated-but-undelivered brief is invisible
+    otherwise (the job 'ran', the user got nothing)."""
+    import re as _re
+    kwargs.setdefault("parse_mode", "HTML")
+    try:
+        return await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    except Exception as first_err:
+        plain = _re.sub(r"<[^>]+>", "", text)
+        kwargs.pop("parse_mode", None)
+        try:
+            return await context.bot.send_message(chat_id=chat_id, text=plain[:4000], **kwargs)
+        except Exception:
+            logger.exception(f"{job_name}: delivery failed for chat {chat_id}")
+            try:
+                await context.bot.send_message(
+                    chat_id=ANSEN_ID,
+                    text=f"⚠️ {job_name} failed to deliver to {chat_id}: {str(first_err)[:200]}",
+                )
+            except Exception:
+                pass
+            return None
+
+
 async def _safe_send(msg, text: str, update: Update = None):
     """Send text with HTML parse_mode; fall back to plain text if Telegram rejects the HTML."""
     import re as _re
@@ -542,17 +567,9 @@ async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
         brief = await agent.stocks_brief()
         sections = _split_sections(brief)
         for uid in ALLOWED_IDS:
-            await context.bot.send_message(
-                chat_id=uid,
-                text="📊 <b>Daily Stocks & Crypto Brief</b>",
-                parse_mode="HTML",
-            )
+            await _send_or_alert(context, uid, "📊 <b>Daily Stocks & Crypto Brief</b>", "stocks_brief")
             for section in sections:
-                try:
-                    await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
-                except Exception:
-                    import re as _re
-                    await context.bot.send_message(chat_id=uid, text=_re.sub(r"<[^>]+>", "", section))
+                await _send_or_alert(context, uid, section, "stocks_brief")
     except Exception:
         logger.exception("Error sending stocks brief")
 
@@ -770,11 +787,7 @@ async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
         sections = _split_sections(brief)
         for uid in ALLOWED_IDS:
             for section in sections:
-                try:
-                    await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
-                except Exception:
-                    import re as _re
-                    await context.bot.send_message(chat_id=uid, text=_re.sub(r"<[^>]+>", "", section))
+                await _send_or_alert(context, uid, section, "baby_weekly")
     except Exception:
         logger.exception("Error sending baby weekly brief")
 
@@ -792,13 +805,9 @@ async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.to_thread(_save_loop, "priority_brief", COUPLE, brief, _today)
         sections = _split_sections(brief)
         for uid in ALLOWED_IDS:
-            await context.bot.send_message(
-                chat_id=uid,
-                text="<b>Weekly Planning Check-in</b>",
-                parse_mode="HTML",
-            )
+            await _send_or_alert(context, uid, "<b>Weekly Planning Check-in</b>", "priority_brief")
             for section in sections:
-                await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+                await _send_or_alert(context, uid, section, "priority_brief")
     except Exception:
         logger.exception("Error sending priority brief")
 
@@ -1534,15 +1543,18 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         name = USER_NAMES.get(uid, "")
         try:
             text = await agent.morning_brief(uid, name)
-            await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
-            # Save to loop state so the nightly wrap doesn't repeat it
-            try:
-                from tools.loop_state import save_state as _save_loop
-                from datetime import datetime as _dt
-                today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
-                await asyncio.to_thread(_save_loop, "morning_brief", uid, text, today)
-            except Exception:
-                logger.exception("morning brief state save failed")
+            delivered = await _send_or_alert(context, uid, text, "morning_brief")
+            # Save to loop state so the nightly wrap doesn't repeat it — but only
+            # if it actually reached them, else the delta logic suppresses
+            # content they never saw
+            if delivered is not None:
+                try:
+                    from tools.loop_state import save_state as _save_loop
+                    from datetime import datetime as _dt
+                    today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
+                    await asyncio.to_thread(_save_loop, "morning_brief", uid, text, today)
+                except Exception:
+                    logger.exception("morning brief state save failed")
         except Exception:
             logger.exception(f"send_morning_brief failed for uid {uid}")
 
@@ -1706,7 +1718,7 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
                 parts.append("🔮 <b>Looking ahead</b>\n\n" + lookahead_text)
             if len(parts) > 1:
                 for section in _split_sections("\n\n".join(parts)):
-                    await context.bot.send_message(chat_id=uid, text=section, parse_mode="HTML")
+                    await _send_or_alert(context, uid, section, "nightly_wrap")
             await _send_check_in_cards(context, check_ins, uid)
         except Exception:
             logger.exception(f"send_nightly_wrap failed for {uid}")
@@ -2138,9 +2150,8 @@ async def send_capability_gap_sweep(context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup(rows) if rows else None
 
         sections = _split_sections(text)
-        await context.bot.send_message(chat_id=ANSEN_ID, text=sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await context.bot.send_message(chat_id=ANSEN_ID, text=section, parse_mode="HTML")
+        for section in sections:
+            await _send_or_alert(context, ANSEN_ID, section, "capability_gap_sweep")
         if keyboard:
             await context.bot.send_message(
                 chat_id=ANSEN_ID,
@@ -2155,7 +2166,7 @@ async def send_brain_compress(context: ContextTypes.DEFAULT_TYPE):
     """Monthly: compress shared brain — merge related entries, remove stale ones."""
     try:
         result = await agent.compress_shared_brain()
-        await context.bot.send_message(chat_id=ANSEN_ID, text=f"🧠 <b>Brain compression</b>\n\n{result}", parse_mode="HTML")
+        await _send_or_alert(context, ANSEN_ID, f"🧠 <b>Brain compression</b>\n\n{result}", "brain_compress")
     except Exception:
         logger.exception("send_brain_compress failed")
 
@@ -2195,7 +2206,7 @@ async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
             lines.append("")
         text = "\n".join(lines).rstrip()
         for uid in ALLOWED_IDS:
-            await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+            await _send_or_alert(context, uid, text, "knowledge_sweep")
     except Exception:
         logger.exception("send_knowledge_sweep failed")
 
@@ -2230,7 +2241,7 @@ async def send_trip_milestones(context: ContextTypes.DEFAULT_TYPE):
             msg = await agent.trip_milestone_brief(trip, days_until)
             if msg:
                 for uid in ALLOWED_IDS:
-                    await context.bot.send_message(chat_id=uid, text=msg, parse_mode="HTML")
+                    await _send_or_alert(context, uid, msg, "trip_milestones")
         except Exception:
             logger.exception(f"trip_milestone_brief failed for {trip.get('destination')}")
 
@@ -2273,9 +2284,7 @@ async def send_appointment_prebrief(context: ContextTypes.DEFAULT_TYPE):
                 _save_loop, "appointment_prebrief", COUPLE, f"{names} ({tomorrow_str}):\n{msg}", _today
             )
             for uid in ALLOWED_IDS:
-                await context.bot.send_message(
-                    chat_id=uid, text=header + msg, parse_mode="HTML"
-                )
+                await _send_or_alert(context, uid, header + msg, "appointment_prebrief")
     except Exception:
         logger.exception("send_appointment_prebrief: synthesis failed")
 

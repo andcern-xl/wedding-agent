@@ -1002,19 +1002,26 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
                 t["_owner"] = "shared" if t["visibility"] == "shared" else names.get(uid, str(uid))
                 completed.append(t)
 
-        # Tomorrow's tasks — deduplicated
+        # Tomorrow's tasks + still-overdue tasks — deduplicated
         seen_ids = set()
         tomorrow_tasks: list[dict] = []
+        overdue_tasks: list[dict] = []
         for uid in user_ids:
             for t in get_tasks(uid, include_done=False):
                 if t["id"] in seen_ids:
                     continue
-                if t.get("due_date") != tomorrow_str:
-                    continue
-                seen_ids.add(t["id"])
-                t = dict(t)
-                t["_owner"] = "shared" if t["visibility"] == "shared" else names.get(uid, str(uid))
-                tomorrow_tasks.append(t)
+                due = t.get("due_date")
+                if due == tomorrow_str:
+                    seen_ids.add(t["id"])
+                    t = dict(t)
+                    t["_owner"] = "shared" if t["visibility"] == "shared" else names.get(uid, str(uid))
+                    tomorrow_tasks.append(t)
+                elif due and due < today_str:
+                    seen_ids.add(t["id"])
+                    t = dict(t)
+                    t["_owner"] = "shared" if t["visibility"] == "shared" else names.get(uid, str(uid))
+                    t["_days_overdue"] = (_local_today() - date.fromisoformat(due)).days
+                    overdue_tasks.append(t)
 
         # Wedding drops today
         today_drops = [d for d in get_recent_drops(limit=30) if d["ts"][:10] == today_str]
@@ -1068,6 +1075,13 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
                 lines.append(f"  • {t['task']}{_owner_label(t)}")
             parts.append(f"TOMORROW ({tomorrow_weekday.upper()}):\n" + "\n".join(lines))
 
+        if overdue_tasks:
+            lines = [
+                f"  ⚠️ {t['task']}{_owner_label(t)} — day {t['_days_overdue']} overdue"
+                for t in sorted(overdue_tasks, key=lambda x: -x["_days_overdue"])[:6]
+            ]
+            parts.append("STILL OVERDUE (never suppress these — one terse line each):\n" + "\n".join(lines))
+
         # Relevant shared-brain facts for cross-checking (e.g. a booking that
         # makes a "pending" item stale)
         try:
@@ -1086,7 +1100,7 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
         person_list = " and ".join(names.values()) if names else "both of you"
 
         already_block = f"""
-ALREADY SENT LAST NIGHT (do NOT re-narrate any of this; vary tonight's opening from it):
+ALREADY SENT LAST NIGHT (do NOT re-narrate any of this; vary tonight's opening from it — EXCEPTION: overdue/unresolved items are never suppressed, mention them in one terse line with the day count):
 {already_sent.strip()}
 """ if already_sent.strip() else ""
 
@@ -3579,7 +3593,10 @@ Rules:
 OPEN GAP RULES — apply before deciding what to surface:
 • If a previous gap now has an OPEN TASK addressing it → being handled, skip it
 • If a previous gap is resolved (visa field now set, booking confirmed in FYIs/brain) → skip it
-• REPEAT OFFENDERS: if a gap above is STILL unresolved and you already described it in prose, do NOT describe it in prose again. Either call ask_check_in ONCE (buttons force a decision and end the nagging) or stay silent about it. Re-explaining the same gap two days running is a failure mode, not diligence.
+• REPEAT OFFENDERS — escalate, never go silent: if a gap above is STILL unresolved and you already described it in prose:
+  (a) No check-in card exists for it (check OPEN CHECK-INS) → call ask_check_in for it NOW. Escalating an old unresolved gap takes priority over carding a new topic within the 2-card cap.
+  (b) A card is already open → one terse nudge line at most, and only every ~3 days, with how long it's been open ("Room block: Elenna quiet 3 weeks, card still waiting 👆").
+  Re-EXPLAINING a gap two days running is the failure mode. Going fully silent on an unresolved gap in an active domain (wedding this close to 7 Nov, baby, a trip within 28 days) is a WORSE failure mode.
 • Only re-surface a previous gap in prose if: (a) event is now ≤3 days away, or (b) genuinely new information changes the picture — and even then, one line max
 • Gaps NOT in the previous list → surface as normal if actionable"""
 
@@ -4979,6 +4996,7 @@ Write the morning text for {user_name}. You know their full life; write like it.
 THIS IS A DELTA, NOT A STATUS REPORT:
 - Lead with the single most important thing about TODAY — an appointment, a deadline, the one thing that must happen. Start with that, not a greeting formula.
 - Then only what's NEW or CHANGED since last night's wrap: new FYIs, something that became urgent, a date that moved. If it's in ALREADY TOLD THEM and nothing about it changed, it does not appear.
+- EXCEPTION — OVERDUE never goes quiet: anything in OVERDUE (and any gap unresolved for 7+ days) appears EVERY day until it's done or rescheduled. Escalate brevity, not silence: full context the first time, then one terse line with the count ("Elenna follow-up — day 19 overdue"). Silently dropping an overdue item is a failure mode.
 - Standing facts (baby week number, trips weeks away, open goals) earn a mention only when something about them is different today or genuinely due.
 - A quiet day is a SHORT text. Two or three sentences is a great brief. Never pad to fill sections.
 
