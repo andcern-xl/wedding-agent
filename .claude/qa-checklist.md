@@ -20,6 +20,8 @@ the table exists in its SQL file:
 | `user_summaries` | `supabase_wedding.sql` |
 | `wedding_payments` | `supabase_wedding.sql` |
 | `check_ins` | `supabase_check_ins.sql` |
+| `brain_entries` | `supabase_brain_entries.sql` |
+| `loop_state` | `supabase_loop_state.sql` |
 
 New table → create the SQL file AND tell the user to run it in Supabase
 BEFORE deploying (Railway deploys code instantly; Supabase must go first).

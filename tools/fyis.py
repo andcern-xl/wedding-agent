@@ -93,15 +93,14 @@ def archive_fyi(fyi_id: str) -> bool:
         return False
 
 
-def promote_fyi(fyi_id: str) -> str | None:
-    """Mark as promoted and return the content for saving to shared brain."""
+def promote_fyi(fyi_id: str) -> dict | None:
+    """Mark as promoted and return {content, category} for saving to shared brain."""
     try:
-        rows = get_client().table("fyis").select("content").eq("id", fyi_id).execute().data
+        rows = get_client().table("fyis").select("content,category").eq("id", fyi_id).execute().data
         if not rows:
             return None
-        content = rows[0]["content"]
         get_client().table("fyis").update({"status": "promoted"}).eq("id", fyi_id).execute()
-        return content
+        return rows[0]
     except Exception:
         return None
 

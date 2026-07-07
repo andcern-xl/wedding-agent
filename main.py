@@ -760,7 +760,13 @@ async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
     try:
-        brief = await agent.baby_brief()
+        from tools.loop_state import COUPLE, load_state as _load_loop, save_state as _save_loop
+        from datetime import datetime as _dt
+        _prev = (await asyncio.to_thread(_load_loop, "baby_weekly", COUPLE)).get("last_output") or ""
+        brief = await agent.baby_brief(already_sent=_prev)
+        if brief:
+            _today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
+            await asyncio.to_thread(_save_loop, "baby_weekly", COUPLE, brief, _today)
         sections = _split_sections(brief)
         for uid in ALLOWED_IDS:
             for section in sections:
@@ -777,7 +783,13 @@ async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
     try:
-        brief = await agent.priority_brief()
+        from tools.loop_state import COUPLE, load_state as _load_loop, save_state as _save_loop
+        from datetime import datetime as _dt
+        _prev = (await asyncio.to_thread(_load_loop, "priority_brief", COUPLE)).get("last_output") or ""
+        brief = await agent.priority_brief(already_sent=_prev)
+        if brief:
+            _today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
+            await asyncio.to_thread(_save_loop, "priority_brief", COUPLE, brief, _today)
         sections = _split_sections(brief)
         for uid in ALLOWED_IDS:
             await context.bot.send_message(
@@ -1523,14 +1535,14 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         try:
             text = await agent.morning_brief(uid, name)
             await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
-            # Feed into proactive state so the nightly wrap doesn't repeat it
+            # Save to loop state so the nightly wrap doesn't repeat it
             try:
-                from tools.proactive_state import append_state
+                from tools.loop_state import save_state as _save_loop
                 from datetime import datetime as _dt
                 today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
-                await asyncio.to_thread(append_state, uid, f"MORNING BRIEF (already sent {today} 9am):\n{text}", today)
+                await asyncio.to_thread(_save_loop, "morning_brief", uid, text, today)
             except Exception:
-                logger.exception("morning brief state append failed")
+                logger.exception("morning brief state save failed")
         except Exception:
             logger.exception(f"send_morning_brief failed for uid {uid}")
 
@@ -1651,7 +1663,21 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
             user_names[uid] = str(uid)
 
     try:
-        recap = await agent.evening_brief(ALLOWED_IDS, user_names)
+        from tools.loop_state import COUPLE, load_state as _load_loop, save_state as _save_loop
+        from datetime import datetime as _dt
+        _today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
+        # Last night's wrap + this morning's briefs — the wrap must not re-narrate either
+        _blocks = []
+        _prev_wrap = (await asyncio.to_thread(_load_loop, "nightly_wrap", COUPLE)).get("last_output") or ""
+        if _prev_wrap:
+            _blocks.append(_prev_wrap)
+        for _uid in ALLOWED_IDS:
+            _mb = await asyncio.to_thread(_load_loop, "morning_brief", _uid)
+            if _mb.get("last_run_date") == _today and _mb.get("last_output"):
+                _blocks.append(f"MORNING BRIEF (sent {_today} 9am):\n{_mb['last_output']}")
+        recap = await agent.evening_brief(ALLOWED_IDS, user_names, already_sent="\n\n".join(_blocks))
+        if recap:
+            await asyncio.to_thread(_save_loop, "nightly_wrap", COUPLE, recap, _today)
     except Exception:
         logger.exception("evening brief generation failed")
         recap = ""
@@ -1779,10 +1805,15 @@ async def _handle_fyi_callback(query, context, data: str):
             await query.edit_message_reply_markup(reply_markup=None)
             await context.bot.send_message(chat_id=chat_id, text="📌 Kept for another 30 days.")
         elif action == "promote":
-            content = promote_fyi(fyi_id)
-            if content:
+            row = promote_fyi(fyi_id)
+            if row and row.get("content"):
                 try:
-                    append_shared_summary(content)
+                    from tools.user_memory import normalize_domain
+                    append_shared_summary(
+                        row["content"],
+                        domain=normalize_domain(row.get("category")),
+                        source="fyi_promote",
+                    )
                 except Exception:
                     pass
             await query.edit_message_reply_markup(reply_markup=None)
@@ -1856,7 +1887,8 @@ def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
     notes = []
     if action == "save_decision":
         try:
-            append_shared_summary(decision)
+            from tools.user_memory import normalize_domain
+            append_shared_summary(decision, domain=normalize_domain(category), source="check_in")
             notes.append("saved to shared brain")
         except Exception:
             logger.exception("check-in decision save failed")
@@ -2136,6 +2168,12 @@ async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
         result = await agent.knowledge_sweep()
         approved = result.get("approved", {})
         rejected_count = result.get("rejected_count", 0)
+        if result.get("verifier_failed"):
+            await context.bot.send_message(
+                chat_id=ANSEN_ID,
+                text="⚠️ Weekly brain sweep: the fact verifier errored, so nothing was written this run. Worth a look in the Railway logs.",
+            )
+            return
         if not approved:
             return
         _CAT_HEADERS = {
@@ -2224,10 +2262,16 @@ async def send_appointment_prebrief(context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        msg = await agent.appointment_pre_brief(medical_events)
+        from tools.loop_state import COUPLE, load_state as _load_loop, save_state as _save_loop
+        _prev = (await asyncio.to_thread(_load_loop, "appointment_prebrief", COUPLE)).get("last_output") or ""
+        msg = await agent.appointment_pre_brief(medical_events, already_sent=_prev)
         if msg:
             names = ", ".join(e.get("title", "appointment") for e in medical_events)
             header = f"📅 <b>Tomorrow: {names}</b>\n\n"
+            _today = _datetime.now(REMINDER_TIMEZONE).date().isoformat()
+            await asyncio.to_thread(
+                _save_loop, "appointment_prebrief", COUPLE, f"{names} ({tomorrow_str}):\n{msg}", _today
+            )
             for uid in ALLOWED_IDS:
                 await context.bot.send_message(
                     chat_id=uid, text=header + msg, parse_mode="HTML"

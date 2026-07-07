@@ -468,7 +468,7 @@ FORMATTING RULES — follow exactly:
         )
         return _fix_md(response.content[0].text)
 
-    async def priority_brief(self) -> str:
+    async def priority_brief(self, already_sent: str = "") -> str:
         all_drops = get_recent_drops(limit=150)
         all_decisions = get_all_memory()
         fin = payment_summary()
@@ -529,8 +529,13 @@ FORMATTING RULES — follow exactly:
 
         context = "\n\n".join(context_parts)
 
-        prompt = f"""{context}
+        already_block = f"""
+LAST WEEK'S BRIEF (already sent — don't repeat a priority verbatim; if it's still open, escalate it as "still open from last week" instead, and lead with what's NEW):
+{already_sent.strip()}
+""" if already_sent.strip() else ""
 
+        prompt = f"""{context}
+{already_block}
 You are a proactive wedding planning coordinator. The couple gets this weekly briefing automatically — they haven't asked a question, you're initiating contact to keep them on track.
 
 Analyse their planning data and generate an opinionated, prioritised action brief. Consider:
@@ -960,7 +965,8 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
         )
         return _fix_md(response.content[0].text), merged
 
-    async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
+    async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None,
+                            already_sent: str = "") -> str:
         """End-of-day recap: what was done today, what's coming tomorrow."""
         today_str = _local_today().isoformat()
         tomorrow_str = (_local_today() + timedelta(days=1)).isoformat()
@@ -1045,11 +1051,30 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
                 lines.append(f"  • {t['task']}{_owner_label(t)}")
             parts.append(f"TOMORROW ({tomorrow_weekday.upper()}):\n" + "\n".join(lines))
 
+        # Relevant shared-brain facts for cross-checking (e.g. a booking that
+        # makes a "pending" item stale)
+        try:
+            from tools.user_memory import get_shared_summary as _get_shared_v
+            _query = " ".join(
+                [e.get("title", "") for e in tomorrow_events]
+                + [t.get("task", "") for t in tomorrow_tasks]
+            )
+            _brain = _relevant_bullets(_query, await asyncio.to_thread(_get_shared_v), max_bullets=8)
+            if _brain:
+                parts.append("SHARED BRAIN (relevant facts — cross-check the above against these):\n" + _brain)
+        except Exception:
+            pass
+
         context = "\n\n".join(parts)
         person_list = " and ".join(names.values()) if names else "both of you"
 
-        prompt = f"""{context}
+        already_block = f"""
+ALREADY SENT LAST NIGHT (do NOT re-narrate any of this; vary tonight's opening from it):
+{already_sent.strip()}
+""" if already_sent.strip() else ""
 
+        prompt = f"""{context}
+{already_block}
 Write the end-of-day text for {person_list}. Everything above happened TODAY or is due TOMORROW — it's already a delta, so just tell the story of it.
 
 SHAPE:
@@ -1738,6 +1763,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "The shared fact or decision to remember. One clear sentence."},
+                "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Which part of their life this fact belongs to. Pick the closest one; default life."},
             },
             "required": ["content"],
         },
@@ -1774,6 +1800,7 @@ TOOLS = [
                 "content": {"type": "string", "description": "The key information to save — concise, factual, one clear paragraph or a few bullet points."},
                 "audience": {"type": "string", "enum": ["shared", "private"], "description": "Who this is for: 'shared' = both Ansen and Jess; 'private' = current user only."},
                 "topic": {"type": "string", "description": "Short topic label, e.g. 'confinement nanny options', 'prenatal supplements', 'venue deposit policy'"},
+                "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Which part of their life this belongs to. Pick the closest one; default life."},
             },
             "required": ["content", "audience"],
         },
@@ -2272,7 +2299,7 @@ class UnifiedAgent:
             topic = inputs.get("topic", "")
             label = f"[{topic}] {content}" if topic else content
             if audience == "shared":
-                await self._upsert_shared(label)
+                await self._upsert_shared(label, domain=inputs.get("domain", "life"))
                 return {"status": "saved", "audience": "shared", "topic": topic}
             else:
                 from tools.user_memory import get_summary as _get_sum, save_summary as _save_sum, get_message_count as _mc
@@ -2283,7 +2310,7 @@ class UnifiedAgent:
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
-            await self._upsert_shared(content)
+            await self._upsert_shared(content, domain=inputs.get("domain", "life"))
             return {"status": "saved", "content": content}
 
         if name == "save_baby_knowledge":
@@ -2341,7 +2368,6 @@ class UnifiedAgent:
             )
             from tools.user_memory import (
                 get_summary as _um_get, save_summary as _um_save,
-                get_shared_summary as _shared_get, append_shared_summary as _shared_append,
                 get_message_count as _um_count,
             )
             topic = inputs["topic"]
@@ -2371,24 +2397,26 @@ class UnifiedAgent:
                     report["added"].append(f"baby_knowledge: {correct[:120]}")
                     report["fixed_in"].append("baby_knowledge")
 
-            # --- shared_summary ---
+            # --- shared_summary (vault) ---
             if "shared_summary" in stores:
-                shared = _shared_get()
-                if wrong and any(w in shared.lower() for w in (wrong.split() if wrong else [])):
-                    # Replace the wrong line(s) in the summary
-                    lines = shared.split("\n")
-                    wrong_words_set = set(w for w in wrong.split() if len(w) > 3)
-                    cleaned = [l for l in lines if not any(w in l.lower() for w in wrong_words_set)]
-                    if len(cleaned) < len(lines):
-                        new_shared = "\n".join(cleaned).strip()
-                        from tools.db import get_client as _gc
-                        from datetime import datetime as _dt2, timezone as _tz2
-                        _gc().table("user_summaries").upsert({
-                            "user_id": 0, "summary": new_shared,
-                            "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
-                        }).execute()
+                from tools.user_memory import (
+                    get_active_entries as _bv_get, supersede_entries as _bv_sup,
+                    add_brain_entry as _bv_add, normalize_domain as _bv_dom,
+                )
+                wrong_words_set = set(w for w in wrong.split() if len(w) > 3)
+                if wrong_words_set:
+                    stale_entries = [
+                        e for e in await asyncio.to_thread(_bv_get)
+                        if any(w in e["fact"].lower() for w in wrong_words_set)
+                    ]
+                    if stale_entries:
+                        await asyncio.to_thread(_bv_sup, [e["id"] for e in stale_entries])
+                        report["removed"].extend(e["fact"][:120] for e in stale_entries)
                         report["fixed_in"].append("shared_summary")
-                await self._upsert_shared(f"[CORRECTION — {topic}] {correct}")
+                await asyncio.to_thread(
+                    _bv_add, f"[CORRECTION — {topic}] {correct}",
+                    _bv_dom(topic), "correction",
+                )
                 report["added"].append(f"shared_summary: {correct[:120]}")
 
             # --- user_summary for both users ---
@@ -2696,55 +2724,113 @@ class UnifiedAgent:
                     return messages[i:]
         return []  # nothing clean — start fresh
 
-    async def _upsert_shared(self, new_content: str) -> str:
-        """Write to shared brain with conflict resolution — replaces stale entries on the same topic."""
-        from tools.user_memory import get_shared_summary as _get_shared, save_summary as _save_sum, get_message_count as _mc
-        from tools.db import get_client as _gc
-        from datetime import datetime as _dt2, timezone as _tz2
+    async def _upsert_shared(self, new_content: str, domain: str = "life",
+                             source: str = "chat") -> str:
+        """Write one fact to the shared brain vault. Merges against same-domain
+        active entries only — stale rows are superseded, never rewritten.
+        Failure mode is a plain insert (can't lose unrelated entries)."""
+        from tools.user_memory import (
+            add_brain_entry, get_active_entries, normalize_domain, supersede_entries,
+        )
 
-        existing = _get_shared()
-        today = _local_today().isoformat()
-        new_bullet = f"• {today}: {new_content}"
+        domain = normalize_domain(domain)
+        entries = await asyncio.to_thread(get_active_entries, domain)
+        if not entries:
+            row = await asyncio.to_thread(add_brain_entry, new_content, domain, source)
+            return row.get("fact", new_content)
 
-        if not existing:
-            _gc().table("user_summaries").upsert({
-                "user_id": 0, "summary": new_bullet,
-                "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
-            }).execute()
-            return new_bullet
+        numbered = "\n".join(f"{i}: {e['fact_date']}: {e['fact']}" for i, e in enumerate(entries))
+        prompt = f"""You maintain one domain of a couple's shared fact brain. A new fact is coming in.
 
-        prompt = f"""You maintain a shared brain — a list of confirmed facts for a couple. Each entry is a bullet: • YYYY-MM-DD: [fact]
+Existing {domain} facts (index: date: fact):
+{numbered}
 
-Current shared brain:
-{existing}
-
-New information to incorporate:
+New information:
 {new_content}
 
-Task: Return the updated shared brain.
-Rules:
-1. If the new info updates something already present (same topic, same entity, new value) → REPLACE the old bullet with the new one. Do NOT keep both.
-2. If the new info contradicts an existing entry → keep ONLY the new one.
-3. If the new info is genuinely new (no related entry exists) → ADD it as a new bullet with today's date ({today}).
-4. Keep entries lean — one fact per bullet, no commentary.
-5. Return ONLY the bullets, nothing else. No headers, no explanation."""
+Which existing facts does the new info REPLACE or CONTRADICT (same topic/entity, new value)? Reply with ONLY JSON:
+{{"supersedes": [indexes of facts now stale, or empty list], "store": "the new fact as one clean sentence"}}"""
 
         try:
             response = await self.client.messages.create(
                 model=CHAT_MODEL,
-                max_tokens=1200,
+                max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
-            updated = response.content[0].text.strip()
+            raw = response.content[0].text.strip()
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            verdict = json.loads(match.group()) if match else {}
+            store = (verdict.get("store") or new_content).strip()
+            stale_ids = [
+                entries[i]["id"] for i in (verdict.get("supersedes") or [])
+                if isinstance(i, int) and 0 <= i < len(entries)
+            ]
         except Exception:
-            # Fallback: plain append
-            updated = f"{existing}\n{new_bullet}".strip()
+            store, stale_ids = new_content, []
 
-        _gc().table("user_summaries").upsert({
-            "user_id": 0, "summary": updated,
-            "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
-        }).execute()
-        return updated
+        row = await asyncio.to_thread(add_brain_entry, store, domain, source)
+        if stale_ids:
+            await asyncio.to_thread(supersede_entries, stale_ids, row.get("id"))
+        return store
+
+    async def _upsert_shared_batch(self, facts: list[str], domain: str,
+                                   source: str = "sweep") -> None:
+        """Merge N facts into one domain with a single LLM call (no per-fact
+        write amplification). Fallback: plain insert of every fact."""
+        from tools.user_memory import (
+            add_brain_entry, get_active_entries, normalize_domain, supersede_entries,
+        )
+
+        if not facts:
+            return
+        domain = normalize_domain(domain)
+        entries = await asyncio.to_thread(get_active_entries, domain)
+        if not entries:
+            for f in facts:
+                await asyncio.to_thread(add_brain_entry, f, domain, source)
+            return
+
+        numbered = "\n".join(f"{i}: {e['fact_date']}: {e['fact']}" for i, e in enumerate(entries))
+        new_lines = "\n".join(f"- {f}" for f in facts)
+        prompt = f"""You maintain one domain of a couple's shared fact brain. New facts are coming in.
+
+Existing {domain} facts (index: date: fact):
+{numbered}
+
+New facts:
+{new_lines}
+
+For each new fact, decide what it replaces. Reply with ONLY a JSON array, one object per new fact in order:
+[{{"store": "the fact as one clean sentence", "supersedes": [indexes of existing facts now stale, or empty list]}}, ...]"""
+
+        try:
+            response = await self.client.messages.create(
+                model=CHAT_MODEL,
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            verdicts = json.loads(match.group()) if match else []
+            if not isinstance(verdicts, list) or not verdicts:
+                raise ValueError("no verdicts")
+        except Exception:
+            for f in facts:
+                await asyncio.to_thread(add_brain_entry, f, domain, source)
+            return
+
+        stale_all: set = set()
+        for i, f in enumerate(facts):
+            v = verdicts[i] if i < len(verdicts) and isinstance(verdicts[i], dict) else {}
+            store = (v.get("store") or f).strip()
+            row = await asyncio.to_thread(add_brain_entry, store, domain, source)
+            ids = [
+                entries[j]["id"] for j in (v.get("supersedes") or [])
+                if isinstance(j, int) and 0 <= j < len(entries) and entries[j]["id"] not in stale_all
+            ]
+            if ids:
+                stale_all.update(ids)
+                await asyncio.to_thread(supersede_entries, ids, row.get("id"))
 
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", open_check_ins: str = "") -> dict:
         import logging as _logging
@@ -2995,7 +3081,7 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
         try:
             sigs = [f"{a.get('ticker') or a['name']} {'🟢' if a['sentiment']=='bullish' else '🔴' if a['sentiment']=='bearish' else '🟡'}"
                     for a in researched[:5]]
-            await self._upsert_shared(f"📊 Stocks {today}: {', '.join(sigs)}")
+            await self._upsert_shared(f"📊 Stocks {today}: {', '.join(sigs)}", domain="money", source="stocks")
         except Exception:
             pass
 
@@ -3373,10 +3459,11 @@ Rules:
         prev_output = ""
         prev_date = ""
         try:
-            from tools.proactive_state import load_state as _load_proactive_state
-            _prev = _load_proactive_state(user_id)
-            prev_output = _prev.get("last_output") or ""
-            prev_date = _prev.get("last_run_date") or ""
+            from tools.loop_state import already_sent as _already_sent, load_state as _load_loop
+            prev_output = await asyncio.to_thread(
+                _already_sent, user_id, ["morning_brief", "proactive_check", "nightly_wrap"]
+            )
+            prev_date = (await asyncio.to_thread(_load_loop, "proactive_check", user_id)).get("last_run_date") or ""
         except Exception:
             pass
 
@@ -3526,8 +3613,8 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
                 fixed = _fix_md(result) if result and not result.upper().startswith("NOTHING") else None
                 if fixed:
                     try:
-                        from tools.proactive_state import save_state as _save_proactive_state
-                        _save_proactive_state(user_id, result, today_str)
+                        from tools.loop_state import save_state as _save_loop
+                        await asyncio.to_thread(_save_loop, "proactive_check", user_id, result, today_str)
                     except Exception:
                         pass
                 return {"text": fixed, "check_ins": new_check_ins}
@@ -3676,14 +3763,19 @@ Format: Telegram HTML only. <b>headers</b>. Blank line between every bullet. Emo
         )
         return resp.content[0].text.strip()
 
-    async def baby_brief(self) -> str:
+    async def baby_brief(self, already_sent: str = "") -> str:
         """Weekly pregnancy update — current week, what's developing, upcoming milestones."""
         info = pregnancy_summary()
         milestones = upcoming_milestones(within_weeks=4)
         milestones_text = "\n".join(milestones) if milestones else "No major milestones in the next 4 weeks."
 
-        prompt = f"""You are a practical pregnancy advisor. Write a concise weekly check-in for a first-time parent couple.
+        already_block = f"""
+LAST WEEK'S BRIEF (already sent — lead with what's NEW or CHANGED since this; never repeat an action item they were already given unless it's now urgent):
+{already_sent.strip()}
+""" if already_sent.strip() else ""
 
+        prompt = f"""You are a practical pregnancy advisor. Write a concise weekly check-in for a first-time parent couple.
+{already_block}
 PREGNANCY DATA:
 • Week {info['week']}, Day {info['day']}
 • Trimester: {info['trimester']}
@@ -3826,21 +3918,24 @@ Format in Telegram HTML. Short and specific — don't pad."""
         return _fix_md(response.content[0].text)
 
     async def compress_shared_brain(self) -> str:
-        """Compress shared brain — merge related entries, remove stale/past ones."""
-        from tools.user_memory import get_shared_summary as _get_shared
-        from tools.db import get_client as _gc
-        from datetime import datetime as _dt2, timezone as _tz2
+        """Compress the shared brain vault per domain — merge related entries,
+        supersede stale/past ones. Fail-closed: a domain whose compression
+        produces no parseable bullets is left untouched."""
+        from tools.user_memory import (
+            DOMAINS, add_brain_entry, get_active_entries, supersede_entries,
+        )
 
-        shared = _get_shared()
-        if not shared:
-            return "Shared brain is empty."
-        bullets = [l for l in shared.split('\n') if l.strip()]
-        if len(bullets) < 10:
-            return f"Shared brain is lean ({len(bullets)} entries — no compression needed)."
+        BULLET_RE = re.compile(r"^•\s*(\d{4}-\d{2}-\d{2}):\s*(.+)$")
+        reports = []
+        for domain in DOMAINS:
+            entries = await asyncio.to_thread(get_active_entries, domain)
+            if len(entries) < 10:
+                continue
 
-        prompt = f"""Compress this shared brain — a list of facts for a couple (Ansen and Jess).
+            rendered = "\n".join(f"• {e['fact_date']}: {e['fact']}" for e in entries)
+            prompt = f"""Compress this {domain} section of a shared fact brain for a couple (Ansen and Jess).
 
-{shared}
+{rendered}
 
 Rules:
 1. MERGE related entries on the same topic into one bullet (keep the most recent/specific version)
@@ -3852,18 +3947,30 @@ Rules:
 7. Format: • YYYY-MM-DD: [fact]  (use the most recent relevant date)
 8. Return ONLY the compressed bullets, nothing else"""
 
-        response = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        compressed = response.content[0].text.strip()
-        compressed_count = len([l for l in compressed.split('\n') if l.strip()])
-        _gc().table("user_summaries").upsert({
-            "user_id": 0, "summary": compressed,
-            "updated_at": _dt2.now(_tz2.utc).isoformat(), "message_count": 0,
-        }).execute()
-        return f"✅ Compressed: {len(bullets)} → {compressed_count} entries."
+            try:
+                response = await self.client.messages.create(
+                    model=SYNTHESIS_MODEL,
+                    max_tokens=2000,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                parsed = [
+                    m.groups() for m in
+                    (BULLET_RE.match(l.strip()) for l in response.content[0].text.split("\n"))
+                    if m
+                ]
+            except Exception:
+                parsed = []
+            if not parsed:
+                continue  # fail-closed — leave this domain as-is
+
+            for fact_date, fact in parsed:
+                await asyncio.to_thread(add_brain_entry, fact.strip(), domain, "compress", fact_date)
+            await asyncio.to_thread(supersede_entries, [e["id"] for e in entries])
+            reports.append(f"{domain}: {len(entries)} → {len(parsed)}")
+
+        if not reports:
+            return "Shared brain is lean — no compression needed."
+        return "✅ Compressed: " + ", ".join(reports)
 
     async def trip_milestone_brief(self, trip: dict, days_until: int) -> str | None:
         """Pre-trip intelligence fired at milestone days (56/28/14/7/2 before departure)."""
@@ -4028,7 +4135,8 @@ RULES:
                 break
         return None
 
-    async def appointment_pre_brief(self, medical_events: list[dict]) -> str | None:
+    async def appointment_pre_brief(self, medical_events: list[dict],
+                                    already_sent: str = "") -> str | None:
         """Night-before synthesis for medical/health appointments — questions, what to bring, relevant knowledge."""
         from tools.baby_knowledge import get_entries as _get_baby, search_entries as _search_baby
         from tools.fyis import get_fyis as _get_fyis
@@ -4109,7 +4217,10 @@ RELEVANT KNOWLEDGE BASE:
 
 RELEVANT HEALTH FYIs:
 {chr(10).join(fyi_lines) if fyi_lines else "  none"}
-
+{f'''
+PREVIOUS PRE-BRIEF (already sent — if it covered this SAME appointment, respond NOTHING; only send if this is a new appointment or something material changed):
+{already_sent.strip()}
+''' if already_sent.strip() else ""}
 Write a concise tonight reminder for tomorrow's appointment. Cover:
 1. <b>❓ Questions to ask</b> — pull from their saved list, prioritise by relevance to this appointment type. Add 1-2 smart ones they might have missed.
 2. <b>📋 Bring</b> — ID, referral letters, test results they've mentioned, vitamins list if relevant, insurance card
@@ -4328,12 +4439,13 @@ When asked to build something:
         )
         return response.content[0].text
 
-    async def knowledge_sweep(self) -> dict:
+    async def knowledge_sweep(self, dry_run: bool = False) -> dict:
         """Three-phase maker-checker knowledge sweep.
 
-        Phase 1 — Extract: four parallel domain specialists propose candidate facts.
-        Phase 2 — Verify: one checker gates each fact against the existing brain.
-        Phase 3 — Write: only approved facts are written; report includes rejection stats.
+        Phase 1 — Extract: five parallel domain specialists propose candidate facts (haiku).
+        Phase 2 — Verify: one checker gates each fact against the existing brain (sonnet).
+                  Fail-closed: if the verifier errors, nothing is written.
+        Phase 3 — Write: approved facts batch-merged into the vault, one call per domain.
 
         Returns {approved: {category: [facts]}, rejected_count: int}
         """
@@ -4405,7 +4517,7 @@ Output only the JSON array."""
             prompt = EXTRACTOR_TMPL.format(domain=domain, scope=scope, context=context_block)
             try:
                 resp = await self.client.messages.create(
-                    model=SYNTHESIS_MODEL,
+                    model=CHAT_MODEL,
                     max_tokens=400,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -4459,7 +4571,7 @@ Output a JSON array with one object per fact, in order:
 
 Be strict. When in doubt, reject."""
 
-        approved_grouped: dict[str, list[str]] = {{}}
+        approved_grouped: dict[str, list[str]] = {}
         rejected_count = 0
 
         try:
@@ -4473,9 +4585,12 @@ Be strict. When in doubt, reject."""
             verdicts: list[dict] = json.loads(match.group()) if match else []
 
             for v in verdicts:
-                idx = v.get("index")
+                try:
+                    idx = int(v.get("index"))
+                except (TypeError, ValueError):
+                    continue
                 verdict = v.get("verdict", "WEAK")
-                if idx is None or idx >= len(all_candidates):
+                if not 0 <= idx < len(all_candidates):
                     continue
                 domain, fact = all_candidates[idx]
                 if verdict == "NEW":
@@ -4483,15 +4598,18 @@ Be strict. When in doubt, reject."""
                 else:
                     rejected_count += 1
         except Exception:
-            # Verifier failed — fall back to writing all candidates
-            for domain, fact in all_candidates:
-                approved_grouped.setdefault(domain, []).append(fact)
+            # Verifier failed — fail closed: never write unverified facts to permanent memory
+            import logging as _sweep_log
+            _sweep_log.getLogger(__name__).exception(
+                "knowledge_sweep: verifier failed — writing nothing this run"
+            )
+            return {"approved": {}, "rejected_count": 0, "verifier_failed": True}
 
-        # ── Phase 3: Write approved facts ────────────────────────────
-        for facts in approved_grouped.values():
-            for fact in facts:
+        # ── Phase 3: Batch-write approved facts, one merge per domain ─
+        if not dry_run:
+            for domain, facts in approved_grouped.items():
                 try:
-                    await self._upsert_shared(fact)
+                    await self._upsert_shared_batch(facts, domain, source="sweep")
                 except Exception:
                     pass
 
@@ -4580,9 +4698,9 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
     async def category_status(self, category: str) -> str:
         return await self._wedding.category_status(category)
 
-    async def priority_brief(self) -> str:
+    async def priority_brief(self, already_sent: str = "") -> str:
         from datetime import date as _date, datetime as _dt
-        wedding_brief = await self._wedding.priority_brief()
+        wedding_brief = await self._wedding.priority_brief(already_sent=already_sent)
 
         # Prepend full-week calendar to the Sunday brief
         try:
@@ -4731,9 +4849,24 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
         # What they were already told — last night's wrap (+ anything earlier still in state)
         already_sent = ""
         try:
-            from tools.proactive_state import load_state as _load_ps
-            _prev = await asyncio.to_thread(_load_ps, user_id)
-            already_sent = (_prev.get("last_output") or "").strip()
+            from tools.loop_state import already_sent as _already_sent
+            already_sent = (await asyncio.to_thread(
+                _already_sent, user_id, ["nightly_wrap", "proactive_check", "morning_brief"]
+            )).strip()
+        except Exception:
+            pass
+
+        # Relevant shared-brain facts — this is what the STALENESS rule below
+        # cross-checks FYIs against
+        try:
+            from tools.user_memory import get_shared_summary as _get_shared_v
+            _query = " ".join(
+                [e.get("title", "") for e in today_events]
+                + [t.get("task", "") for t in (overdue + due_today + upcoming)]
+            )
+            _brain = _relevant_bullets(_query, await asyncio.to_thread(_get_shared_v), max_bullets=12)
+            if _brain:
+                parts.append("SHARED BRAIN (confirmed facts — cross-check FYIs against these):\n" + _brain)
         except Exception:
             pass
 
@@ -4778,8 +4911,9 @@ FORMATTING: Pure HTML — <b>bold</b> for at most one or two load-bearing facts.
     async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         return await self._daily.combined_daily_brief(user_ids, user_names)
 
-    async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> str:
-        return await self._daily.evening_brief(user_ids, user_names)
+    async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None,
+                            already_sent: str = "") -> str:
+        return await self._daily.evening_brief(user_ids, user_names, already_sent=already_sent)
 
     async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
         """Private tasks grouped by daily category, urgency-sorted within each."""

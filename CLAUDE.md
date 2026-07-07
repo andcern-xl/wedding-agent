@@ -22,7 +22,7 @@ Deployed on Railway (auto-deploys on push to `main`).
 - `tools/notifications.py` — scheduled notifications
 
 ## Database (Supabase)
-Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`
+Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`
 
 `daily_tasks` columns: `id, user_id, task, due_date, repeat, visibility, done, created_at, completed_at, assigned_to, category`
 
@@ -60,9 +60,11 @@ Two users in `ALLOWED_USER_IDS` env var. Ansen and Jess.
 ## Junk filter
 Tasks starting with: `fyi`, `• fyi`, `ansen deposited`, `jess deposited`, `ansen paid`, `jess paid`
 
-## Shared brain
-`get_shared_summary()` / `append_shared_summary()` in tools/user_memory.py.
-Agent tool `save_shared_context` writes to it. Injected into both users' system prompts.
+## Shared brain (vault)
+Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding/travel/money/life), `fact_date`, `status` (active/superseded), `source`. Writers supersede stale rows instead of rewriting — `_upsert_shared(fact, domain, source)` and `_upsert_shared_batch` in agent.py, `add_brain_entry`/`supersede_entries` in tools/user_memory.py. `get_shared_summary()` renders active entries in the legacy bullet grammar `• YYYY-MM-DD: [domain] fact` (falls back to the frozen legacy blob on `user_summaries` user_id=0 if the table is empty — that blob is the rollback path, never write it). Injected into chat, proactive check, and morning/evening briefs (relevance-filtered via `_relevant_bullets`). One-time migration: `migrate_brain.py` (dry-run default).
+
+## Loop state (delta briefs)
+`loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)
