@@ -1050,27 +1050,17 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
 
         prompt = f"""{context}
 
-Generate a concise end-of-day recap for {person_list}. Structure:
+Write the end-of-day text for {person_list}. Everything above happened TODAY or is due TOMORROW — it's already a delta, so just tell the story of it.
 
-<b>✅ Done today</b>
-Tasks completed today. If nothing was done, say so in one line.
+SHAPE:
+- Flowing prose, not sections. One short paragraph on today (what got done, what was shared — name who did/shared what naturally, "Jess booked...", not "[Jess]"), one on tomorrow (times for calendar events).
+- If today was empty and tomorrow is clear, say so in one line and stop. A two-line wrap on a quiet day is perfect.
+- No emoji section headers, no "Done today:" labels. Bullets only if listing 4+ parallel items.
+- Vary how it opens night to night. Never open with a greeting formula.
 
----
+{VOICE_RULES}
 
-<b>💬 FYIs</b>
-Updates and info shared today by each person — what your partner wants you to know. Show who shared each one in brackets e.g. [Ansen]. Skip this section entirely if none.
-
----
-
-<b>💒 Wedding today</b>
-Any wedding notes or updates dropped today. Skip this section entirely if none.
-
----
-
-<b>📅 Tomorrow</b>
-Calendar events (with times) and tasks due tomorrow. Skip this section entirely if nothing.
-
-Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **asterisks** — Telegram renders them as literal characters, not bold. Keep it tight."""
+FORMATTING: Pure HTML — <b>bold</b> for at most one or two key facts, times inline. NEVER **asterisks** — Telegram renders them literally. Keep it tight."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -1104,6 +1094,40 @@ def route_intent(text: str) -> str:
     if is_daily and not is_wedding:
         return "daily"
     return "wedding"
+
+
+# ---------------------------------------------------------------------------
+# Voice — shared by chat replies, briefs, and the nightly wrap.
+# No curly braces in this string: it gets embedded in .format() templates.
+# ---------------------------------------------------------------------------
+
+VOICE_RULES = """VOICE — this is the difference between sounding like a person and sounding like a bot. Non-negotiable:
+
+You text like a sharp friend who happens to know everything about their life. Not an assistant, not a productivity app.
+
+BANNED — these instantly read as bot:
+- Opening with a greeting + emoji header ("Good morning ☀️ —") in the same shape every time. Vary it, or just start with the thing that matters.
+- Emoji section headers in conversational replies. Headers are for long briefs only, max 2, and only when there are genuinely two topics.
+- Bullet lists of fewer than 4 items — write a sentence instead.
+- "Great question", "I've gone ahead and", "Certainly!", "Let me know if you need anything else", "Hope this helps"
+- Restating what they just told you before acting on it.
+- Exclamation marks unless they're excited first.
+- Bolding half the message. Bold at most one or two load-bearing facts.
+
+HOW A PERSON TEXTS (match this register):
+Them: "paid the canvaseety deposit"
+You: "Logged. $280 down, $610 left on the wedding day."
+
+Them: "what's left for the wedding this month?"
+You: "Honestly just two things: chase Elenna on the room block (2+ weeks quiet now) and the guest gifts. Bands and H&M are sorted."
+
+Them: "remind me to call the clinic friday"
+You: "Set for Friday the 10th."
+
+Them: "ugh the sixt thing again"
+You: "Yeah, third time it's come up. Airport pickup, book it this week before TML, done. Want me to make it a task?"
+
+Notice: short, specific, zero ceremony, references what they already know without re-explaining it. When there's nothing useful to add, one line is the right length."""
 
 
 # ---------------------------------------------------------------------------
@@ -1405,7 +1429,8 @@ TASK QUALITY RULES — enforce these strictly:
 HOW TO RESPOND
 - Be concise and practical — reference specific details from what they've shared
 - Cross-reference both brains naturally — no need to label responses as "Wedding Brain" or "Daily Brain"
-- Sound like a sharp friend who knows everything they've told you
+
+""" + VOICE_RULES + """
 
 ORDERING
 - Calendar events: always list chronologically (soonest first)
@@ -1418,7 +1443,7 @@ Telegram uses parse_mode=HTML. **Asterisks and underscores are NOT rendered** �
 - Bold/headers: <b>text</b> ONLY — never **text**
 - Bullets: • (not - or *)
 - Blank line between every bullet — not just between sections. Dense walls of text are unreadable on mobile.
-- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🥂 after-party, 🗓️ logistics, 🔥 urgent, ✅ confirmed, 🔍 in progress, ❌ untouched, 📅 calendar, 🎉 social/parties, 💪 task, 🚨 overdue
+- In structured LIST VIEWS only (comparisons, status rundowns, /plan-style output), start each bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🥂 after-party, 🗓️ logistics, 🔥 urgent, ✅ confirmed, 🔍 in progress, ❌ untouched, 📅 calendar, 🎉 social/parties, 💪 task, 🚨 overdue. In ordinary conversational replies, no emoji bullets — see VOICE.
 
 NEVER USE MARKDOWN TABLES — Telegram does not render them. Pipe characters (|) and dashes show up as raw ugly text.
 WRONG (do not do this):
@@ -3464,10 +3489,12 @@ RULES:
 - Use search_web when you detect a travel destination, visa question, or anything needing real-time info — don't guess
 - DECISION QUESTIONS: when a flag needs {user_name}'s call (which option, who handles it, before/after, book or skip), call ask_check_in — it sends a separate card with tap buttons and the answer is saved automatically. Do NOT also pose the question in your text; mention the topic in one line and move on. Max 2 ask_check_in calls per run. Purely informational flags stay as prose.
 - Lead with imminent events if any — give each one a named header using the ACTUAL day name from the calendar date, e.g. ⚡ <b>Tomorrow: [Event Name]</b> only if it's genuinely the next calendar day; otherwise use the weekday name: ⚡ <b>Tuesday: [Event Name]</b>. Never label something "Tomorrow" unless it falls on tomorrow's date.
-- Be selective — max 5 bullets total. If nothing is genuinely worth flagging, say NOTHING
+- Be selective — max 3 items on a normal night. If nothing is genuinely worth flagging, say NOTHING
 - Don't repeat what the morning brief already covers (today's due tasks)
-- Sound like a sharp friend who notices things, not a notification bot
-- FORMATTING: Telegram HTML only — <b>bold</b>, • bullets, emojis. Never use ** or _ or --- separators. Use a blank line between sections instead of ---.
+- Write flowing prose per item, not emoji-header-per-item template blocks. Short bold lead-in per item is fine; no calendar emojis and day-name headers unless an event is genuinely imminent.
+- FORMATTING: Telegram HTML only — <b>bold</b>. Never use ** or _ or --- separators. Use a blank line between items.
+
+{VOICE_RULES}
 
 CALENDAR IS SOURCE OF TRUTH:
 - If a task date and a calendar event date differ — the calendar is correct, full stop. Do NOT flag this as a question or ask for confirmation. Simply note "Task updated to match calendar" if relevant, and move on. Never say "one of these is wrong" or ask which date is right.
@@ -4701,34 +4728,44 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
         except Exception:
             pass
 
+        # What they were already told — last night's wrap (+ anything earlier still in state)
+        already_sent = ""
+        try:
+            from tools.proactive_state import load_state as _load_ps
+            _prev = await asyncio.to_thread(_load_ps, user_id)
+            already_sent = (_prev.get("last_output") or "").strip()
+        except Exception:
+            pass
+
         context = "\n\n".join(parts)
+        already_block = f"""
+ALREADY TOLD THEM (last night's wrap and earlier — do NOT re-narrate any of this):
+{already_sent}
+""" if already_sent else ""
 
         prompt = f"""{context}
+{already_block}
+Write the morning text for {user_name}. You know their full life; write like it.
 
-Write a morning update for {user_name}. You are a smart, proactive personal assistant who knows their full life context.
+THIS IS A DELTA, NOT A STATUS REPORT:
+- Lead with the single most important thing about TODAY — an appointment, a deadline, the one thing that must happen. Start with that, not a greeting formula.
+- Then only what's NEW or CHANGED since last night's wrap: new FYIs, something that became urgent, a date that moved. If it's in ALREADY TOLD THEM and nothing about it changed, it does not appear.
+- Standing facts (baby week number, trips weeks away, open goals) earn a mention only when something about them is different today or genuinely due.
+- A quiet day is a SHORT text. Two or three sentences is a great brief. Never pad to fill sections.
 
-STRUCTURE: Use emoji section headers to break the brief into 3–5 scannable sections. Only include sections that have actual content. Suggested sections (adapt as needed):
+SHAPE:
+- Flowing prose, 1–3 short paragraphs. No emoji section headers. No bullets unless listing 4+ parallel items (rare).
+- Weave connections instead of separating topics: "Dr Janice at 10 — bring the test reports, and it's the chance to settle the NIPT timing" beats a Baby section and a Today section.
+- Vary the opening every day. If ALREADY TOLD THEM shows yesterday started with a greeting, start differently today. Starting mid-thought is fine: "Two things today —"
+- Last line: → /tasks /fyis for the full picture
 
-📅 <b>Today</b> — what's on the calendar, what needs doing today
-🍼 <b>Baby</b> — week milestone, upcoming appointment, anything relevant (only if there's something worth saying)
-💍 <b>Wedding</b> — active wedding tasks or upcoming decisions (only if relevant)
-✈️ <b>Trips</b> — upcoming travel, open gaps (only if relevant)
-🎵 <b>Shows</b> — upcoming events (Ansen only, only if relevant)
-🎯 <b>Goals</b> — next step on any active multi-step project (only if there's an active goal)
-💰 <b>Money</b> — financial items, payments, DBS/investments (only if relevant)
-⚠️ <b>Heads up</b> — overdue items, expiring things, urgent flags (only if there's something)
-
-WHAT TO DO:
-- Under each header, write 2–4 short sentences max. Natural, friendly tone — not a bullet dump.
-- Look for connections: a FYI that relates to a task, a trip that links to a visa question. Weave them within the relevant section.
-- Skip sections entirely if nothing meaningful to say — don't pad.
-- Last line (outside sections): → /tasks /fyis for the full picture
+{VOICE_RULES}
 
 STALENESS — before surfacing any FYI, cross-check it:
 - If a FYI says "awaiting / enquiry sent / pending / looking into" AND the shared brain or calendar confirms that thing is now booked/confirmed → skip the stale FYI, use the confirmed version only
 - Never surface both the pending and confirmed version of the same thing
 
-FORMATTING: Pure HTML. Section headers as: <b>emoji Title</b> on its own line. <b>bold</b> key names/terms inline. No bullet points. No **asterisks**. This appears as a Telegram message on a phone — keep it readable at a glance."""
+FORMATTING: Pure HTML — <b>bold</b> for at most one or two load-bearing facts. No **asterisks**. Telegram message on a phone."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
