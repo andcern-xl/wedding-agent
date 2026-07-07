@@ -1194,7 +1194,7 @@ This is your memory from all past conversations, compressed every 2 messages by 
 If someone says "do you remember X" and it's in the profile: confirm and use it. If it's not: say honestly "I don't have that noted — tell me again and I'll remember it."
 If it contains a PREFERENCES section, follow those as standing orders without being asked again.
 
-SHARED BRAIN — confirmed couple decisions and permanent memories:
+SHARED BRAIN — the slice most relevant to this message (recent facts + keyword matches). This is NOT the whole vault: the full brain lives in the query_brain tool, filed by domain (baby/wedding/travel/money/life). Before saying "I don't have that", flagging something as unresolved, or asking them to repeat a detail — call query_brain first. It's cheap; when in doubt, query:
 {shared_summary}
 
 RECENT FYIs — notes and updates from the last 30 days. Reference naturally when relevant — don't quote back verbatim:
@@ -1757,6 +1757,18 @@ TOOLS = [
         },
     },
     {
+        "name": "query_brain",
+        "description": "Search the shared brain vault — the couple's confirmed facts and decisions, filed by domain with dates. Call this whenever an answer depends on what's already known or decided (bookings, amounts, statuses, who's handling what, past decisions) instead of guessing or asking them to repeat themselves. Also call it before flagging something as missing/unresolved — it may already be settled. Cheap and fast; when in doubt, query.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What you're looking for — keywords work best, e.g. 'venue deposit', 'NIPT timing', 'Bangkok airport'"},
+                "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Optional — restrict to one life domain. Omit to search everything."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "save_shared_context",
         "description": "Save a confirmed fact or decision to the shared brain — injected into BOTH Ansen's and Jess's prompts every single message. Use ONLY for confirmed/decided things: 'we booked X', 'venue confirmed', 'guest cap agreed at N', 'going with vendor Y'. Do NOT use for quotes, maybes, or info that's only useful if asked — those go in log_wedding_drop instead. Keep it to one clear sentence. This should be called IN ADDITION TO log_wedding_drop for wedding decisions, not instead of it.",
         "input_schema": {
@@ -2307,6 +2319,26 @@ class UnifiedAgent:
                 updated = (existing + f"\n• {_local_today().isoformat()}: {label}").strip()
                 _save_sum(user_id, updated, _mc(user_id))
                 return {"status": "saved", "audience": "private", "topic": topic}
+
+        if name == "query_brain":
+            from tools.user_memory import get_active_entries, normalize_domain
+            domain = inputs.get("domain")
+            entries = await asyncio.to_thread(
+                get_active_entries, normalize_domain(domain) if domain else None
+            )
+            q_words = {w for w in inputs.get("query", "").lower().split() if len(w) > 2}
+            def _score(e: dict) -> int:
+                text = e["fact"].lower()
+                return sum(1 for w in q_words if w in text)
+            scored = sorted(entries, key=_score, reverse=True)
+            hits = [e for e in scored if _score(e) > 0][:15] or scored[:10]
+            return {
+                "matches": [
+                    {"date": e["fact_date"], "domain": e["domain"], "fact": e["fact"]}
+                    for e in hits
+                ],
+                "total_active_facts": len(entries),
+            }
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
@@ -3494,7 +3526,7 @@ OPEN GAP RULES — apply before deciding what to surface:
 • Gaps NOT in the previous list → surface as normal if actionable"""
 
         # --- Proactive tools available to this check ---
-        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in")]
+        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in", "query_brain")]
 
         system = f"""You are a proactive intelligence agent for {user_name}. Today is {today_str} ({tz_name}).
 
