@@ -4,8 +4,10 @@ from zoneinfo import ZoneInfo
 _SGT = ZoneInfo("Asia/Singapore")
 
 # ── Pregnancy constants ────────────────────────────────────────────────────────
-LMP = date(2026, 5, 14)       # Last menstrual period
-DUE_DATE = LMP + timedelta(days=280)  # 40 weeks
+# Due date confirmed by OBGYN (shared brain, 5 Jul 2026): 20 Feb 2027.
+# LMP here is the dating-equivalent derived from that due date (due − 280d).
+DUE_DATE = date(2027, 2, 20)
+LMP = DUE_DATE - timedelta(days=280)  # 2026-05-16
 
 
 def _today() -> date:
@@ -13,12 +15,15 @@ def _today() -> date:
 
 
 def current_week() -> int:
+    """Gestational age in COMPLETED weeks (medical convention: at 7w4d you
+    are 'week 7' / '7 weeks pregnant', not week 8)."""
     days = (_today() - LMP).days
-    return max(1, min(42, days // 7 + 1))
+    return max(1, min(42, days // 7))
 
 
 def current_day_in_week() -> int:
-    return (_today() - LMP).days % 7 + 1
+    """Day component of gestational age, 0–6 (the 'd' in '7w4d')."""
+    return (_today() - LMP).days % 7
 
 
 def trimester() -> int:
@@ -67,7 +72,7 @@ MILESTONES = [
     (36, "Group B strep swab — weeks 35–37"),
     (36, "Weekly OB appointments begin"),
     (38, "Hospital bag should be ready"),
-    (40, "Due date — 18 February 2027"),
+    (40, "Due date — 20 February 2027"),
 ]
 
 

@@ -49,7 +49,7 @@ def classify_with_llm(items: list[dict]) -> dict[str, str]:
     numbered = "\n".join(f"{it['idx']}: {it['fact']}" for it in items)
     prompt = f"""Classify each fact into exactly one domain: baby, wedding, travel, money, life.
 
-Context: Ansen and Jess are getting married 7 Nov 2026 and expecting a baby 18 Feb 2027.
+Context: Ansen and Jess are getting married 7 Nov 2026 and expecting a baby 20 Feb 2027.
 - baby: pregnancy, birth, hospital/delivery, OBGYN, baby gear/admin
 - wedding: venue, vendors, guests, attire, wedding payments
 - travel: trips, flights, hotels, visas

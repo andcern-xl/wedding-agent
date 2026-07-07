@@ -3595,7 +3595,7 @@ IDENTITIES:
 - Ansen: Singaporean passport
 - Jess / Jessica: US passport (American)
 - Wedding: 7 November 2026 ({wedding_days} days away)
-- Baby due: 18 February 2027
+- Baby due: 20 February 2027
 
 YOUR CONTEXT:
 {profile or "(no profile)"}
@@ -4179,7 +4179,7 @@ RELATED TASKS:
 IDENTITIES:
 - Ansen: Singaporean passport (visa-free for most countries)
 - Jess: US passport (American — requirements often differ)
-- Wedding: 7 November 2026  |  Baby due: 18 February 2027
+- Wedding: 7 November 2026  |  Baby due: 20 February 2027
 
 YOUR JOB: Surface only the OPEN GAPS above. {"Use search_web to check current entry requirements for any open visa gaps — look for recent system changes (ETA schemes, biometric requirements, health declarations)." if need_visa_search else "Visa is already confirmed — skip the visa search."}
 
