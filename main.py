@@ -128,6 +128,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/shared — tasks, reminders, FYIs, shared brain",
         "/baby — pregnancy updates, milestones, knowledge base",
         "/stocks — newsletter digest + buy/hold/skip",
+        "/finances — portfolio & money picture",
         "/me — your personal tasks (includes shows)\n",
         "Or just talk — drop a note, screenshot, or question.",
     ]
@@ -150,8 +151,61 @@ def _shared_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
         [InlineKeyboardButton("💰 Budget", callback_data="shared_budget"),
          InlineKeyboardButton("✈️ Travel", callback_data="shared_travel")],
-        [InlineKeyboardButton("🛒 Groceries", callback_data="shared_groceries")],
+        [InlineKeyboardButton("🛒 Groceries", callback_data="shared_groceries"),
+         InlineKeyboardButton("💼 Finances", callback_data="shared_finances")],
     ])
+
+
+def _render_finances() -> str:
+    """Portfolio + this month's Split spend — the couple's money picture."""
+    from tools.holdings import summary as holdings_summary
+
+    OWNER_LABEL = {"ansen": "Ansen", "jess": "Jess", "joint": "Joint"}
+    TYPE_EMOJI = {"crypto": "🪙", "stock": "📈", "etf": "📊", "fund": "🏦", "cash": "💵", "other": "📦"}
+
+    s = holdings_summary()
+    lines = ["💼 <b>Finances</b>\n"]
+
+    if not s["items"]:
+        lines.append("No holdings tracked yet. Just tell me what you own — \"we have $17k in StashAway\", \"bought 0.2 ETH\" — and I'll build the picture.")
+    else:
+        by_owner: dict = {}
+        for h in s["items"]:
+            by_owner.setdefault(h.get("owner") or "joint", []).append(h)
+        for owner in ("joint", "ansen", "jess"):
+            items = by_owner.get(owner)
+            if not items:
+                continue
+            lines.append(f"<b>{OWNER_LABEL[owner]}</b>")
+            for h in items:
+                emoji = TYPE_EMOJI.get(h.get("asset_type"), "📦")
+                if h.get("units") is not None:
+                    pos = f"{h['units']:g} units"
+                    if h.get("avg_cost") is not None:
+                        pos += f" @ {h['avg_cost']:g}"
+                else:
+                    pos = f"{h.get('currency','SGD')} {float(h.get('value') or 0):,.0f}"
+                plat = f" · {h['platform']}" if h.get("platform") else ""
+                lines.append(f"{emoji} {h['asset']} — <b>{pos}</b>{plat}  <i>(as of {h.get('as_of')})</i>")
+            lines.append("")
+        if s["totals_by_currency"]:
+            totals = "  •  ".join(f"<b>{cur} {amt:,.0f}</b>" for cur, amt in s["totals_by_currency"].items())
+            lines.append(f"📊 Tracked value: {totals}")
+        if s["stale"]:
+            stale_names = ", ".join(f"{h['asset']} ({h['days_stale']}d)" for h in s["stale"][:4])
+            lines.append(f"\n⚠️ Stale values: {stale_names} — tell me the current numbers and I'll update them.")
+
+    try:
+        from tools.split_expenses import get_expenses
+        spend = get_expenses(days=30)
+        if spend["expenses"]:
+            top = sorted(spend["totals_by_category"].items(), key=lambda kv: -kv[1])[:4]
+            top_str = ", ".join(f"{cat} {amt:,.0f}" for cat, amt in top)
+            lines.append(f"\n🧾 <b>Split — last 30 days</b>: {spend['currency']} {spend['total']:,.0f} ({top_str})")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
 
 
 def _category_menu() -> InlineKeyboardMarkup:
@@ -324,6 +378,7 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💒 /wedding — catch up, plan, tasks, reminders, shared, FYIs, categories",
         "👶 /baby — weekly brief, knowledge base, milestones",
         "📊 /stocks — newsletter digest + buy/hold/skip\n",
+        "💼 /finances — portfolio & money picture\n",
         "<b>Shortcuts</b>",
         "/bringmeuptospeed — full wedding overview",
         "/plan /tasks /reminders /shared /fyis",
@@ -539,6 +594,17 @@ async def _safe_send(msg, text: str, update: Update = None):
             await msg.edit_text(plain)
         except Exception:
             await msg.edit_text(plain[:4000])
+
+
+async def cmd_finances(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    try:
+        text = await asyncio.to_thread(_render_finances)
+        for section in _split_sections(text):
+            await update.message.reply_text(section, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Couldn't load finances right now ({type(e).__name__}).")
 
 
 async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1178,6 +1244,14 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             text = "\n".join(lines).rstrip()
             keyboard = InlineKeyboardMarkup(rows)
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+    elif action == "finances":
+        try:
+            text = await asyncio.to_thread(_render_finances)
+            for section in _split_sections(text):
+                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
@@ -2308,6 +2382,7 @@ def main():
             BotCommand("shared", "🧠 Shared tasks, FYIs & brain"),
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
+            BotCommand("finances", "💼 Portfolio & money picture"),
             BotCommand("me", "👤 My personal tasks"),
         ]
         await application.bot.set_my_commands(commands)
@@ -2333,6 +2408,7 @@ def main():
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
     app.add_handler(CommandHandler("stocks", cmd_stocks))
+    app.add_handler(CommandHandler("finances", cmd_finances))
     app.add_handler(CommandHandler("baby", cmd_baby))
     app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
     app.add_handler(CommandHandler("shows", cmd_shows))

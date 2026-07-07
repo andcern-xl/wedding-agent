@@ -1344,6 +1344,8 @@ BUDGET ROUTING — three buckets, mutually exclusive:
 
 When someone mentions money/costs: classify which bucket first, then log to the right one. Never put life expenses in wedding budget. Never put wedding costs in shared budget.
 
+INVESTMENTS ARE NOT EXPENSES: buying/selling/holding an asset, portfolio values, "StashAway is at X" → log_holding (NEVER a budget table, NEVER the brain — values live in holdings). Questions about what they own or net worth → read_holdings. Questions about day-to-day spending ("how much on the pet this month") → read_split_expenses (their Split app).
+
 ⚠️ Ambiguous signals → ask before filing:
 If content could fit more than one domain, or the signal is weak, ask:
 "Should I save this to [best guess]? Or somewhere else?"
@@ -1800,6 +1802,48 @@ TOOLS = [
                 "num_results": {"type": "integer", "description": "Number of results. Default 5, max 10."},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "log_holding",
+        "description": "Create or update an investment holding. Call when they mention buying/selling/holding an asset or give a current value: 'bought 0.2 ETH on Coinbase', 'StashAway is at $17.2k now', 'sold the Tesla shares'. If a holding for that asset+owner exists it's UPDATED (value/units + as_of refreshed); otherwise created. Investments NEVER go in budget tables or the brain — values live here.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "asset": {"type": "string", "description": "Asset name, e.g. 'Bitcoin', 'StashAway General Investing', 'Tesla'"},
+                "ticker": {"type": "string", "description": "Ticker if it has one: BTC, TSLA. Omit for funds/cash."},
+                "asset_type": {"type": "string", "enum": ["stock", "etf", "fund", "crypto", "cash", "other"]},
+                "owner": {"type": "string", "enum": ["ansen", "jess", "joint"], "description": "Default joint unless clearly personal."},
+                "platform": {"type": "string", "description": "Where it's held: StashAway, IBKR, Coinbase, DBS..."},
+                "units": {"type": "number", "description": "Quantity held (crypto/stocks). Omit for value-tracked funds/cash."},
+                "avg_cost": {"type": "number", "description": "Average cost per unit, if known."},
+                "value": {"type": "number", "description": "Current total value (funds/cash, or when they quote a value)."},
+                "currency": {"type": "string", "description": "Default SGD."},
+                "notes": {"type": "string"},
+                "closed": {"type": "boolean", "description": "true if they sold/exited the whole position."},
+            },
+            "required": ["asset", "asset_type"],
+        },
+    },
+    {
+        "name": "read_holdings",
+        "description": "Read the couple's investment portfolio: all active holdings with values/units, per-currency totals, and which positions have stale values (not updated in 30+ days). Use for any question about what they own, net worth, or before giving investment takes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "enum": ["ansen", "jess", "joint"], "description": "Optional filter."},
+            },
+        },
+    },
+    {
+        "name": "read_split_expenses",
+        "description": "Read Ansen & Jess's day-to-day spending from their Split app (split.frontleft.group). Use for questions like 'how much did we spend on the pet this month?' or 'what did groceries cost lately'. Returns recent expenses, who paid, and totals by category. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Lookback window in days. Default 30."},
+                "category": {"type": "string", "enum": ["food", "groceries", "transport", "accommodation", "entertainment", "shopping", "utilities", "health", "travel", "baby", "wedding", "pet", "home", "other"], "description": "Optional single-category filter."},
+            },
         },
     },
     {
@@ -2379,6 +2423,67 @@ class UnifiedAgent:
                 updated = (existing + f"\n• {_local_today().isoformat()}: {label}").strip()
                 _save_sum(user_id, updated, _mc(user_id))
                 return {"status": "saved", "audience": "private", "topic": topic}
+
+        if name == "log_holding":
+            from tools.holdings import add_holding, close_holding, find_holding, update_holding
+            asset = inputs["asset"].strip()
+            # Match across all owners unless one was explicitly given — "Tesla is
+            # at $X" must update Ansen's Tesla, not create a joint duplicate
+            explicit_owner = inputs.get("owner")
+            existing = await asyncio.to_thread(find_holding, inputs.get("ticker") or asset, explicit_owner)
+            owner = explicit_owner or (existing or {}).get("owner") or "joint"
+            if inputs.get("closed"):
+                if existing:
+                    await asyncio.to_thread(close_holding, existing["id"])
+                    return {"status": "closed", "asset": existing["asset"]}
+                return {"status": "not_found", "asset": asset}
+            if existing:
+                row = await asyncio.to_thread(
+                    update_holding, existing["id"],
+                    inputs.get("units"), inputs.get("avg_cost"),
+                    inputs.get("value"), inputs.get("notes"),
+                )
+                return {"status": "updated", "holding": {k: row.get(k) for k in ("asset", "units", "value", "currency", "as_of")}}
+            row = await asyncio.to_thread(
+                add_holding, asset, inputs.get("asset_type", "stock"), owner,
+                inputs.get("ticker"), inputs.get("platform"), inputs.get("units"),
+                inputs.get("avg_cost"), inputs.get("value"),
+                inputs.get("currency", "SGD"), inputs.get("notes"),
+            )
+            return {"status": "created", "holding": {k: row.get(k) for k in ("asset", "units", "value", "currency", "as_of")}}
+
+        if name == "read_holdings":
+            from tools.holdings import summary
+            s = await asyncio.to_thread(summary)
+            items = s["items"]
+            stale = s["stale"]
+            totals = s["totals_by_currency"]
+            if inputs.get("owner"):
+                items = [h for h in items if h.get("owner") == inputs["owner"]]
+                stale = [h for h in stale if h.get("owner") == inputs["owner"]]
+                totals = {}
+                for h in items:
+                    if h.get("value") is not None:
+                        cur = h.get("currency") or "SGD"
+                        totals[cur] = totals.get(cur, 0) + float(h["value"])
+            return {
+                "holdings": [
+                    {k: h.get(k) for k in ("asset", "ticker", "asset_type", "owner",
+                                           "platform", "units", "avg_cost", "value",
+                                           "currency", "as_of", "notes")}
+                    for h in items
+                ],
+                "totals_by_currency": totals,
+                "stale_positions": [
+                    {"asset": h["asset"], "days_stale": h["days_stale"]} for h in stale
+                ],
+            }
+
+        if name == "read_split_expenses":
+            from tools.split_expenses import get_expenses
+            return await asyncio.to_thread(
+                get_expenses, inputs.get("days", 30), inputs.get("category")
+            )
 
         if name == "save_behavior_feedback":
             from tools.loop_state import COUPLE, load_state as _ls_load, save_state as _ls_save
@@ -3102,7 +3207,29 @@ Output the list only — no headers, no explanation."""}],
             return f"<b>📰 Newsletters this week</b>\n\n{subj_list}\n\n<i>No investment topics identified.</i>"
 
         # ── STEP 4: web-research top 5 assets (3 searches each, concurrent) ─
-        top = assets[:5]
+        # Held assets always make the research cut — their positions come first.
+        holdings_list: list[dict] = []
+        try:
+            from tools.holdings import get_holdings as _get_holdings
+            holdings_list = await asyncio.to_thread(_get_holdings)
+        except Exception:
+            pass
+
+        def _held(a: dict) -> dict | None:
+            aname = (a.get("name") or "").lower().strip()
+            at = (a.get("ticker") or "").lower()
+            for h in holdings_list:
+                ht = (h.get("ticker") or "").lower()
+                hname = (h.get("asset") or "").lower().strip()
+                # Exact ticker or exact name; substring only for multi-word names
+                # (so a Bitcoin holding doesn't flag a Bitcoin Cash story)
+                if (ht and ht == at) or hname == aname or (" " in hname and hname in aname):
+                    return h
+            return None
+
+        for a in assets:
+            a["held"] = _held(a)
+        top = sorted(assets, key=lambda a: a["held"] is None)[:5]
 
         async def _research(asset: dict) -> dict:
             name = asset["name"]
@@ -3132,24 +3259,38 @@ Output the list only — no headers, no explanation."""}],
         # ── STEP 5: generate analyst brief ────────────────────────────────
         research_block = ""
         for a in researched:
+            h = a.get("held")
+            held_line = ""
+            if h:
+                pos = f"{h['units']} units" if h.get("units") is not None else f"{h.get('currency','SGD')} {h.get('value')}"
+                held_line = f"\n⭐ THEY HOLD THIS: {pos} on {h.get('platform') or '?'} (as of {h.get('as_of')})"
             research_block += f"""
-━━━ {a['name']} ({a.get('ticker','')}) | {a.get('type','')} | newsletter: {a.get('sentiment','')}
+━━━ {a['name']} ({a.get('ticker','')}) | {a.get('type','')} | newsletter: {a.get('sentiment','')}{held_line}
 Newsletter context: {a.get('thesis','(subject line mention only)')}
 Price/momentum: {a['d_price'] or '(no search data)'}
 Fundamentals: {a['d_fund'] or '(no search data)'}
 Analyst/news: {a['d_news'] or '(no search data)'}
 """
 
+        portfolio_block = ""
+        if holdings_list:
+            pos_lines = []
+            for h in holdings_list:
+                pos = f"{h['units']} units" if h.get("units") is not None else f"{h.get('currency','SGD')} {h.get('value')}"
+                pos_lines.append(f"• {h['asset']} ({h.get('ticker') or h.get('asset_type')}): {pos}, as of {h.get('as_of')}")
+            portfolio_block = "\nTHEIR PORTFOLIO (lead the brief with what THEIR positions did; explicitly flag any held asset the newsletters are bearish on):\n" + "\n".join(pos_lines) + "\n"
+
         brief_resp = await self.client.messages.create(
             model=CHAT_MODEL,
             max_tokens=3500,
-            messages=[{"role": "user", "content": f"""You are a financial analyst. Today is {today}.
+            messages=[{"role": "user", "content": f"""You are a financial analyst working for Ansen and Jess. Today is {today}.
 Write an investment brief for these assets. Use the research data below — it's from web searches done right now.
-
+{portfolio_block}
 {research_block}
 
 For each asset write a real analyst take. If search data has numbers, use them.
 If it says "no search data", still give your best view from what you know + the newsletter signal.
+Assets marked ⭐ THEY HOLD THIS come FIRST in the brief with a "your position" line; a bearish newsletter signal on a held asset is the single most important thing to flag.
 
 FORMAT (Telegram HTML — no markdown):
 
@@ -3183,7 +3324,7 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
 
         # ── STEP 6: save signals to shared brain ──────────────────────────
         try:
-            sigs = [f"{a.get('ticker') or a['name']} {'🟢' if a['sentiment']=='bullish' else '🔴' if a['sentiment']=='bearish' else '🟡'}"
+            sigs = [f"{a.get('ticker') or a['name']} {'🟢' if a['sentiment']=='bullish' else '🔴' if a['sentiment']=='bearish' else '🟡'}{'(held)' if a.get('held') else ''}"
                     for a in researched[:5]]
             await self._upsert_shared(f"📊 Stocks {today}: {', '.join(sigs)}", domain="money", source="stocks")
         except Exception:
@@ -3601,7 +3742,7 @@ OPEN GAP RULES — apply before deciding what to surface:
 • Gaps NOT in the previous list → surface as normal if actionable"""
 
         # --- Proactive tools available to this check ---
-        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in", "query_brain")]
+        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in", "query_brain", "read_holdings")]
 
         _rules = await asyncio.to_thread(_get_behavior_rules, user_id)
         _rules_block = f"\nSTANDING BEHAVIOR RULES (explicit feedback from them — hard rules):\n{_rules}\n" if _rules else ""
