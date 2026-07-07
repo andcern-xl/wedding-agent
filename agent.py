@@ -1849,7 +1849,7 @@ TOOLS = [
     },
     {
         "name": "save_to_brain",
-        "description": "Save useful information to the shared or personal brain. Call this automatically when: (1) the user shares a URL and the fetched content has useful information worth keeping, (2) the user explicitly asks to save something, (3) you find genuinely useful facts during research. Do NOT wait to be asked — if the info is useful, save it. audience='shared' if both Ansen and Jess would benefit; audience='private' if it's personal to the current user only.",
+        "description": "Save useful information to the shared or personal brain. Call this automatically when: (1) the user shares a URL and the fetched content has useful information worth keeping, (2) the user explicitly asks to save something, (3) you find genuinely useful facts during research. Do NOT wait to be asked — if the info is useful, save it. QUALITY BAR — it must still matter in a month: no transaction logs, no todos, no one-off events, and phrase it so it doesn't rot (anchor drifting figures with 'as of [month]', never 'arriving by [date]' or countdown numbers). audience='shared' if both Ansen and Jess would benefit; audience='private' if it's personal to the current user only.",
         "input_schema": {
             "type": "object",
             "properties": {
