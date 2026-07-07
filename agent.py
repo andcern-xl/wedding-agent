@@ -53,6 +53,23 @@ def _date_reference(now: datetime) -> str:
     return "\n".join(lines)
 
 
+def _get_behavior_rules(user_id: int) -> str:
+    """Standing behavior feedback (couple-wide + this user's) saved via
+    save_behavior_feedback. Stored in loop_state under 'behavior_rules'."""
+    try:
+        from tools.loop_state import COUPLE, load_state
+        blocks = []
+        for sid in (COUPLE, user_id):
+            if sid == user_id and user_id == COUPLE:
+                continue
+            out = (load_state("behavior_rules", sid).get("last_output") or "").strip()
+            if out:
+                blocks.append(out)
+        return "\n".join(blocks)
+    except Exception:
+        return ""
+
+
 def _relevant_bullets(query: str, shared_brain: str, max_bullets: int = 18) -> str:
     """Return the most relevant shared brain bullets for a given query, always keeping recent ones."""
     if not shared_brain:
@@ -1073,6 +1090,9 @@ ALREADY SENT LAST NIGHT (do NOT re-narrate any of this; vary tonight's opening f
 {already_sent.strip()}
 """ if already_sent.strip() else ""
 
+        _rules = await asyncio.to_thread(_get_behavior_rules, 0)
+        _rules_block = f"\nSTANDING BEHAVIOR RULES (explicit feedback from them — hard rules):\n{_rules}\n" if _rules else ""
+
         prompt = f"""{context}
 {already_block}
 Write the end-of-day text for {person_list}. Everything above happened TODAY or is due TOMORROW — it's already a delta, so just tell the story of it.
@@ -1084,7 +1104,7 @@ SHAPE:
 - Vary how it opens night to night. Never open with a greeting formula.
 
 {VOICE_RULES}
-
+{_rules_block}
 FORMATTING: Pure HTML — <b>bold</b> for at most one or two key facts, times inline. NEVER **asterisks** — Telegram renders them literally. Keep it tight."""
 
         response = await self.client.messages.create(
@@ -1152,7 +1172,14 @@ You: "Set for Friday the 10th."
 Them: "ugh the sixt thing again"
 You: "Yeah, third time it's come up. Airport pickup, book it this week before TML, done. Want me to make it a task?"
 
-Notice: short, specific, zero ceremony, references what they already know without re-explaining it. When there's nothing useful to add, one line is the right length."""
+Notice: short, specific, zero ceremony, references what they already know without re-explaining it. When there's nothing useful to add, one line is the right length.
+
+UNCERTAINTY — knowing what you don't know is part of the voice:
+- NEVER invent specifics: numbers, dates, prices, names, times. If a detail isn't in your context or reachable through a tool, you don't have it — full stop.
+- Before answering anything that depends on their life data, check the brain and tools first. If the lookup comes up empty: "I don't have that noted — tell me and I'll remember it." That answer builds trust; a fabricated one destroys it.
+- Conflicting info? Show the conflict instead of picking silently: "Not sure — the calendar says Friday but the task says Thursday. Which is right?"
+- Genuinely don't know and can't look it up? A plain "idk — want me to dig into it?" is a great answer. Confident-sounding guesses are the single worst thing you can do.
+- Don't fake-hedge ("should be...", "probably around...") on things a tool call could verify. Verify, or say you don't know."""
 
 
 # ---------------------------------------------------------------------------
@@ -1384,6 +1411,11 @@ Do this without being asked — the stub is a signal that the info was noted but
 
 CORRECTIONS — ALWAYS PERSIST, NEVER JUST VERBALLY ACKNOWLEDGE
 When the user corrects something you stated — "no that's wrong", "actually it's X", "that's not right", "you got that wrong", "look at internal database to reconcile" — you MUST call correct_knowledge immediately. Never just say "Got it!" or "Reconciled" without writing the fix to persistent storage. Verbal acknowledgement alone means the same mistake reappears every future session. The tool searches baby_knowledge, shared_summary, user_summary, and trips for stale data and replaces it. After calling it, confirm exactly what was found and updated: "✅ Fixed in [store] — removed: [old]. Now stored: [correct]."
+
+When the user corrects HOW you behave rather than a fact — "too long", "stop repeating this", "don't ask me about that again", "just answer directly", "fewer emojis", "you already told me this" — you MUST call save_behavior_feedback immediately with a clear standing rule (e.g. "Keep replies under 4 lines unless asked for detail"). Same principle as correct_knowledge: a verbal "noted!" without saving means the same annoyance returns next session. Scope 'both' if it's about your general style; 'me' if it's this person's personal preference. Then follow the rule from that message onward.
+
+STANDING BEHAVIOR RULES — feedback they have explicitly given you about how to behave. These are hard rules, not suggestions; breaking one is worse than a wrong fact:
+{behavior_rules}
 
 TOOL ERRORS — BE HONEST
 If a tool returns {{"error": "..."}}, tell the user it failed. Never claim success when a tool errored. Say what failed and suggest they try again or check the setup.
@@ -1757,6 +1789,18 @@ TOOLS = [
         },
     },
     {
+        "name": "save_behavior_feedback",
+        "description": "Save a standing rule about HOW you should behave, whenever the user gives style/conduct feedback: 'too long', 'stop repeating this', 'don't ask me about that again', 'fewer emojis', 'just answer directly'. This is correct_knowledge for behavior instead of facts — call it immediately, don't just acknowledge verbally. The rule is injected into every future conversation and brief.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rule": {"type": "string", "description": "The standing rule, phrased as an instruction to yourself, e.g. 'Keep replies under 4 lines unless asked for detail' or 'Never re-raise the Sixt car rental — it's handled'"},
+                "scope": {"type": "string", "enum": ["me", "both"], "description": "'me' = only applies when talking to this user; 'both' = applies to all messages including briefs. Default 'both' for general style rules."},
+            },
+            "required": ["rule"],
+        },
+    },
+    {
         "name": "query_brain",
         "description": "Search the shared brain vault — the couple's confirmed facts and decisions, filed by domain with dates. Call this whenever an answer depends on what's already known or decided (bookings, amounts, statuses, who's handling what, past decisions) instead of guessing or asking them to repeat themselves. Also call it before flagging something as missing/unresolved — it may already be settled. Cheap and fast; when in doubt, query.",
         "input_schema": {
@@ -2123,6 +2167,7 @@ class UnifiedAgent:
         current_user_line = f"CURRENT USER: You are talking to {current_name}. Address them as \"you\". Never refer to them in third person. The other person is {other_name}."
         # Relevance-filter shared brain — inject top-relevant bullets, not full dump
         filtered_shared = _relevant_bullets(query, shared_summary) if query and shared_summary else shared_summary
+        behavior_rules = _get_behavior_rules(user_id)
         _now_sg = datetime.now(_LOCAL_TZ)
         _now_sgt_str = _now_sg.strftime("%A, %-d %B %Y %H:%M SGT")
         return UNIFIED_SYSTEM_PROMPT.format(
@@ -2135,6 +2180,7 @@ class UnifiedAgent:
             baby_context=baby_context or "No baby knowledge saved yet.",
             mem0_context=mem0_context or "No specific memories recalled for this query.",
             open_check_ins=open_check_ins or "None.",
+            behavior_rules=behavior_rules or "None yet.",
         )
 
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
@@ -2319,6 +2365,18 @@ class UnifiedAgent:
                 updated = (existing + f"\n• {_local_today().isoformat()}: {label}").strip()
                 _save_sum(user_id, updated, _mc(user_id))
                 return {"status": "saved", "audience": "private", "topic": topic}
+
+        if name == "save_behavior_feedback":
+            from tools.loop_state import COUPLE, load_state as _ls_load, save_state as _ls_save
+            rule = inputs["rule"].strip()
+            scope_id = COUPLE if inputs.get("scope", "both") == "both" else user_id
+            prev = await asyncio.to_thread(_ls_load, "behavior_rules", scope_id)
+            existing = (prev.get("last_output") or "").strip()
+            if rule.lower() not in existing.lower():
+                today = _local_today().isoformat()
+                updated = (existing + f"\n• {today}: {rule}").strip()
+                await asyncio.to_thread(_ls_save, "behavior_rules", scope_id, updated, today)
+            return {"status": "saved", "scope": inputs.get("scope", "both"), "rule": rule}
 
         if name == "query_brain":
             from tools.user_memory import get_active_entries, normalize_domain
@@ -3528,6 +3586,9 @@ OPEN GAP RULES — apply before deciding what to surface:
         # --- Proactive tools available to this check ---
         proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in", "query_brain")]
 
+        _rules = await asyncio.to_thread(_get_behavior_rules, user_id)
+        _rules_block = f"\nSTANDING BEHAVIOR RULES (explicit feedback from them — hard rules):\n{_rules}\n" if _rules else ""
+
         system = f"""You are a proactive intelligence agent for {user_name}. Today is {today_str} ({tz_name}).
 
 IDENTITIES:
@@ -3614,7 +3675,7 @@ RULES:
 - FORMATTING: Telegram HTML only — <b>bold</b>. Never use ** or _ or --- separators. Use a blank line between items.
 
 {VOICE_RULES}
-
+{_rules_block}
 CALENDAR IS SOURCE OF TRUTH:
 - If a task date and a calendar event date differ — the calendar is correct, full stop. Do NOT flag this as a question or ask for confirmation. Simply note "Task updated to match calendar" if relevant, and move on. Never say "one of these is wrong" or ask which date is right.
 
@@ -4908,6 +4969,9 @@ ALREADY TOLD THEM (last night's wrap and earlier — do NOT re-narrate any of th
 {already_sent}
 """ if already_sent else ""
 
+        _rules = await asyncio.to_thread(_get_behavior_rules, user_id)
+        _rules_block = f"\nSTANDING BEHAVIOR RULES (explicit feedback from them — hard rules):\n{_rules}\n" if _rules else ""
+
         prompt = f"""{context}
 {already_block}
 Write the morning text for {user_name}. You know their full life; write like it.
@@ -4925,7 +4989,7 @@ SHAPE:
 - Last line: → /tasks /fyis for the full picture
 
 {VOICE_RULES}
-
+{_rules_block}
 STALENESS — before surfacing any FYI, cross-check it:
 - If a FYI says "awaiting / enquiry sent / pending / looking into" AND the shared brain or calendar confirms that thing is now booked/confirmed → skip the stale FYI, use the confirmed version only
 - Never surface both the pending and confirmed version of the same thing
