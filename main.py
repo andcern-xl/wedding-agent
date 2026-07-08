@@ -278,6 +278,13 @@ _DOMAIN_EMOJI = {"baby": "👶", "baby_questions": "👶", "wedding": "💍", "l
 
 def _reminders_keyboard(tasks: list[dict], user_id: int) -> InlineKeyboardMarkup | None:
     mine = [t for t in tasks if _is_task(t) and _can_complete(t, user_id)]
+    # Cluster by domain (baby → wedding → life) so the button strip reads in
+    # groups, then urgency within each (dated before undated)
+    _DOMAIN_ORDER = {"baby": 0, "baby_questions": 0, "wedding": 1}
+    mine.sort(key=lambda t: (
+        _DOMAIN_ORDER.get(task_domain(t) or "life", 2),
+        t.get("due_date") or "9999-12-31",
+    ))
     rows = []
     for t in mine[:12]:
         raw = (t.get("task") or "").strip()
