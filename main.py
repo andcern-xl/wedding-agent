@@ -1441,6 +1441,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("ci:") or data.startswith("cisnz:"):
         await _handle_check_in_callback(query, context, data)
 
+    elif data.startswith("ice:"):
+        # Icebox card taps: ice:{task_id}:{done|week|w2|m1|drop}
+        from tools.daily import bump_task, get_task_by_id, icebox_task
+        try:
+            _, tid, act = data.split(":", 2)
+            t = get_task_by_id(tid)
+            label = (t.get("task") or "task")[:60] if t else "task"
+            if act == "done":
+                ok = complete_task(tid, user_id)
+                result = f"✅ Done: {label}" if ok else "Couldn't mark that done."
+            elif act == "week":
+                ok = bump_task(tid, 7)
+                result = f"📅 Re-committed — due in a week: {label}"
+            elif act == "w2":
+                ok = icebox_task(tid, 14)
+                result = f"❄️ Iceboxed 2 weeks: {label}\nIt'll resurface on its own — no nagging until then."
+            elif act == "m1":
+                ok = icebox_task(tid, 30)
+                result = f"🧊 Iceboxed 1 month: {label}\nIt'll resurface on its own — no nagging until then."
+            elif act == "drop":
+                ok = complete_task(tid, user_id)
+                result = f"🗑 Dropped: {label}"
+            else:
+                result = "Unknown action."
+            await query.answer()
+            await query.edit_message_text(result)
+        except Exception:
+            logger.exception("icebox callback failed")
+            await query.answer("Something went wrong — try again.")
+
     elif data.startswith("taskcat:"):
         parts = data.split(":", 2)
         if len(parts) == 3:
@@ -1803,6 +1833,48 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
             await _send_check_in_cards(context, check_ins, uid)
         except Exception:
             logger.exception(f"send_nightly_wrap failed for {uid}")
+
+    # ❄️ Icebox offers — stale tasks get a parking decision, max 2 per night
+    try:
+        from datetime import date as _d
+        from tools.daily import get_stale_tasks, mark_icebox_offered
+        seen: set = set()
+        stale_all: list[dict] = []
+        for uid in ALLOWED_IDS:
+            for t in await asyncio.to_thread(get_stale_tasks, uid):
+                if t["id"] in seen:
+                    continue
+                seen.add(t["id"])
+                stale_all.append(t)
+        for t in stale_all[:2]:
+            target = t.get("assigned_to") or t.get("user_id")
+            if target not in ALLOWED_IDS:
+                target = ALLOWED_IDS[0]
+            due = t.get("due_date")
+            age = f"day {(_d.today() - _d.fromisoformat(due)).days} overdue" if due \
+                else f"sitting untouched since {(t.get('created_at') or '')[:10]}"
+            label = (t.get("task") or "").strip()
+            if label.upper().startswith("TASK:"):
+                label = label[5:].strip()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Done", callback_data=f"ice:{t['id']}:done"),
+                 InlineKeyboardButton("📅 This week", callback_data=f"ice:{t['id']}:week")],
+                [InlineKeyboardButton("❄️ 2 weeks", callback_data=f"ice:{t['id']}:w2"),
+                 InlineKeyboardButton("🧊 1 month", callback_data=f"ice:{t['id']}:m1")],
+                [InlineKeyboardButton("🗑 Drop it", callback_data=f"ice:{t['id']}:drop")],
+            ])
+            try:
+                await context.bot.send_message(
+                    chat_id=target,
+                    text=f"❄️ <b>Backlog this?</b>\n{escape(label)}\n<i>{age}</i>",
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+                await asyncio.to_thread(mark_icebox_offered, t["id"])
+            except Exception:
+                logger.exception(f"icebox card send failed for task {t['id']}")
+    except Exception:
+        logger.exception("icebox offer sweep failed")
 
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):

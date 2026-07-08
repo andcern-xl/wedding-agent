@@ -5097,6 +5097,16 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
         except Exception:
             pass
 
+        # Tasks returning from the icebox — flag them so they don't just silently rejoin
+        try:
+            from tools.daily import get_resurfaced_today as _resurfaced
+            back = await asyncio.to_thread(_resurfaced, user_id)
+            if back:
+                parts.append("BACK FROM BACKLOG (they parked these deliberately — reintroduce in one line each, don't guilt-trip):\n"
+                             + "\n".join(f"  • {t['task']}" for t in back[:4]))
+        except Exception:
+            pass
+
         # What they were already told — last night's wrap (+ anything earlier still in state)
         already_sent = ""
         try:

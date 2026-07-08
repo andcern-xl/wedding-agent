@@ -72,7 +72,15 @@ def add_task(
     return get_client().table("daily_tasks").insert(row).execute().data[0]
 
 
-def get_tasks(user_id: int, include_done: bool = False) -> list[dict]:
+def is_iceboxed(task: dict) -> bool:
+    """Parked in the backlog: hidden from briefs, reminders, and nagging until
+    iceboxed_until passes, then it resurfaces automatically."""
+    until = task.get("iceboxed_until")
+    return bool(until) and until > date.today().isoformat()
+
+
+def get_tasks(user_id: int, include_done: bool = False,
+              include_iceboxed: bool = False) -> list[dict]:
     """Return tasks visible to this user: their own, assigned to them, or shared."""
     q = get_client().table("daily_tasks").select("*")
     if not include_done:
@@ -80,9 +88,10 @@ def get_tasks(user_id: int, include_done: bool = False) -> list[dict]:
     rows = q.order("due_date", desc=False, nullsfirst=False).execute().data or []
     return [
         r for r in rows
-        if r["visibility"] == "shared"
-        or r["user_id"] == user_id
-        or r.get("assigned_to") == user_id
+        if (r["visibility"] == "shared"
+            or r["user_id"] == user_id
+            or r.get("assigned_to") == user_id)
+        and (include_iceboxed or not is_iceboxed(r))
     ]
 
 
@@ -97,7 +106,76 @@ def get_due_today(user_id: int) -> list[dict]:
         .execute()
         .data or []
     )
-    return [r for r in rows if r["visibility"] == "shared" or r["user_id"] == user_id]
+    return [r for r in rows
+            if (r["visibility"] == "shared" or r["user_id"] == user_id)
+            and not is_iceboxed(r)]
+
+
+def icebox_task(task_id: str, days: int) -> bool:
+    """Park a task in the backlog for N days."""
+    from datetime import timedelta
+    try:
+        result = get_client().table("daily_tasks").update({
+            "iceboxed_until": (date.today() + timedelta(days=days)).isoformat(),
+        }).eq("id", task_id).execute()
+        return bool(result.data)
+    except Exception:
+        return False
+
+
+def bump_task(task_id: str, days: int = 7) -> bool:
+    """Re-commit to a stale task: due in N days, out of the icebox."""
+    from datetime import timedelta
+    try:
+        result = get_client().table("daily_tasks").update({
+            "due_date": (date.today() + timedelta(days=days)).isoformat(),
+            "iceboxed_until": None,
+        }).eq("id", task_id).execute()
+        return bool(result.data)
+    except Exception:
+        return False
+
+
+def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
+                    reoffer_days: int = 5) -> list[dict]:
+    """Tasks ripe for an icebox decision: overdue 7+ days, or undated and
+    untouched for 14+. Skips tasks offered in the last reoffer_days."""
+    from datetime import timedelta
+    today = date.today()
+    overdue_cutoff = (today - timedelta(days=overdue_days)).isoformat()
+    created_cutoff = (today - timedelta(days=undated_days)).isoformat()
+    reoffer_cutoff = (today - timedelta(days=reoffer_days)).isoformat()
+    stale = []
+    for t in get_tasks(user_id):
+        offered = t.get("icebox_offered_at")
+        if offered and offered > reoffer_cutoff:
+            continue
+        due = t.get("due_date")
+        created = (t.get("created_at") or "")[:10]
+        if (due and due <= overdue_cutoff) or (not due and created and created <= created_cutoff):
+            stale.append(t)
+    stale.sort(key=lambda t: t.get("due_date") or (t.get("created_at") or "")[:10])
+    return stale
+
+
+def mark_icebox_offered(task_id: str) -> None:
+    try:
+        get_client().table("daily_tasks").update({
+            "icebox_offered_at": date.today().isoformat(),
+        }).eq("id", task_id).execute()
+    except Exception:
+        pass
+
+
+def get_resurfaced_today(user_id: int) -> list[dict]:
+    """Tasks whose icebox period just ended (came back within the last day)."""
+    from datetime import timedelta
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    return [
+        t for t in get_tasks(user_id)
+        if t.get("iceboxed_until") and yesterday <= t["iceboxed_until"] <= today
+    ]
 
 
 def complete_task(task_id: str, user_id: int) -> bool:
