@@ -111,14 +111,18 @@ async def _brief_with_brain(client, model: str, prompt: str, system: str | None 
     needs from the vault instead of working only from the injected slice."""
     messages = [{"role": "user", "content": prompt}]
     sys_kwargs = {"system": system} if system else {}
+    last_text = ""
     for turn in range(max_turns):
         force_text = {"tool_choice": {"type": "none"}} if turn == max_turns - 1 else {}
         resp = await client.messages.create(
             model=model, max_tokens=max_tokens, messages=messages,
             tools=[_BRIEF_BRAIN_TOOL], **sys_kwargs, **force_text,
         )
+        turn_text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if turn_text:
+            last_text = turn_text
         if resp.stop_reason != "tool_use":
-            return "".join(b.text for b in resp.content if b.type == "text").strip()
+            return turn_text or last_text
         messages.append({"role": "assistant", "content": resp.content})
         results = []
         for b in resp.content:
@@ -131,7 +135,7 @@ async def _brief_with_brain(client, model: str, prompt: str, system: str | None 
         if turn == max_turns - 2:
             results.append({"type": "text", "text": "Write the final brief now — no more lookups."})
         messages.append({"role": "user", "content": results})
-    return ""
+    return last_text
 
 
 def _relevant_bullets(query: str, shared_brain: str, max_bullets: int = 18) -> str:

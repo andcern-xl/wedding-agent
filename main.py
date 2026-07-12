@@ -1915,7 +1915,12 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
         promoted_lines = []
         for f in triage["promote"]:
             try:
-                promote_fyi(f["id"])
+                # promote_fyi swallows DB errors and returns None — only write to
+                # the brain once the FYI row is actually marked promoted, else it
+                # re-triages next Sunday and duplicates the brain entry
+                row = promote_fyi(f["id"])
+                if not row:
+                    continue
                 from tools.user_memory import normalize_domain
                 fact = f.get("_fact") or f["content"]
                 append_shared_summary(fact, domain=normalize_domain(f.get("_domain")), source="fyi_graduation")
@@ -1935,6 +1940,9 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
                 lines += [f"• {escape(l[:180])}" for l in promoted_lines]
             if triage["archive"]:
                 lines.append(f"\n🗑 {len(triage['archive'])} expired update{'s' if len(triage['archive']) != 1 else ''} archived quietly.")
+            overflow = len(triage["ask"]) - 3
+            if overflow > 0:
+                lines.append(f"\n🗂 {overflow} more expiring note{'s' if overflow != 1 else ''} still waiting — check /fyis.")
             text = "\n".join(lines)
             for uid in ALLOWED_IDS:
                 try:
@@ -1948,8 +1956,8 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
             fyi_id = f["id"]
             text = (
                 f"🗂 <b>FYI check-in</b>\n\n"
-                f"<i>{when} · {cat}</i>\n\n"
-                f"{f['content']}\n\n"
+                f"<i>{when} · {escape(cat)}</i>\n\n"
+                f"{escape(f['content'])}\n\n"
                 f"<i>This note is 3 weeks old. Worth keeping?</i>"
             )
             keyboard = InlineKeyboardMarkup([
