@@ -1901,14 +1901,48 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
-    """Sunday check-in: surface FYIs nearing expiry for keep/promote/archive."""
+    """Sunday triage: expiring FYIs auto-file into the brain or archive quietly.
+    Only genuine judgment calls still get a keep/promote/archive card — FYIs are
+    brain-building material, not a checklist for the humans to work through."""
     if not ALLOWED_IDS:
         return
     try:
         expiring = get_fyis_expiring(days_threshold=21, limit=10)
         if not expiring:
             return
-        for f in expiring:
+        triage = await agent.triage_expiring_fyis(expiring)
+
+        promoted_lines = []
+        for f in triage["promote"]:
+            try:
+                promote_fyi(f["id"])
+                from tools.user_memory import normalize_domain
+                fact = f.get("_fact") or f["content"]
+                append_shared_summary(fact, domain=normalize_domain(f.get("_domain")), source="fyi_graduation")
+                promoted_lines.append(fact)
+            except Exception:
+                logger.exception(f"auto-promote failed for FYI {f.get('id')}")
+        for f in triage["archive"]:
+            try:
+                archive_fyi(f["id"])
+            except Exception:
+                logger.exception(f"auto-archive failed for FYI {f.get('id')}")
+
+        if promoted_lines or triage["archive"]:
+            lines = []
+            if promoted_lines:
+                lines.append("🧠 <b>Filed into the brain this week</b>\n")
+                lines += [f"• {escape(l[:180])}" for l in promoted_lines]
+            if triage["archive"]:
+                lines.append(f"\n🗑 {len(triage['archive'])} expired update{'s' if len(triage['archive']) != 1 else ''} archived quietly.")
+            text = "\n".join(lines)
+            for uid in ALLOWED_IDS:
+                try:
+                    await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+                except Exception:
+                    logger.exception(f"graduation summary send failed for {uid}")
+
+        for f in triage["ask"][:3]:
             when = (f.get("created_at") or "")[:10]
             cat = f.get("category") or "misc"
             fyi_id = f["id"]

@@ -70,6 +70,70 @@ def _get_behavior_rules(user_id: int) -> str:
         return ""
 
 
+def _query_brain_sync(query: str = "", domain: str | None = None) -> dict:
+    """Keyword search over active brain_entries — shared by the chat tool loop
+    and the brief generators, so every surface pulls from the same vault."""
+    from tools.user_memory import get_active_entries, normalize_domain
+    entries = get_active_entries(normalize_domain(domain) if domain else None)
+    q_words = {w for w in (query or "").lower().split() if len(w) > 2}
+
+    def _score(e: dict) -> int:
+        text = e["fact"].lower()
+        return sum(1 for w in q_words if w in text)
+
+    scored = sorted(entries, key=_score, reverse=True)
+    hits = [e for e in scored if _score(e) > 0][:15] or scored[:10]
+    return {
+        "matches": [
+            {"date": e["fact_date"], "domain": e["domain"], "fact": e["fact"]}
+            for e in hits
+        ],
+        "total_active_facts": len(entries),
+    }
+
+
+_BRIEF_BRAIN_TOOL = {
+    "name": "query_brain",
+    "description": "Pull facts from the couple's shared brain vault, filed by domain (baby/wedding/travel/money/life). The context you were given is a partial slice — query before claiming anything about their life, flagging something as unresolved, or stating a date. Returns matching facts with their dates.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Keywords to search for"},
+            "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Optional domain filter"},
+        },
+    },
+}
+
+
+async def _brief_with_brain(client, model: str, prompt: str, system: str | None = None,
+                            max_tokens: int = 800, max_turns: int = 4) -> str:
+    """Generate a brief with query_brain available — the generator pulls what it
+    needs from the vault instead of working only from the injected slice."""
+    messages = [{"role": "user", "content": prompt}]
+    sys_kwargs = {"system": system} if system else {}
+    for turn in range(max_turns):
+        force_text = {"tool_choice": {"type": "none"}} if turn == max_turns - 1 else {}
+        resp = await client.messages.create(
+            model=model, max_tokens=max_tokens, messages=messages,
+            tools=[_BRIEF_BRAIN_TOOL], **sys_kwargs, **force_text,
+        )
+        if resp.stop_reason != "tool_use":
+            return "".join(b.text for b in resp.content if b.type == "text").strip()
+        messages.append({"role": "assistant", "content": resp.content})
+        results = []
+        for b in resp.content:
+            if b.type == "tool_use":
+                try:
+                    res = await asyncio.to_thread(_query_brain_sync, b.input.get("query", ""), b.input.get("domain"))
+                except Exception as exc:
+                    res = {"error": str(exc)}
+                results.append({"type": "tool_result", "tool_use_id": b.id, "content": json.dumps(res, default=str)})
+        if turn == max_turns - 2:
+            results.append({"type": "text", "text": "Write the final brief now — no more lookups."})
+        messages.append({"role": "user", "content": results})
+    return ""
+
+
 def _relevant_bullets(query: str, shared_brain: str, max_bullets: int = 18) -> str:
     """Return the most relevant shared brain bullets for a given query, always keeping recent ones."""
     if not shared_brain:
@@ -1110,7 +1174,7 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
             )
             _brain = _relevant_bullets(_query, await asyncio.to_thread(_get_shared_v), max_bullets=8)
             if _brain:
-                parts.append("SHARED BRAIN (relevant facts — cross-check the above against these):\n" + _brain)
+                parts.append("SHARED BRAIN (partial slice, keyword-matched — NOT the whole vault; use the query_brain tool to pull anything else before claiming or dating something):\n" + _brain)
         except Exception:
             pass
 
@@ -1141,13 +1205,11 @@ SHAPE:
 {FORMAT_RULES}
 - This is flowing prose: times inline, bold for at most one or two key facts."""
 
-        response = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
-            max_tokens=800,
-            system=DAILY_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+        text = await _brief_with_brain(
+            self.client, SYNTHESIS_MODEL, prompt,
+            system=DAILY_SYSTEM_PROMPT, max_tokens=800,
         )
-        return _fix_md(response.content[0].text)
+        return _fix_md(text)
 
 
 DAILY_KEYWORDS = {
@@ -1330,6 +1392,10 @@ HOW TO USE TOOLS
 
 PROACTIVE MEMORY — save facts without being asked
 You notice things people say in passing and file them. Do this silently (no need to announce every save):
+
+ROUTING RULE — durable vs ephemeral, get this right every time:
+• A durable fact about them (preference, habit, person, vendor, relationship, constraint) is NEVER a task and NEVER an FYI. It goes to save_preference / save_shared_context / save_to_brain. "Jess likes kaya waffle from Rice Bakehouse" is brain material — filing it as a task or ackable FYI turns knowledge into fake work.
+• A task needs a verb someone will actually do. An FYI stops mattering within weeks. Everything else that's true about their life → brain.
 
 save_preference for things about THIS person only:
   • Dietary: allergies, intolerances, dislikes, strong preferences ("Ansen doesn't eat cilantro", "Jess is lactose intolerant")
@@ -1608,7 +1674,7 @@ TOOLS = [
     },
     {
         "name": "add_daily_task",
-        "description": "Create a date-based task or reminder. Use for to-dos with a due date (or no date). Do NOT use when the user gives a specific clock time ('at 3pm', 'in 2 hours') — use schedule_notification for those instead.",
+        "description": "Create a date-based task or reminder. Use for to-dos with a due date (or no date). A task needs a verb someone will actually do — statements of preference or fact ('Jess likes X', 'our venue is Y') are NEVER tasks; save those to the brain instead. Do NOT use when the user gives a specific clock time ('at 3pm', 'in 2 hours') — use schedule_notification for those instead.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1730,7 +1796,7 @@ TOOLS = [
     },
     {
         "name": "log_fyi",
-        "description": "Save a shared FYI — information one partner wants the other to know, not an action item. Use for past-tense updates, status shares, 'heads up' messages. Examples: 'FYI I paid the electricity bill', 'just letting you know I booked a table', 'heads up I'll be home late'.",
+        "description": "Save a shared FYI — TIME-BOUND information one partner wants the other to know, not an action item. Use ONLY for things that stop mattering within weeks: past-tense updates, status shares, 'heads up' messages. Examples: 'FYI I paid the electricity bill', 'just letting you know I booked a table', 'heads up I'll be home late'. NOT for durable facts: preferences ('Jess likes kaya waffle from Rice Bakehouse'), habits, people, vendors, or anything about who they are → those go to save_preference / save_shared_context / save_to_brain instead. An FYI expires quietly; a fact about them belongs in the brain forever.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2518,24 +2584,9 @@ class UnifiedAgent:
             return {"status": "saved", "scope": inputs.get("scope", "both"), "rule": rule}
 
         if name == "query_brain":
-            from tools.user_memory import get_active_entries, normalize_domain
-            domain = inputs.get("domain")
-            entries = await asyncio.to_thread(
-                get_active_entries, normalize_domain(domain) if domain else None
+            return await asyncio.to_thread(
+                _query_brain_sync, inputs.get("query", ""), inputs.get("domain")
             )
-            q_words = {w for w in inputs.get("query", "").lower().split() if len(w) > 2}
-            def _score(e: dict) -> int:
-                text = e["fact"].lower()
-                return sum(1 for w in q_words if w in text)
-            scored = sorted(entries, key=_score, reverse=True)
-            hits = [e for e in scored if _score(e) > 0][:15] or scored[:10]
-            return {
-                "matches": [
-                    {"date": e["fact_date"], "domain": e["domain"], "fact": e["fact"]}
-                    for e in hits
-                ],
-                "total_active_facts": len(entries),
-            }
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
@@ -5160,7 +5211,7 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
             )
             _brain = _relevant_bullets(_query, await asyncio.to_thread(_get_shared_v), max_bullets=12)
             if _brain:
-                parts.append("SHARED BRAIN (confirmed facts — cross-check FYIs against these):\n" + _brain)
+                parts.append("SHARED BRAIN (partial slice, keyword-matched — NOT the whole vault; use the query_brain tool to pull anything else before claiming or dating something. Cross-check FYIs against it):\n" + _brain)
         except Exception:
             pass
 
@@ -5199,13 +5250,11 @@ STALENESS — before surfacing any FYI, cross-check it:
 {FORMAT_RULES}
 - This is flowing prose: bold for at most one or two load-bearing facts."""
 
-        response = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
-            max_tokens=600,
-            system=DAILY_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+        text = await _brief_with_brain(
+            self.client, SYNTHESIS_MODEL, prompt,
+            system=DAILY_SYSTEM_PROMPT, max_tokens=600,
         )
-        return _fix_md(response.content[0].text)
+        return _fix_md(text)
 
     async def combined_daily_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None) -> tuple:
         return await self._daily.combined_daily_brief(user_ids, user_names)
@@ -5213,6 +5262,61 @@ STALENESS — before surfacing any FYI, cross-check it:
     async def evening_brief(self, user_ids: list[int], user_names: dict[int, str] | None = None,
                             already_sent: str = "") -> str:
         return await self._daily.evening_brief(user_ids, user_names, already_sent=already_sent)
+
+    async def triage_expiring_fyis(self, expiring: list[dict]) -> dict:
+        """Classify expiring FYIs: durable facts auto-promote to the brain,
+        dead updates archive quietly, only genuine judgment calls get a card."""
+        if not expiring:
+            return {"promote": [], "archive": [], "ask": []}
+        listing = "\n".join(
+            f"{i}. [{f.get('category') or 'misc'}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
+            for i, f in enumerate(expiring)
+        )
+        prompt = f"""These FYI notes between Ansen and Jess are 3+ weeks old and about to expire. Triage each one:
+
+{listing}
+
+For each, decide:
+- "promote" — a durable fact about them worth keeping forever (preference, vendor, person, constraint, decision). Rephrase it so it doesn't rot: anchor drifting figures with "as of [month]", drop "just now / this week" framing. It must still be true and useful in a year.
+- "archive" — a moment that passed: transaction logs, one-off heads-ups, completed events, anything superseded. The default for most FYIs.
+- "ask" — genuinely can't tell without the humans. Use sparingly.
+
+Return ONLY a JSON array, one object per note, same order:
+[{{"index": 0, "action": "promote", "fact": "rephrased durable fact", "domain": "baby|wedding|travel|money|life"}}, {{"index": 1, "action": "archive"}}]"""
+        try:
+            resp = await self.client.messages.create(
+                model=CHAT_MODEL, max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.content[0].text.strip()
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            decisions = json.loads(m.group(0)) if m else []
+        except Exception:
+            # Triage failing must never lose notes — fall back to asking about all of them
+            return {"promote": [], "archive": [], "ask": list(expiring)}
+        out = {"promote": [], "archive": [], "ask": []}
+        decided: set = set()
+        for d in decisions:
+            try:
+                idx = int(d["index"])
+                f = expiring[idx]
+            except (KeyError, ValueError, IndexError, TypeError):
+                continue
+            if idx in decided:
+                continue
+            decided.add(idx)
+            action = d.get("action")
+            if action == "promote" and d.get("fact"):
+                out["promote"].append({**f, "_fact": d["fact"], "_domain": d.get("domain") or "life"})
+            elif action == "archive":
+                out["archive"].append(f)
+            else:
+                out["ask"].append(f)
+        # anything the model skipped → ask; never silently drop a note
+        for i, f in enumerate(expiring):
+            if i not in decided:
+                out["ask"].append(f)
+        return out
 
     async def personal_brief(self, user_id: int, user_name: str = "") -> tuple:
         """Private tasks grouped by daily category, urgency-sorted within each."""
