@@ -409,10 +409,8 @@ Key decisions not made yet for this area. One bullet per item using •
 <b>Next Step</b>
 One concrete thing to do next.
 
-FORMATTING RULES — follow exactly:
-- Use Telegram HTML. <b> for headers only. No markdown, no **asterisks**.
-- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 party, ✅ confirmed booking, 🔍 still researching
-- Put a blank line between each bullet — not just between sections. This is essential for readability."""
+{FORMAT_RULES}
+- This is a structured LIST VIEW: start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 party, ✅ confirmed booking, 🔍 still researching) and put a blank line between each bullet."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -472,10 +470,8 @@ Wedding categories with nothing dropped yet. One bullet per item using •
 <b>One Thing To Do Next</b>
 The single most useful next action right now.
 
-FORMATTING RULES — follow exactly:
-- Use Telegram HTML. <b> for headers only. No markdown, no **asterisks**.
-- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, ✅ confirmed, 🔍 in progress, ❌ untouched
-- Put a blank line between each bullet — not just between sections. This is essential for readability in Telegram."""
+{FORMAT_RULES}
+- This is a structured LIST VIEW: start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, ✅ confirmed, 🔍 in progress, ❌ untouched) and put a blank line between each bullet."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -581,10 +577,8 @@ Categories with no progress or that have gone quiet. Name the risk and the actio
 <b>Blockers & Open Questions</b>
 Key unresolved decisions that are holding up other planning. What needs to be decided before they can move forward elsewhere.
 
-FORMATTING RULES — follow exactly:
-- Use Telegram HTML. <b> for headers only. No markdown, no **asterisks**.
-- Start every bullet with a relevant emoji: 🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, 🔥 urgent, ✅ going well
-- Put a blank line between each bullet — not just between sections. This is essential for readability in Telegram."""
+{FORMAT_RULES}
+- This is a structured LIST VIEW: start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, 🔥 urgent, ✅ going well) and put a blank line between each bullet."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -625,6 +619,14 @@ def _is_junk_task(t: dict) -> bool:
     return False
 
 
+FORMAT_RULES = """FORMATTING — one set of rules, every message:
+- Telegram HTML only: <b>bold</b>, <i>italic</i>. NEVER **asterisks**, _underscores_, ## headers, or --- separators — Telegram renders them literally.
+- Bullets are • (never - or *). A list needs 4+ items; fewer than that, write a sentence.
+- Bold sparingly: headers plus one or two load-bearing facts, never half the message.
+- Blank line between blocks — sections, days, brief items. Walls of text don't get read.
+- Written for a phone: no line should wrap more than twice. Cut what the reader won't act on (aircraft types, street addresses, filler adjectives).
+- Emoji: one on a header does the anchoring. Never decorative strings of them."""
+
 DAILY_SYSTEM_PROMPT = """You are a personal assistant managing tasks and reminders for a couple (Ansen and Jess). You handle their day-to-day tasks — both shared and personal.
 
 PRIVACY RULES
@@ -636,11 +638,8 @@ HOW TO RESPOND
 - When adding a task, confirm what you logged: the task, due date, and whether it's shared or personal
 - Sound like a sharp personal assistant, not a robot
 
-FORMATTING — CRITICAL
-Telegram uses parse_mode=HTML. **Asterisks are NOT bold** — they show as literal * characters. Always use:
-- <b>text</b> for bold/headers (never **text**)
-- • for bullets (never - or *)
-- Emojis freely: ✅ done, 🚨 overdue, 📅 date, 💪 task added, 🔔 reminder set
+""" + FORMAT_RULES + """
+- Status emojis where they carry meaning: ✅ done, 🚨 overdue, 📅 date, 💪 task added, 🔔 reminder set
 
 PARSING TASKS
 - "remind me" / "my" / "I need to" → visibility: private
@@ -1076,11 +1075,22 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
             parts.append(f"TOMORROW ({tomorrow_weekday.upper()}):\n" + "\n".join(lines))
 
         if overdue_tasks:
-            lines = [
-                f"  ⚠️ {t['task']}{_owner_label(t)} — day {t['_days_overdue']} overdue"
-                for t in sorted(overdue_tasks, key=lambda x: -x["_days_overdue"])[:6]
+            # Unchanged overdue items are not news — the icebox owns parking
+            # decisions for stale tasks. Only surface ones that crossed a line
+            # today: newly overdue, or hitting a weekly milestone (7/14/21…).
+            newsworthy = [
+                t for t in sorted(overdue_tasks, key=lambda x: -x["_days_overdue"])
+                if t["_days_overdue"] == 1 or t["_days_overdue"] % 7 == 0
             ]
-            parts.append("STILL OVERDUE (never suppress these — one terse line each):\n" + "\n".join(lines))
+            if newsworthy:
+                lines = [
+                    f"  ⚠️ {t['task']}{_owner_label(t)} — day {t['_days_overdue']} overdue"
+                    for t in newsworthy[:6]
+                ]
+                parts.append("OVERDUE — CROSSED A LINE TODAY (newly overdue or hit a weekly milestone; one terse line each):\n" + "\n".join(lines))
+            remaining = len(overdue_tasks) - len(newsworthy)
+            if remaining > 0:
+                parts.append(f"({remaining} other overdue tasks unchanged since yesterday — do NOT list or mention them; the icebox handles them)")
 
         # Relevant shared-brain facts for cross-checking (e.g. a booking that
         # makes a "pending" item stale)
@@ -1100,7 +1110,7 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
         person_list = " and ".join(names.values()) if names else "both of you"
 
         already_block = f"""
-ALREADY SENT LAST NIGHT (do NOT re-narrate any of this; vary tonight's opening from it — EXCEPTION: overdue/unresolved items are never suppressed, mention them in one terse line with the day count):
+ALREADY SENT LAST NIGHT (do NOT re-narrate any of this; vary tonight's opening from it):
 {already_sent.strip()}
 """ if already_sent.strip() else ""
 
@@ -1114,12 +1124,14 @@ Write the end-of-day text for {person_list}. Everything above happened TODAY or 
 SHAPE:
 - Flowing prose, not sections. One short paragraph on today (what got done, what was shared — name who did/shared what naturally, "Jess booked...", not "[Jess]"), one on tomorrow (times for calendar events).
 - If today was empty and tomorrow is clear, say so in one line and stop. A two-line wrap on a quiet day is perfect.
+- This is a DELTA, not a status report. Never re-list things that are "exactly where they were" — if nothing moved, that's one clause ("quiet day, nothing moved"), then straight to tomorrow. Reciting the stale pile with day counts is the one thing this message must never do.
 - No emoji section headers, no "Done today:" labels. Bullets only if listing 4+ parallel items.
 - Vary how it opens night to night. Never open with a greeting formula.
 
 {VOICE_RULES}
 {_rules_block}
-FORMATTING: Pure HTML — <b>bold</b> for at most one or two key facts, times inline. NEVER **asterisks** — Telegram renders them literally. Keep it tight."""
+{FORMAT_RULES}
+- This is flowing prose: times inline, bold for at most one or two key facts."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
@@ -3292,7 +3304,9 @@ For each asset write a real analyst take. If search data has numbers, use them.
 If it says "no search data", still give your best view from what you know + the newsletter signal.
 Assets marked ⭐ THEY HOLD THIS come FIRST in the brief with a "your position" line; a bearish newsletter signal on a held asset is the single most important thing to flag.
 
-FORMAT (Telegram HTML — no markdown):
+{FORMAT_RULES}
+
+FORMAT — use this exact template:
 
 <b>📊 This week</b>
 2 sentences on the macro theme.
@@ -3830,7 +3844,7 @@ RULES:
 - Be selective — max 3 items on a normal night. If nothing is genuinely worth flagging, say NOTHING
 - Don't repeat what the morning brief already covers (today's due tasks)
 - Write flowing prose per item, not emoji-header-per-item template blocks. Short bold lead-in per item is fine; no calendar emojis and day-name headers unless an event is genuinely imminent.
-- FORMATTING: Telegram HTML only — <b>bold</b>. Never use ** or _ or --- separators. Use a blank line between items.
+{FORMAT_RULES}
 
 {VOICE_RULES}
 {_rules_block}
@@ -4037,7 +4051,9 @@ UPCOMING MILESTONES (next 4 weeks):
 
 Focus ONLY on what's practical and actionable. Skip baby size comparisons and development descriptions entirely.
 
-FORMAT (Telegram HTML):
+{FORMAT_RULES}
+
+FORMAT — use this exact template:
 
 <b>👶 Week {info['week']} · {info['trimester']} Trimester</b>
 <i>Due {info['due_date']} · {info['days_until_due']} days to go</i>
@@ -4105,10 +4121,9 @@ Rules:
 - Timed bullets: time in bold first, then the shortest fact — • <b>01:40</b> SIN → DXB · EK349. NEVER "01:40 — Depart SIN on EK349 (Boeing 777-300ER, non-stop)"
 - Routes as arrows + flight number only; drop aircraft types, "non-stop", street addresses (venue name is enough)
 - Pending decisions/open questions: own bullet starting with ⚠️, one line
-- Telegram HTML only: <b>bold</b>, <i>italic</i>, • bullets — NO markdown, NO asterisks, NO pipes
-- Blank line between sections and between days
-- No line should wrap more than twice on a phone — shorten or split it
-- Keep it tight — no filler text, just the facts"""
+- Keep it tight — no filler text, just the facts
+
+{FORMAT_RULES}"""
 
             response = await self.client.messages.create(
                 model=CHAT_MODEL,
@@ -5168,7 +5183,8 @@ STALENESS — before surfacing any FYI, cross-check it:
 - If a FYI says "awaiting / enquiry sent / pending / looking into" AND the shared brain or calendar confirms that thing is now booked/confirmed → skip the stale FYI, use the confirmed version only
 - Never surface both the pending and confirmed version of the same thing
 
-FORMATTING: Pure HTML — <b>bold</b> for at most one or two load-bearing facts. No **asterisks**. Telegram message on a phone."""
+{FORMAT_RULES}
+- This is flowing prose: bold for at most one or two load-bearing facts."""
 
         response = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
