@@ -4101,13 +4101,18 @@ Rules:
   📅 <b>Itinerary</b> — day plans, detours, timeline highlights
   📝 <b>Notes</b> — anything else worth keeping
 - Each section: header on its own line, then • bullets (one fact per bullet)
+- Day-by-day plans: each day gets its own header line, emoji matched to the day — e.g. ✈️ <b>22 Jul (Wed) · SG → Amsterdam</b> (✈️ travel, 🎪 festival/event, 🚌 transfer, 🏨 check-in, 🍽 dinner, 🏰 explore)
+- Timed bullets: time in bold first, then the shortest fact — • <b>01:40</b> SIN → DXB · EK349. NEVER "01:40 — Depart SIN on EK349 (Boeing 777-300ER, non-stop)"
+- Routes as arrows + flight number only; drop aircraft types, "non-stop", street addresses (venue name is enough)
+- Pending decisions/open questions: own bullet starting with ⚠️, one line
 - Telegram HTML only: <b>bold</b>, <i>italic</i>, • bullets — NO markdown, NO asterisks, NO pipes
-- Blank line between sections
+- Blank line between sections and between days
+- No line should wrap more than twice on a phone — shorten or split it
 - Keep it tight — no filler text, just the facts"""
 
             response = await self.client.messages.create(
                 model=CHAT_MODEL,
-                max_tokens=700,
+                max_tokens=1000,
                 messages=[{"role": "user", "content": prompt}],
             )
             body = _fix_md(response.content[0].text.strip())
