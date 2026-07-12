@@ -2362,7 +2362,6 @@ class UnifiedAgent:
             return {"status": "sent", "to": partner_name, "fires_in": "~5 seconds"}
 
         if name == "schedule_notification":
-            import os
             from zoneinfo import ZoneInfo
             tz = ZoneInfo(os.getenv("REMINDER_TZ", "Asia/Singapore"))
             try:
@@ -3907,7 +3906,8 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
         new_check_ins = proactive_flags.get("check_ins", [])
         return {"text": None, "check_ins": new_check_ins} if new_check_ins else None
 
-    async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None) -> dict:
+    async def handle_image(self, image_bytes: bytes, caption: str, user_id: int, history: list[dict] | None = None,
+                           media_type: str = "image/jpeg") -> dict:
         if history is None:
             history = []
         try:
@@ -3920,7 +3920,10 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
             shared_summary = ""
 
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        img_block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
+        if media_type == "application/pdf":
+            img_block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": image_b64}}
+        else:
+            img_block = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}}
 
         # Always extract all visible text from the image first.
         # This gives the agent clean text to reason over rather than relying
@@ -3928,12 +3931,12 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
         try:
             ocr_resp = await self.client.messages.create(
                 model=CHAT_MODEL,
-                max_tokens=1500,
+                max_tokens=3000 if media_type == "application/pdf" else 1500,
                 messages=[{
                     "role": "user",
                     "content": [
                         img_block,
-                        {"type": "text", "text": "Extract ALL visible text from this image verbatim. Include every word, number, label, price, ticker, headline, and caption you can see. Output plain text only — no commentary, no formatting."},
+                        {"type": "text", "text": "Extract ALL visible text from this file verbatim. Include every word, number, label, price, ticker, headline, and caption you can see. Output plain text only — no commentary, no formatting."},
                     ],
                 }],
             )

@@ -460,6 +460,29 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             if result.get("notify_partner"):
                 await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption, analysis=result.get("text"))
 
+        elif update.message.document:
+            doc = update.message.document
+            mime = (doc.mime_type or "").lower()
+            caption = update.message.caption or ""
+            supported = mime == "application/pdf" or mime in ("image/jpeg", "image/png", "image/gif", "image/webp")
+            if not supported:
+                await update.message.reply_text(
+                    "I can read PDFs and images sent as files — this file type I can't open yet."
+                )
+                return
+            if doc.file_size and doc.file_size > 15 * 1024 * 1024:
+                await update.message.reply_text("That file's too big for me — 15 MB max.")
+                return
+            doc_file = await doc.get_file()
+            doc_bytes = await doc_file.download_as_bytearray()
+
+            result = await agent.handle_image(
+                image_bytes=bytes(doc_bytes), caption=caption, user_id=user_id,
+                history=history, media_type=mime,
+            )
+            if result.get("notify_partner"):
+                await notify_partner(context, update, text=caption or f"sent a file: {doc.file_name}", analysis=result.get("text"), is_fyi=result.get("fyi", False))
+
         elif update.message.voice:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
             voice_file = await update.message.voice.get_file()
@@ -2502,7 +2525,7 @@ def main():
         app.add_handler(CommandHandler(key, cmd_category_status))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE | filters.Document.ALL, handle_message))
 
     if app.job_queue is not None:
         # ── PRE-MORNING 8:50am ───────────────────────────────────────
