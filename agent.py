@@ -242,9 +242,13 @@ class WeddingAgent:
             "history": updated_history,
         }
 
-    async def _extract_payment(self, image_bytes: bytes, caption: str) -> dict | None:
+    async def _extract_payment(self, image_bytes: bytes, caption: str, media_type: str = "image/jpeg") -> dict | None:
         """Try to extract structured payment data from a financial screenshot."""
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        if media_type == "application/pdf":
+            media_block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": image_b64}}
+        else:
+            media_block = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}}
         prompt = """Look at this image. If it contains financial information (invoice, quote, payment confirmation, bank transfer, receipt, bill), extract the details as JSON.
 
 Return ONLY a JSON object with these fields (omit fields you can't determine):
@@ -260,17 +264,20 @@ Return ONLY a JSON object with these fields (omit fields you can't determine):
 
 If this image has no financial content, return: {"skip": true}"""
 
-        response = await self.client.messages.create(
-            model=CHAT_MODEL,
-            max_tokens=300,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                    {"type": "text", "text": (caption + "\n\n" if caption else "") + prompt},
-                ],
-            }],
-        )
+        try:
+            response = await self.client.messages.create(
+                model=CHAT_MODEL,
+                max_tokens=300,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        media_block,
+                        {"type": "text", "text": (caption + "\n\n" if caption else "") + prompt},
+                    ],
+                }],
+            )
+        except Exception:
+            return None
 
         try:
             text = response.content[0].text.strip()
@@ -2909,10 +2916,10 @@ class UnifiedAgent:
         for m in messages:
             content = m.get("content")
             if isinstance(content, list) and any(
-                isinstance(b, dict) and b.get("type") == "image" for b in content
+                isinstance(b, dict) and b.get("type") in ("image", "document") for b in content
             ):
                 stripped = [
-                    {"type": "text", "text": "[image]"} if isinstance(b, dict) and b.get("type") == "image" else b
+                    {"type": "text", "text": f"[{b.get('type')}]"} if isinstance(b, dict) and b.get("type") in ("image", "document") else b
                     for b in content
                 ]
                 result.append({**m, "content": stripped})
@@ -3981,7 +3988,7 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
             open_check_ins = ""
         result, payment = await asyncio.gather(
             self._run_loop(user_content, user_id, history, user_summary, shared_summary, recent_fyis, baby_context, open_check_ins=open_check_ins),
-            self._wedding._extract_payment(image_bytes, caption),
+            self._wedding._extract_payment(image_bytes, caption, media_type=media_type),
         )
         if payment:
             try:
