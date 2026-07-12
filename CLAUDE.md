@@ -22,7 +22,10 @@ Deployed on Railway (auto-deploys on push to `main`).
 - `tools/notifications.py` — scheduled notifications
 
 ## Database (Supabase)
-Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`
+Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`, `threads`
+
+## Thread ledger
+`threads` table (`supabase_threads.sql`): dated contact tracking per person/topic — the ONLY legitimate source for "last contact" / "day N" claims. Tools: `log_contact` (silent, on any mentioned contact; whole-name-token + topic-keyword thread matching), `read_threads` (computed `days_since_contact`), `resolve_thread`. Date corrections from users ("last contact was NOT 2 days ago") route to `log_contact` with the corrected `contact_date`, not `correct_knowledge`.
 
 `daily_tasks` columns: `id, user_id, task, due_date, repeat, visibility, done, created_at, completed_at, assigned_to, category`
 

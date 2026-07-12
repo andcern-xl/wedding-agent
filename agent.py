@@ -1543,6 +1543,10 @@ Do this without being asked — the stub is a signal that the info was noted but
 CORRECTIONS — ALWAYS PERSIST, NEVER JUST VERBALLY ACKNOWLEDGE
 When the user corrects something you stated — "no that's wrong", "actually it's X", "that's not right", "you got that wrong", "look at internal database to reconcile" — you MUST call correct_knowledge immediately. Never just say "Got it!" or "Reconciled" without writing the fix to persistent storage. Verbal acknowledgement alone means the same mistake reappears every future session. The tool searches baby_knowledge, shared_summary, user_summary, and trips for stale data and replaces it. After calling it, confirm exactly what was found and updated: "✅ Fixed in [store] — removed: [old]. Now stored: [correct]."
 
+EXCEPTION — contact-date corrections go to the ledger, not correct_knowledge: when the correction is about WHEN someone was last contacted or replied ("last contact with Elenna was NOT 2 days ago", "I actually chased her in June", "we last heard from the venue on the 19th"), call log_contact with the corrected contact_date — read_threads first if you need the thread's topic. If they say the wrong date came from you inventing it (no thread existed), still log_contact to create the thread with the true date, and own it: "I had no record — logged Jun 19 as the real last contact, counting from there now." "Actually that's settled / she confirmed" → resolve_thread.
+
+SAVE-CLAIM HONESTY — the deal that makes feedback worth giving: never say "saved", "fixed", "logged", or "noted" unless a tool call in THIS turn returned success. If the tool errored, say exactly that — "the save failed ([reason]), trying again" or "couldn't write that, Ansen will need to look at it" — never paper over it. When a fix succeeds, show receipts from the tool result: what was removed, what's now stored, where. The user should be able to trust that a ✅ means the database changed.
+
 When the user corrects HOW you behave rather than a fact — "too long", "stop repeating this", "don't ask me about that again", "just answer directly", "fewer emojis", "you already told me this" — you MUST call save_behavior_feedback immediately with a clear standing rule (e.g. "Keep replies under 4 lines unless asked for detail"). Same principle as correct_knowledge: a verbal "noted!" without saving means the same annoyance returns next session. Scope 'both' if it's about your general style; 'me' if it's this person's personal preference. Then follow the rule from that message onward.
 
 STANDING BEHAVIOR RULES — feedback they have explicitly given you about how to behave. These are hard rules, not suggestions; breaking one is worse than a wrong fact:
@@ -2128,7 +2132,7 @@ TOOLS = [
     },
     {
         "name": "correct_knowledge",
-        "description": "ALWAYS call this when the user corrects something you stated ('no that's wrong', 'actually it's X', 'that's not right', 'you got that wrong'). Finds stale data across all persistent stores and replaces it with the correct version. Never just verbally acknowledge a correction without calling this — verbal acknowledgement alone means the same mistake will reappear next session.",
+        "description": "ALWAYS call this when the user corrects something you stated ('no that's wrong', 'actually it's X', 'that's not right', 'you got that wrong'). Finds stale data across all persistent stores and replaces it with the correct version. Never just verbally acknowledge a correction without calling this — verbal acknowledgement alone means the same mistake will reappear next session. EXCEPTION: corrections about WHEN a person/vendor was last contacted → log_contact with the corrected contact_date instead (the thread ledger owns those dates).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2754,8 +2758,10 @@ class UnifiedAgent:
                 for e in stale:
                     _bk_del(str(e["id"]))
                     report["removed"].append(e["summary"][:120])
-                if stale or "baby_knowledge" in stores:
-                    new_entry = _bk_save(
+                if stale:
+                    # replace only where stale data actually lived — corrections
+                    # must not scatter copies into unrelated stores
+                    _bk_save(
                         summary=f"[CORRECTION — {topic}] {correct}",
                         tags=["correction", topic.lower().replace(" ", "_")],
                         source="correction",
@@ -2779,11 +2785,11 @@ class UnifiedAgent:
                         await asyncio.to_thread(_bv_sup, [e["id"] for e in stale_entries])
                         report["removed"].extend(e["fact"][:120] for e in stale_entries)
                         report["fixed_in"].append("shared_summary")
-                await asyncio.to_thread(
-                    _bv_add, f"[CORRECTION — {topic}] {correct}",
-                    _bv_dom(topic), "correction",
-                )
-                report["added"].append(f"shared_summary: {correct[:120]}")
+                        await asyncio.to_thread(
+                            _bv_add, f"[CORRECTION — {topic}] {correct}",
+                            _bv_dom(topic), "correction",
+                        )
+                        report["added"].append(f"shared_summary: {correct[:120]}")
 
             # --- user_summary for both users ---
             if "user_summary" in stores:
@@ -2809,13 +2815,16 @@ class UnifiedAgent:
                         report["fixed_in"].append(f"trip:{t['destination']}")
 
             if not report["fixed_in"]:
-                _bk_save(
-                    summary=f"[CORRECTION — {topic}] {correct}",
-                    tags=["correction", topic.lower().replace(" ", "_")],
-                    source="correction",
+                # wrong claim wasn't stored anywhere (likely a hallucination) —
+                # persist the correct version once, in the vault, so it can't recur
+                from tools.user_memory import add_brain_entry as _bv_add_fb, normalize_domain as _bv_dom_fb
+                await asyncio.to_thread(
+                    _bv_add_fb, f"[CORRECTION — {topic}] {correct}",
+                    _bv_dom_fb(topic), "correction",
                 )
-                report["added"].append(f"baby_knowledge (new): {correct[:120]}")
-                report["fixed_in"].append("baby_knowledge")
+                report["added"].append(f"shared_summary (new): {correct[:120]}")
+                report["fixed_in"].append("shared_summary")
+                report["note"] = "wrong claim was not found in any store — it was likely generated, not stored; correct version saved to the vault"
 
             return report
 

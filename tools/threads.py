@@ -39,11 +39,21 @@ def log_contact(person: str, topic: str, direction: str, note: str = "",
                 status: str | None = None) -> dict:
     """Record a dated interaction. Reuses the person's open thread on the same
     topic when one exists (keyword overlap), otherwise starts a new thread."""
-    when = (contact_date or date.today().isoformat())[:10]
+    raw = (contact_date or date.today().isoformat())[:10]
+    try:
+        when = date.fromisoformat(raw).isoformat()
+    except ValueError:
+        raise ValueError(f"contact_date must be YYYY-MM-DD (got {contact_date!r}) — convert relative dates like 'last Tuesday' to an actual date first")
     if not status:
         status = "waiting_them" if direction == "outbound" else "waiting_us"
 
-    existing = read_threads(person=person)
+    # Reuse an open thread only on a whole-name-token match ('Elenna' matches
+    # 'Elenna Foo' but 'Anna' never matches 'Annabelle') + topic keyword overlap
+    p_tokens = set(person.lower().split())
+    existing = [
+        t for t in read_threads()
+        if p_tokens & set((t.get("person") or "").lower().split())
+    ]
     topic_words = {w for w in topic.lower().split() if len(w) > 3}
     match = None
     for t in existing:
@@ -55,7 +65,7 @@ def log_contact(person: str, topic: str, direction: str, note: str = "",
     payload = {
         "last_contact": when,
         "last_direction": direction,
-        "last_note": note[:300],
+        "last_note": str(note or "")[:300],
         "status": status,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
