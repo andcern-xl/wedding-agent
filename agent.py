@@ -1082,13 +1082,14 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
                 t for t in sorted(overdue_tasks, key=lambda x: -x["_days_overdue"])
                 if t["_days_overdue"] == 1 or t["_days_overdue"] % 7 == 0
             ]
-            if newsworthy:
+            shown = newsworthy[:6]
+            if shown:
                 lines = [
                     f"  ⚠️ {t['task']}{_owner_label(t)} — day {t['_days_overdue']} overdue"
-                    for t in newsworthy[:6]
+                    for t in shown
                 ]
                 parts.append("OVERDUE — CROSSED A LINE TODAY (newly overdue or hit a weekly milestone; one terse line each):\n" + "\n".join(lines))
-            remaining = len(overdue_tasks) - len(newsworthy)
+            remaining = len(overdue_tasks) - len(shown)
             if remaining > 0:
                 parts.append(f"({remaining} other overdue tasks unchanged since yesterday — do NOT list or mention them; the icebox handles them)")
 
@@ -4123,7 +4124,8 @@ Rules:
 - Pending decisions/open questions: own bullet starting with ⚠️, one line
 - Keep it tight — no filler text, just the facts
 
-{FORMAT_RULES}"""
+{FORMAT_RULES}
+- This is a structured CARD: sections keep their • bullets even with 1–3 facts — the 4+ item rule doesn't apply here."""
 
             response = await self.client.messages.create(
                 model=CHAT_MODEL,
