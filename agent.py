@@ -104,6 +104,26 @@ _BRIEF_BRAIN_TOOL = {
     },
 }
 
+_BRIEF_THREADS_TOOL = {
+    "name": "read_threads",
+    "description": "Read the thread ledger — who they're waiting on, per person/topic, with the dated last contact and days_since_contact. This is the ONLY source allowed for 'last contact' / 'day N' claims about people and vendors. No thread for someone = you don't know when contact last happened, so don't date it.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "person": {"type": "string", "description": "Optional name filter"},
+            "status": {"type": "string", "enum": ["open", "waiting_them", "waiting_us", "resolved"], "description": "Optional status filter; default = all unresolved"},
+        },
+    },
+}
+
+
+def _read_threads_tool_sync(person: str | None = None, status: str | None = None) -> dict:
+    from tools.threads import read_threads
+    try:
+        return {"threads": read_threads(status=status, person=person)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
 
 async def _brief_with_brain(client, model: str, prompt: str, system: str | None = None,
                             max_tokens: int = 800, max_turns: int = 4) -> str:
@@ -116,7 +136,7 @@ async def _brief_with_brain(client, model: str, prompt: str, system: str | None 
         force_text = {"tool_choice": {"type": "none"}} if turn == max_turns - 1 else {}
         resp = await client.messages.create(
             model=model, max_tokens=max_tokens, messages=messages,
-            tools=[_BRIEF_BRAIN_TOOL], **sys_kwargs, **force_text,
+            tools=[_BRIEF_BRAIN_TOOL, _BRIEF_THREADS_TOOL], **sys_kwargs, **force_text,
         )
         turn_text = "".join(b.text for b in resp.content if b.type == "text").strip()
         if turn_text:
@@ -128,7 +148,10 @@ async def _brief_with_brain(client, model: str, prompt: str, system: str | None 
         for b in resp.content:
             if b.type == "tool_use":
                 try:
-                    res = await asyncio.to_thread(_query_brain_sync, b.input.get("query", ""), b.input.get("domain"))
+                    if b.name == "read_threads":
+                        res = await asyncio.to_thread(_read_threads_tool_sync, b.input.get("person"), b.input.get("status"))
+                    else:
+                        res = await asyncio.to_thread(_query_brain_sync, b.input.get("query", ""), b.input.get("domain"))
                 except Exception as exc:
                     res = {"error": str(exc)}
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": json.dumps(res, default=str)})
@@ -1276,7 +1299,7 @@ Notice: short, specific, zero ceremony, references what they already know withou
 
 UNCERTAINTY — knowing what you don't know is part of the voice:
 - NEVER invent specifics: numbers, dates, prices, names, times. If a detail isn't in your context or reachable through a tool, you don't have it — full stop.
-- Dates and day-counts are the #1 fabrication trap: only say "on Jul 11" or "two days ago" or "day 23" if that exact date/count is in the context in front of you. Never re-derive elapsed time yourself. No stored date for when something last happened (a vendor reply, a message, a booking)? Then name the thing WITHOUT dating it: "Elenna still hasn't replied" — not "last contact was Jul 11".
+- Dates and day-counts are the #1 fabrication trap: only say "on Jul 11" or "two days ago" or "day 23" if that exact date/count is in the context in front of you. Never re-derive elapsed time yourself. For people and vendors, read_threads is the only legitimate source of "last contact" — no thread, no date. Then name the thing WITHOUT dating it: "Elenna still hasn't replied" — not "last contact was Jul 11".
 - Before answering anything that depends on their life data, check the brain and tools first. If the lookup comes up empty: "I don't have that noted — tell me and I'll remember it." That answer builds trust; a fabricated one destroys it.
 - Conflicting info? Show the conflict instead of picking silently: "Not sure — the calendar says Friday but the task says Thursday. Which is right?"
 - Genuinely don't know and can't look it up? A plain "idk — want me to dig into it?" is a great answer. Confident-sounding guesses are the single worst thing you can do.
@@ -1400,6 +1423,7 @@ You notice things people say in passing and file them. Do this silently (no need
 ROUTING RULE — durable vs ephemeral, get this right every time:
 • A durable fact about them (preference, habit, person, vendor, relationship, constraint) is NEVER a task and NEVER an FYI. It goes to save_preference / save_shared_context / save_to_brain. "Jess likes kaya waffle from Rice Bakehouse" is brain material — filing it as a task or ackable FYI turns knowledge into fake work.
 • A task needs a verb someone will actually do. An FYI stops mattering within weeks. Everything else that's true about their life → brain.
+• Contact with a person or vendor ("chased Elenna", "emailed the venue", "Kayue replied") → log_contact, silently, every time. The thread ledger is the only place day-counts come from — an unlogged chase is a future hallucination.
 
 save_preference for things about THIS person only:
   • Dietary: allergies, intolerances, dislikes, strong preferences ("Ansen doesn't eat cilantro", "Jess is lactose intolerant")
@@ -1796,6 +1820,45 @@ TOOLS = [
                 "event_id": {"type": "string", "description": "The event ID from read_calendar"},
             },
             "required": ["event_id"],
+        },
+    },
+    {
+        "name": "log_contact",
+        "description": "Record a dated interaction with a person or vendor in the thread ledger. Call whenever they mention contact happening: 'chased Elenna', 'emailed the venue', 'Kayue replied', 'followed up with Abhi'. This is how 'day N, no reply' claims become facts instead of fabrications. Reuses the person's open thread on the same topic automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "person": {"type": "string", "description": "Who: 'Elenna Foo', 'Kayue', 'voco Edinburgh'"},
+                "topic": {"type": "string", "description": "What the thread is about: 'room block', 'wedding film', 'SDE editor'"},
+                "direction": {"type": "string", "enum": ["outbound", "inbound"], "description": "outbound = we contacted them (now waiting on them); inbound = they replied/contacted us"},
+                "note": {"type": "string", "description": "One line on what was said/asked"},
+                "contact_date": {"type": "string", "description": "YYYY-MM-DD; omit for today. Use the date they SAID it happened ('chased her last Tuesday')"},
+                "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"]},
+            },
+            "required": ["person", "topic", "direction"],
+        },
+    },
+    {
+        "name": "read_threads",
+        "description": "Read the thread ledger — who they're waiting on, with dated last contact and days_since_contact. The ONLY source allowed for 'last contact' / 'day N' claims about people and vendors. Use for 'who am I waiting on?', 'when did I last chase X?', and before flagging anything as gone quiet.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "person": {"type": "string", "description": "Optional name filter"},
+                "status": {"type": "string", "enum": ["open", "waiting_them", "waiting_us", "resolved"], "description": "Optional; default = all unresolved"},
+            },
+        },
+    },
+    {
+        "name": "resolve_thread",
+        "description": "Close a thread — the reply came, the booking landed, the question is settled. Call when they say something like 'Elenna confirmed the room block' (also log_contact the inbound reply first if it's dated news).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "person": {"type": "string", "description": "Whose thread"},
+                "topic": {"type": "string", "description": "Optional topic to disambiguate if they have several threads"},
+            },
+            "required": ["person"],
         },
     },
     {
@@ -2591,6 +2654,25 @@ class UnifiedAgent:
             return await asyncio.to_thread(
                 _query_brain_sync, inputs.get("query", ""), inputs.get("domain")
             )
+
+        if name == "log_contact":
+            from tools.threads import log_contact
+            return await asyncio.to_thread(
+                log_contact, inputs["person"], inputs["topic"], inputs["direction"],
+                inputs.get("note", ""), inputs.get("contact_date"), inputs.get("domain", "life"),
+            )
+
+        if name == "read_threads":
+            return await asyncio.to_thread(
+                _read_threads_tool_sync, inputs.get("person"), inputs.get("status")
+            )
+
+        if name == "resolve_thread":
+            from tools.threads import resolve_thread
+            row = await asyncio.to_thread(resolve_thread, inputs["person"], inputs.get("topic", ""))
+            if not row:
+                return {"error": f"No open thread found for {inputs['person']}"}
+            return {"status": "resolved", "person": row["person"], "topic": row["topic"]}
 
         if name == "save_shared_context":
             content = inputs["content"].strip()
@@ -3819,7 +3901,7 @@ OPEN GAP RULES — apply before deciding what to surface:
 • Gaps NOT in the previous list → surface as normal if actionable"""
 
         # --- Proactive tools available to this check ---
-        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in", "query_brain", "read_holdings")]
+        proactive_tools = [t for t in TOOLS if t["name"] in ("search_web", "read_calendar", "read_daily_tasks", "read_fyis", "ask_check_in", "query_brain", "read_holdings", "read_threads")]
 
         _rules = await asyncio.to_thread(_get_behavior_rules, user_id)
         _rules_block = f"\nSTANDING BEHAVIOR RULES (explicit feedback from them — hard rules):\n{_rules}\n" if _rules else ""
