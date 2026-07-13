@@ -672,15 +672,14 @@ async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
-    if not ALLOWED_IDS:
-        return
+    # Stocks/crypto is Ansen's thing — Jess doesn't get the nightly push.
+    # (She can still pull it herself with /stocks if she ever wants it.)
     try:
         brief = await agent.stocks_brief()
         sections = _split_sections(brief)
-        for uid in ALLOWED_IDS:
-            await _send_or_alert(context, uid, "📊 <b>Daily Stocks & Crypto Brief</b>", "stocks_brief")
-            for section in sections:
-                await _send_or_alert(context, uid, section, "stocks_brief")
+        await _send_or_alert(context, ANSEN_ID, "📊 <b>Daily Stocks & Crypto Brief</b>", "stocks_brief")
+        for section in sections:
+            await _send_or_alert(context, ANSEN_ID, section, "stocks_brief")
     except Exception:
         logger.exception("Error sending stocks brief")
 
