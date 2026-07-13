@@ -5472,15 +5472,25 @@ Empty facts array is a fine answer. All listed episodes fade after this pass reg
                 messages=[{"role": "user", "content": prompt}],
             )
             m = re.search(r"\{.*\}", resp.content[0].text, re.DOTALL)
-            data = json.loads(m.group(0)) if m else {"facts": []}
+            if m is None:
+                # Prose reply with no JSON is a parse failure, not "no facts" —
+                # fading everything on it would silently lose the episodes
+                return {"promoted": [], "faded": 0, "error": "consolidation reply unparseable; episodes untouched"}
+            data = json.loads(m.group(0))
         except Exception:
             # Consolidation failing must never lose episodes — leave them for next week
             return {"promoted": [], "faded": 0, "error": "consolidation failed; episodes untouched"}
         promoted = []
         for f in data.get("facts", [])[:10]:
             if f.get("fact"):
-                await asyncio.to_thread(add_brain_entry, f["fact"], f.get("domain") or "life", "consolidation")
-                promoted.append(f["fact"])
+                try:
+                    await asyncio.to_thread(add_brain_entry, f["fact"], f.get("domain") or "life", "consolidation")
+                    promoted.append(f["fact"])
+                except Exception:
+                    # Skip the one fact rather than abort mid-loop — an aborted loop
+                    # leaves episodes active and re-promotes duplicates next Sunday
+                    import logging
+                    logging.getLogger(__name__).exception("consolidation fact write failed")
         await asyncio.to_thread(supersede_entries, [e["id"] for e in old])
         return {"promoted": promoted, "faded": len(old)}
 
