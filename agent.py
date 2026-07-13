@@ -5081,15 +5081,15 @@ Be strict. When in doubt, reject."""
         return {"approved": approved_grouped, "rejected_count": rejected_count}
 
     async def brain_synthesis(self) -> str:
-        """Synthesise shared brain + all budget buckets + recent FYIs into a unified knowledge base."""
-        from tools.fyis import get_fyis as _get_fyis
+        """Synthesise shared brain (facts + recent episodes) + budget buckets into a unified knowledge base."""
+        from tools.user_memory import get_episodes as _get_eps
         from tools.baby_budget import summary as _baby_budget
         shared = get_shared_summary() or ""
-        fyis = _get_fyis(limit=50)
+        fyis = await asyncio.to_thread(_get_eps, 45)
 
         fyi_text = "\n".join(
-            f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
-            for f in fyis
+            f"[{e.get('domain') or 'life'}] ({e.get('fact_date') or ''}) {e['fact']}"
+            for e in fyis
         ) if fyis else "None."
 
         # Budget snapshot across all three buckets
@@ -5370,7 +5370,7 @@ SHAPE:
 - Weave connections instead of separating topics: "Dr Janice at 10 — bring the test reports, and it's the chance to settle the NIPT timing" beats a Baby section and a Today section.
 - RECALL: for each person, place, or occasion in today's plans, query_brain for what you know about them and weave in what's timely — a birthday means what they'd love, a dinner with someone means what you know about them. One well-timed recall beats three tenuous ones.
 - Vary the opening every day. If ALREADY TOLD THEM shows yesterday started with a greeting, start differently today. Starting mid-thought is fine: "Two things today —"
-- Last line: → /tasks /fyis for the full picture
+- Last line: → /tasks /shared for the full picture
 
 {VOICE_RULES}
 {_rules_block}

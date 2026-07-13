@@ -146,9 +146,8 @@ def _wedding_menu() -> InlineKeyboardMarkup:
 def _shared_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧠 Brain", callback_data="shared_brain"),
-         InlineKeyboardButton("📨 FYIs", callback_data="shared_fyis")],
-        [InlineKeyboardButton("✅ Tasks", callback_data="shared_tasks"),
-         InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
+         InlineKeyboardButton("✅ Tasks", callback_data="shared_tasks")],
+        [InlineKeyboardButton("⏰ Reminders", callback_data="shared_reminders")],
         [InlineKeyboardButton("💰 Budget", callback_data="shared_budget"),
          InlineKeyboardButton("✈️ Travel", callback_data="shared_travel")],
         [InlineKeyboardButton("🛒 Groceries", callback_data="shared_groceries"),
@@ -382,13 +381,13 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [
         "<b>Commands</b>\n",
-        "💒 /wedding — catch up, plan, tasks, reminders, shared, FYIs, categories",
+        "💒 /wedding — catch up, plan, tasks, reminders, shared, categories",
         "👶 /baby — weekly brief, knowledge base, milestones",
         "📊 /stocks — newsletter digest + buy/hold/skip\n",
         "💼 /finances — portfolio & money picture\n",
         "<b>Shortcuts</b>",
         "/bringmeuptospeed — full wedding overview",
-        "/plan /tasks /reminders /shared /fyis",
+        "/plan /tasks /reminders /shared",
     ]
     for key, cat in CATEGORIES.items():
         lines.append(f"{cat['emoji']} /{key}")
@@ -1992,7 +1991,7 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"\n🗑 {len(triage['archive'])} expired update{'s' if len(triage['archive']) != 1 else ''} archived quietly.")
             overflow = len(triage["ask"]) - 3
             if overflow > 0:
-                lines.append(f"\n🗂 {overflow} more expiring note{'s' if overflow != 1 else ''} still waiting — check /fyis.")
+                lines.append(f"\n🗂 {overflow} more expiring note{'s' if overflow != 1 else ''} still waiting — they'll resurface next Sunday.")
             text = "\n".join(lines)
             for uid in ALLOWED_IDS:
                 try:
@@ -2598,7 +2597,6 @@ def main():
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("reminders", cmd_reminders))
     app.add_handler(CommandHandler("shared", cmd_shared_parent))
-    app.add_handler(CommandHandler("fyis", cmd_fyis))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
     app.add_handler(CommandHandler("stocks", cmd_stocks))

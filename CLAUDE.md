@@ -46,8 +46,7 @@ Two users in `ALLOWED_USER_IDS` env var. Ansen and Jess.
 ## Commands
 - `/reminders` — tasks split by person (Cas / Jess / Shared) with inline ✅ Done buttons
 - `/tasks` — combined daily brief with buttons
-- `/shared` — shared brain (confirmed couple decisions)
-- `/fyis` — recent FYIs
+- `/shared` — shared brain story (facts + recent episodes; Brain/Tasks/Reminders menu — no FYIs button, the concept is retired)
 - `/commands` — full command list
 - `/plan` — wedding priorities this week
 - `/bringmeuptospeed` — full wedding overview
