@@ -1591,10 +1591,9 @@ log_episode when:
 - "Ask X about Y" with no specific deadline or urgency → log_episode, NOT a task
 - Anything that's just good to know, even if it has a soft "might want to" action attached
 
-RESOLVE STALE FYIs — when something gets confirmed or completed, archive the old pending FYI:
-- Appointment confirmed → call read_fyis, find any "awaiting response / awaiting clinic / sent enquiry" FYIs for that same doctor/venue → archive them immediately
-- Booking confirmed → archive any "looking into / pending / waiting to hear back" FYIs for that vendor
-- Always clean up behind yourself: new confirmed info makes old pending info junk
+RESOLVE STALE PENDING INFO — when something gets confirmed or completed, supersede the old pending version:
+- Appointment or booking confirmed → save_shared_context with the confirmed version (the vault supersedes the stale "awaiting response / sent enquiry" fact automatically) and resolve_thread for that vendor
+- Never surface both the pending and confirmed version of the same thing — the confirmed one wins
 
 add_daily_task when:
 - Concrete future action with real intent to do it: "remind me to call", "we need to book", "don't forget to pay"

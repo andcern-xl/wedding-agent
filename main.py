@@ -105,9 +105,11 @@ async def notify_partner(context: ContextTypes.DEFAULT_TYPE, update: Update, tex
                 msg_text = f"📨 <b>{sender_name}:</b> {escape(text)}\n\n<i>{analysis}</i>" if analysis else f"📨 <b>{sender_name}:</b> {escape(text)}"
                 keyboard = None
                 if is_fyi:
+                    # The episode is already in the brain — the only button that
+                    # makes sense is a social ack. "Save to my FYIs" was a fake:
+                    # it wrote to the retired fyis table nothing reads.
                     keyboard = InlineKeyboardMarkup([[
                         InlineKeyboardButton("✅ Got it", callback_data=f"fyi_ack:{sender_id}:{uid}"),
-                        InlineKeyboardButton("📌 Save to my FYIs", callback_data=f"fyi_save:{sender_id}:{uid}"),
                     ]])
                 await context.bot.send_message(
                     chat_id=uid,
@@ -125,7 +127,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         "👋 Two brains, one bot.\n",
         "/wedding — planning & categories",
-        "/shared — tasks, reminders, FYIs, shared brain",
+        "/shared — brain, tasks, reminders",
         "/baby — pregnancy updates, milestones, knowledge base",
         "/stocks — newsletter digest + buy/hold/skip",
         "/finances — portfolio & money picture",
@@ -1809,8 +1811,9 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
         expired = await asyncio.to_thread(expire_stale, 7)
         for ci in expired:
             try:
-                from tools.fyis import log_fyi as _log_fyi
-                _log_fyi(ci.get("created_by") or 0, f"Unanswered check-in (expired): {ci['question']}")
+                from tools.user_memory import add_brain_entry as _add_ep
+                _add_ep(f"Unanswered check-in (expired): {ci['question']}", "life",
+                        "check_in_expiry", None, "episode")
             except Exception:
                 pass
     except Exception:
@@ -2134,20 +2137,11 @@ async def _handle_fyi_callback(query, context, data: str):
             if ": " in content:
                 content = content.split(": ", 1)[1]
 
-            try:
-                from tools.fyis import log_fyi as _log_fyi
-                _log_fyi(receiver_id, content)
-            except Exception:
-                pass
-
+            # Legacy button from old messages — the content is already in the
+            # brain as an episode, so this is an ack, not a save.
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="📌 Saved to your FYIs.",
-            )
-            await context.bot.send_message(
-                chat_id=sender_id,
-                text=f"📌 <b>{receiver_name}</b> saved your FYI to their list.",
-                parse_mode="HTML",
+                text="🧠 Already in the shared brain — nothing extra to save.",
             )
 
 
@@ -2572,7 +2566,7 @@ def main():
         commands = [
             BotCommand("start", "Help & intro"),
             BotCommand("wedding", "💒 Wedding planning"),
-            BotCommand("shared", "🧠 Shared tasks, FYIs & brain"),
+            BotCommand("shared", "🧠 Shared brain, tasks & reminders"),
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
             BotCommand("finances", "💼 Portfolio & money picture"),
