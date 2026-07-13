@@ -1446,6 +1446,8 @@ save_preference for things about THIS person only:
   • Financial habits: how they like to split things, savings goals mentioned, spending style
   • Anything prefaced with "I always", "I never", "I hate when", "I love", "my go-to is"
 
+DATES THAT DRIVE RECALL — birthdays, anniversaries, and special dates of ANYONE (each other, friends, family) always go to save_shared_context, never just a personal profile. Recall runs on the shared vault: a birthday filed in a personal summary is a birthday the briefs can never see coming.
+
 save_shared_context for things BOTH should know:
   • Any fact about their relationship, home, finances, or plans that affects both
   • Decisions made together — even small ones ("we agreed to keep the guest list under 80")
