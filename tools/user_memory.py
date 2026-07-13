@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from tools.db import get_client
 
 SHARED_BRAIN_ID = 0  # sentinel user_id for the couple's shared context
@@ -44,33 +44,63 @@ def normalize_domain(raw: str | None) -> str:
     return _DOMAIN_ALIASES.get((raw or "").strip().lower(), "life")
 
 
-def get_active_entries(domain: str | None = None) -> list[dict]:
-    q = (
-        get_client().table("brain_entries")
-        .select("id,domain,fact,fact_date,source")
-        .eq("status", "active")
-    )
-    if domain:
-        q = q.eq("domain", domain)
-    rows = q.order("fact_date", desc=False).execute().data or []
+def get_active_entries(domain: str | None = None, kind: str | None = None) -> list[dict]:
+    try:
+        q = (
+            get_client().table("brain_entries")
+            .select("id,domain,fact,fact_date,source,kind")
+            .eq("status", "active")
+        )
+        if domain:
+            q = q.eq("domain", domain)
+        if kind:
+            q = q.eq("kind", kind)
+        rows = q.order("fact_date", desc=False).execute().data or []
+    except Exception:
+        # kind column not migrated yet — treat everything as a fact
+        if kind == "episode":
+            return []
+        q = (
+            get_client().table("brain_entries")
+            .select("id,domain,fact,fact_date,source")
+            .eq("status", "active")
+        )
+        if domain:
+            q = q.eq("domain", domain)
+        rows = q.order("fact_date", desc=False).execute().data or []
+        for r in rows:
+            r["kind"] = "fact"
     order = {d: i for i, d in enumerate(DOMAINS)}
     rows.sort(key=lambda r: (order.get(r.get("domain"), len(DOMAINS)), r.get("fact_date") or ""))
     return rows
 
 
+def get_episodes(days: int = 45) -> list[dict]:
+    """Active episodes (dated life events), newest first, within the window."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    rows = [
+        e for e in get_active_entries(kind="episode")
+        if (e.get("fact_date") or "") >= cutoff
+    ]
+    rows.sort(key=lambda r: r.get("fact_date") or "", reverse=True)
+    return rows
+
+
 def add_brain_entry(fact: str, domain: str = "life", source: str = "chat",
-                    fact_date: str | None = None) -> dict:
-    row = (
-        get_client().table("brain_entries")
-        .insert({
-            "fact": fact.strip(),
-            "domain": normalize_domain(domain),
-            "source": source,
-            "fact_date": fact_date or date.today().isoformat(),
-        })
-        .execute()
-        .data or [{}]
-    )
+                    fact_date: str | None = None, kind: str = "fact") -> dict:
+    payload = {
+        "fact": fact.strip(),
+        "domain": normalize_domain(domain),
+        "source": source,
+        "fact_date": fact_date or date.today().isoformat(),
+        "kind": kind,
+    }
+    try:
+        row = get_client().table("brain_entries").insert(payload).execute().data or [{}]
+    except Exception:
+        # kind column not migrated yet
+        payload.pop("kind", None)
+        row = get_client().table("brain_entries").insert(payload).execute().data or [{}]
     return row[0]
 
 

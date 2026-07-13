@@ -1918,12 +1918,33 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
-    """Sunday triage: expiring FYIs auto-file into the brain or archive quietly.
-    Only genuine judgment calls still get a keep/promote/archive card — FYIs are
-    brain-building material, not a checklist for the humans to work through."""
+    """Sunday sleep cycle: old episodes consolidate into durable facts or fade;
+    legacy FYIs still draining get auto-triaged. Only genuine judgment calls
+    get a card — memory is brain-building material, not a checklist."""
     if not ALLOWED_IDS:
         return
     try:
+        # Episode consolidation runs regardless of legacy FYIs
+        try:
+            consolidation = await agent.consolidate_episodes()
+        except Exception:
+            logger.exception("episode consolidation failed")
+            consolidation = {}
+        if consolidation.get("promoted") or consolidation.get("faded"):
+            lines = []
+            if consolidation.get("promoted"):
+                lines.append("🧠 <b>Consolidated from this month's episodes</b>\n")
+                lines += [f"• {escape(p[:180])}" for p in consolidation["promoted"]]
+            faded = consolidation.get("faded") or 0
+            if faded:
+                lines.append(f"\n💤 {faded} old episode{'s' if faded != 1 else ''} faded quietly.")
+            text = "\n".join(lines)
+            for uid in ALLOWED_IDS:
+                try:
+                    await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+                except Exception:
+                    logger.exception(f"consolidation summary send failed for {uid}")
+
         expiring = get_fyis_expiring(days_threshold=21, limit=10)
         if not expiring:
             return

@@ -17,12 +17,15 @@ Deployed on Railway (auto-deploys on push to `main`).
 - `agent.py` — LLM agent, system prompt, tool execution, brief generation
 - `tools/daily.py` — task CRUD (Supabase `daily_tasks` table)
 - `tools/user_memory.py` — per-user summaries + shared brain (`user_id=0` sentinel)
-- `tools/fyis.py` — FYI log (lifecycle: active → archived/promoted, per-user acks, 30-day TTL)
+- `tools/fyis.py` — LEGACY FYI log (draining; replaced by brain episodes — kept one release as rollback)
 - `tools/check_ins.py` — check-ins: decision questions the agent asks via button cards (lifecycle: open → answered/dismissed/snoozed/expired)
 - `tools/notifications.py` — scheduled notifications
 
 ## Database (Supabase)
 Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`, `threads`
+
+## Episodic vs semantic memory (replaces FYIs)
+`brain_entries.kind` (`supabase_brain_kind.sql`): `fact` = timeless knowledge ("Jess likes kaya waffles from Rice Bakehouse"), `episode` = dated life event ("paid condo fee $837, 2 Jul") logged via `log_episode` (partner still pushed instantly at capture). Episodes sit dormant as context, surface via RECALL discipline (all briefs + chat query the brain for every person/occasion in scope — the "it's Jess's birthday, she likes X" behavior), and consolidate Sundays: 45-day-old episodes → pattern facts or fade (`consolidate_episodes`). `log_fyi` aliases to `log_episode`; `read_fyis` reads episodes + draining legacy FYIs. One-off migration: `migrate_fyis.py` (dry-run default).
 
 ## Thread ledger
 `threads` table (`supabase_threads.sql`): dated contact tracking per person/topic — the ONLY legitimate source for "last contact" / "day N" claims. Tools: `log_contact` (silent, on any mentioned contact; whole-name-token + topic-keyword thread matching), `read_threads` (computed `days_since_contact`), `resolve_thread`. Date corrections from users ("last contact was NOT 2 days ago") route to `log_contact` with the corrected `contact_date`, not `correct_knowledge`.

@@ -14,7 +14,7 @@ from tools.log import get_drops, get_recent_drops, drop
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today, complete_task, get_task_by_id
 from tools.notifications import schedule_notification as _sched_notif, list_notifications as _list_notifs, cancel_notification as _cancel_notif
-from tools.fyis import log_fyi, get_fyis, get_fyis_today
+from tools.fyis import get_fyis, get_fyis_today
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
 from tools.user_memory import get_summary, save_summary, get_message_count, get_shared_summary, append_shared_summary
 from tools.gcal import get_events, create_event, delete_event
@@ -1123,8 +1123,14 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
         # Wedding drops today
         today_drops = [d for d in get_recent_drops(limit=30) if d["ts"][:10] == today_str]
 
-        # FYIs shared today
+        # FYIs + episodes logged today
         today_fyis = get_fyis_today()
+        try:
+            from tools.user_memory import get_episodes as _get_eps_today
+            _eps = await asyncio.to_thread(_get_eps_today, 2)
+            today_episodes = [e for e in _eps if (e.get("fact_date") or "") == today_str]
+        except Exception:
+            today_episodes = []
 
         # Calendar events tomorrow
         try:
@@ -1150,13 +1156,15 @@ Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**.
                 lines.append(f"  • {cat}{d['content'][:120]}")
             parts.append("WEDDING NOTES TODAY:\n" + "\n".join(lines))
 
-        if today_fyis:
+        if today_fyis or today_episodes:
             lines = []
             for f in today_fyis:
                 owner = names.get(f["user_id"], str(f["user_id"]))
                 cat = f"[{f['category']}] " if f.get("category") else ""
                 lines.append(f"  • {owner}: {cat}{f['content'][:120]}")
-            parts.append("FYIS SHARED TODAY:\n" + "\n".join(lines))
+            for e in today_episodes:
+                lines.append(f"  • [{e.get('domain') or 'life'}] {e['fact'][:120]}")
+            parts.append("LOGGED TODAY (episodes/FYIs):\n" + "\n".join(lines))
 
         if tomorrow_tasks or tomorrow_events:
             lines = []
@@ -1224,6 +1232,7 @@ SHAPE:
 - Flowing prose, not sections. One short paragraph on today (what got done, what was shared — name who did/shared what naturally, "Jess booked...", not "[Jess]"), one on tomorrow (times for calendar events).
 - If today was empty and tomorrow is clear, say so in one line and stop. A two-line wrap on a quiet day is perfect.
 - This is a DELTA, not a status report. Never re-list things that are "exactly where they were" — if nothing moved, that's one clause ("quiet day, nothing moved"), then straight to tomorrow. Reciting the stale pile with day counts is the one thing this message must never do.
+- RECALL: for each person or occasion in tomorrow's plans, query_brain for what you know about them — a birthday tomorrow means surfacing what they'd love, not just the calendar entry. One well-timed recall max.
 - No emoji section headers, no "Done today:" labels. Bullets only if listing 4+ parallel items.
 - Vary how it opens night to night. Never open with a greeting formula.
 
@@ -1345,7 +1354,9 @@ This is your memory from all past conversations, compressed every 2 messages by 
 If someone says "do you remember X" and it's in the profile: confirm and use it. If it's not: say honestly "I don't have that noted — tell me again and I'll remember it."
 If it contains a PREFERENCES section, follow those as standing orders without being asked again.
 
-SHARED BRAIN — the slice most relevant to this message (recent facts + keyword matches). This is NOT the whole vault: the full brain lives in the query_brain tool, filed by domain (baby/wedding/travel/money/life). Before saying "I don't have that", flagging something as unresolved, or asking them to repeat a detail — call query_brain first. It's cheap; when in doubt, query:
+SHARED BRAIN — the slice most relevant to this message (recent facts + keyword matches). This is NOT the whole vault: the full brain lives in the query_brain tool, filed by domain (baby/wedding/travel/money/life). Before saying "I don't have that", flagging something as unresolved, or asking them to repeat a detail — call query_brain first. It's cheap; when in doubt, query.
+
+RECALL — work like a memory, not a search box: when a person, place, or occasion comes up (a birthday, a dinner with someone, a vendor, somewhere they're headed), query_brain for what you know about them BEFORE replying, and surface dormant knowledge when the moment is right — "it's Jess's birthday Friday — she loves the kaya waffles from Rice Bakehouse" is the entire point of remembering. Don't force it: one well-timed recall beats three tenuous ones.
 {shared_summary}
 
 RECENT FYIs — notes and updates from the last 30 days. Reference naturally when relevant — don't quote back verbatim:
@@ -1420,9 +1431,10 @@ HOW TO USE TOOLS
 PROACTIVE MEMORY — save facts without being asked
 You notice things people say in passing and file them. Do this silently (no need to announce every save):
 
-ROUTING RULE — durable vs ephemeral, get this right every time:
-• A durable fact about them (preference, habit, person, vendor, relationship, constraint) is NEVER a task and NEVER an FYI. It goes to save_preference / save_shared_context / save_to_brain. "Jess likes kaya waffle from Rice Bakehouse" is brain material — filing it as a task or ackable FYI turns knowledge into fake work.
-• A task needs a verb someone will actually do. An FYI stops mattering within weeks. Everything else that's true about their life → brain.
+ROUTING RULE — the brain has two kinds of memory; file into the right one every time:
+• FACT (semantic — timeless truth about who they are): preference, habit, person, vendor, relationship, constraint → save_preference / save_shared_context / save_to_brain. "Jess likes kaya waffle from Rice Bakehouse" is a fact — it never expires and should surface whenever it's relevant (her birthday, passing Rice Bakehouse, gift ideas).
+• EPISODE (episodic — a dated thing that happened): payments made, applications submitted, bookings landed, arrivals → log_episode. Episodes notify the partner now, then sit dormant as context and fade unless a pattern consolidates them into a fact.
+• A task needs a verb someone will actually DO. Nothing that is merely true belongs in the task list.
 • Contact with a person or vendor ("chased Elenna", "emailed the venue", "Kayue replied") → log_contact, silently, every time. The thread ledger is the only place day-counts come from — an unlogged chase is a future hallucination.
 
 save_preference for things about THIS person only:
@@ -1448,9 +1460,9 @@ When someone drops a note, link, screenshot, or update, scan it for domain signa
 🔑 Strong signals → file confidently without asking:
 • pregnancy / birth / trimester / scan / OB / midwife / epidural / breastfeeding / newborn / postpartum / motherhood / parenting / baby sleep / formula / pram / nursery → save_baby_knowledge (knowledge) or log_baby_expense (if a purchase/cost)
 • venue / caterer / florist / photographer / wedding dress / guest list / RSVP / seating plan / honeymoon → log_wedding_drop; if it's a cost/payment → also log via wedding_payments tool
-• travel / flight / hotel / itinerary / airport / booking ref → log_fyi with category="travel"; if it's a cost → log_shared_expense with category="travel"
-• restaurant / food / café / reservation / dinner → log_fyi with category="social" or "food"
-• home / lease / renovation / moving / landlord / cleaning → log_fyi with category="home"; if it's a cost → log_shared_expense with category="home"
+• travel / flight / hotel / itinerary / airport / booking ref → log_episode with domain="travel"; if it's a cost → log_shared_expense with category="travel"
+• restaurant / food / café / reservation / dinner → log_episode with domain="life"
+• home / lease / renovation / moving / landlord / cleaning → log_episode with domain="life"; if it's a cost → log_shared_expense with category="home"
 
 BUDGET ROUTING — three buckets, mutually exclusive:
 • Wedding cost (venue, catering, photography, DJ, flowers, attire, transport for guests, honeymoon) → wedding budget via existing wedding_payments
@@ -1568,13 +1580,13 @@ Keep entries to one clear sentence — the shared brain is injected into every A
 TASK vs FYI — infer from intent, not keywords
 Ask: does this need to be done, or is it sharing something?
 
-log_fyi when:
+log_episode when:
 - Past tense / completed action: "I paid the bill", "I booked the restaurant", "I called the vet"
 - Status update: "I'm running late", "the plumber is coming at 3", "the package arrived"
 - News or information: "the vet called, results were fine", "the venue confirmed our date"
 - Sharing context: "the caterer raised their prices", "Mum is arriving Friday"
-- Trackers and balances: "pedicure package — 6 sessions remaining", "10 manicure sessions, used 3" → log_fyi with category="personal", NEVER add_daily_task
-- "Ask X about Y" with no specific deadline or urgency → log_fyi, NOT a task
+- Trackers and balances: "pedicure package — 6 sessions remaining", "10 manicure sessions, used 3" → log_episode with domain="life", NEVER add_daily_task
+- "Ask X about Y" with no specific deadline or urgency → log_episode, NOT a task
 - Anything that's just good to know, even if it has a soft "might want to" action attached
 
 RESOLVE STALE FYIs — when something gets confirmed or completed, archive the old pending FYI:
@@ -1611,11 +1623,11 @@ TASK QUALITY RULES — enforce these strictly:
   RIGHT: "Look into OCBC credit card for points"
 - Social events / dinners with a confirmed date and time → create_calendar_event, NOT add_daily_task. If a task already exists for it, mark it done after creating the event.
 - Package trackers / running balances ("10 manicure sessions, 7 remaining") → save to personal summary via save_preference, NOT add_daily_task
-- Facts or preferences about either person ("Jess likes kaya waffle", "Ansen prefers window seats", "Jess is allergic to X") → save_preference for that person, NEVER add_daily_task or log_fyi. These are memory, not tasks.
-- Items someone already owns or knows about ("AirPods are in the car") → log_fyi, NOT add_daily_task
-- NEVER create a task that starts with "FYI" — that is always a log_fyi call
+- Facts or preferences about either person ("Jess likes kaya waffle", "Ansen prefers window seats", "Jess is allergic to X") → save_preference for that person, NEVER add_daily_task or log_episode. These are memory, not tasks.
+- Items someone already owns or knows about ("AirPods are in the car") → log_episode, NOT add_daily_task
+- NEVER create a task that starts with "FYI" — that is always a log_episode call
 - If a statement describes a fact, trait, or preference about Ansen or Jess with no action required → save_preference, full stop. Do not create a task.
-- Work documents, tool lists, policy docs, email summaries, "approved X list" — these are NEVER tasks. Do not create tasks from them. If anything, log_fyi or save_baby_knowledge if relevant.
+- Work documents, tool lists, policy docs, email summaries, "approved X list" — these are NEVER tasks. Do not create tasks from them. If anything, log_episode or save_baby_knowledge if relevant.
 - Never create a task with a body longer than a single clear sentence. If the content is a list or paragraph, it's not a task.
 
 HOW TO RESPOND
@@ -1866,20 +1878,21 @@ TOOLS = [
         },
     },
     {
-        "name": "log_fyi",
-        "description": "Save a shared FYI — TIME-BOUND information one partner wants the other to know, not an action item. Use ONLY for things that stop mattering within weeks: past-tense updates, status shares, 'heads up' messages. Examples: 'FYI I paid the electricity bill', 'just letting you know I booked a table', 'heads up I'll be home late'. NOT for durable facts: preferences ('Jess likes kaya waffle from Rice Bakehouse'), habits, people, vendors, or anything about who they are → those go to save_preference / save_shared_context / save_to_brain instead. An FYI expires quietly; a fact about them belongs in the brain forever.",
+        "name": "log_episode",
+        "description": "Record a dated life event in the brain's episodic memory — something that HAPPENED: 'paid the electricity bill', 'booked a table at X', 'submitted the PR application', 'Jess landed in Amsterdam'. The partner is notified immediately; the episode then sits dormant as context and fades unless it consolidates into a durable fact. NOT for durable facts about who they are (preferences, habits, people, vendors) → save_preference / save_shared_context / save_to_brain. NOT for things someone must DO → add_daily_task.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The FYI content"},
-                "category": {"type": "string", "description": "Optional category: finance, health, home, work, social, travel, personal"},
+                "content": {"type": "string", "description": "What happened, one line, with the concrete details (amounts, references, names)"},
+                "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Which part of their life. Default life."},
+                "event_date": {"type": "string", "description": "YYYY-MM-DD if it happened on a specific past date; omit for today"},
             },
             "required": ["content"],
         },
     },
     {
         "name": "read_fyis",
-        "description": "Read recent shared FYIs — updates and info shared between Ansen and Jess.",
+        "description": "Read recent episodes — dated life events from the couple's episodic memory (plus any legacy FYIs still draining). What happened lately.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2487,14 +2500,26 @@ class UnifiedAgent:
             ok = await asyncio.to_thread(delete_event, inputs["event_id"])
             return {"status": "deleted" if ok else "not_found"}
 
-        if name == "log_fyi":
-            result = log_fyi(user_id, inputs["content"], inputs.get("category"))
-            flags["fyi"] = True
-            return {"status": "logged", "id": str(result["id"])}
+        if name in ("log_episode", "log_fyi"):
+            from tools.user_memory import add_brain_entry as _add_entry
+            row = await asyncio.to_thread(
+                _add_entry, inputs["content"], inputs.get("domain") or inputs.get("category") or "life",
+                "episode", inputs.get("event_date"), "episode",
+            )
+            flags["fyi"] = True  # keeps the immediate partner push
+            return {"status": "logged", "kind": "episode", "id": str(row.get("id"))}
 
         if name == "read_fyis":
-            fyis = get_fyis(limit=inputs.get("limit", 20))
-            return [{"id": str(f["id"]), "user_id": f["user_id"], "content": f["content"], "category": f.get("category"), "created_at": f["created_at"][:16]} for f in fyis]
+            from tools.user_memory import get_episodes as _get_eps
+            episodes = await asyncio.to_thread(_get_eps, 45)
+            merged = [
+                {"date": e.get("fact_date"), "domain": e.get("domain"), "content": e["fact"]}
+                for e in episodes[:inputs.get("limit", 20)]
+            ]
+            for f in get_fyis(limit=inputs.get("limit", 20)):
+                merged.append({"date": (f.get("created_at") or "")[:10], "domain": f.get("category"), "content": f["content"], "legacy_fyi": True})
+            merged.sort(key=lambda x: x.get("date") or "", reverse=True)
+            return merged[:inputs.get("limit", 20)]
 
         if name == "message_partner":
             partner_ids = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip() and int(x.strip()) != user_id]
@@ -3537,11 +3562,15 @@ SPACING: blank line between every single element — signal, thesis, momentum, f
         async def _get_fyis():
             try:
                 from tools.fyis import get_fyis_for_context
-                _fyis = get_fyis_for_context(limit=15)
-                return "\n".join(
+                from tools.user_memory import get_episodes as _eps
+                lines = [
                     f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
-                    for f in _fyis
-                )
+                    for f in get_fyis_for_context(limit=15)
+                ] + [
+                    f"[{e.get('domain') or 'life'}] ({e.get('fact_date') or ''}) {e['fact']}"
+                    for e in (await asyncio.to_thread(_eps, 21))[:15]
+                ]
+                return "\n".join(lines)
             except Exception:
                 return ""
 
@@ -3996,6 +4025,7 @@ RULES:
 - DECISION QUESTIONS: when a flag needs {user_name}'s call (which option, who handles it, before/after, book or skip), call ask_check_in — it sends a separate card with tap buttons and the answer is saved automatically. Do NOT also pose the question in your text; mention the topic in one line and move on. Max 2 ask_check_in calls per run. Purely informational flags stay as prose.
 - Lead with imminent events if any — give each one a named header using the ACTUAL day name from the calendar date, e.g. ⚡ <b>Tomorrow: [Event Name]</b> only if it's genuinely the next calendar day; otherwise use the weekday name: ⚡ <b>Tuesday: [Event Name]</b>. Never label something "Tomorrow" unless it falls on tomorrow's date.
 - Be selective — max 3 items on a normal night. If nothing is genuinely worth flagging, say NOTHING
+- RECALL: for each person or occasion in the upcoming window (birthdays, dinners, vendor meetings, trips), query_brain for what you know about them — surfacing "she loves the kaya waffles from Rice Bakehouse" ahead of Jess's birthday is worth more than any reminder. Dormant knowledge at the right moment is the job.
 - Don't repeat what the morning brief already covers (today's due tasks)
 - Write flowing prose per item, not emoji-header-per-item template blocks. Short bold lead-in per item is fine; no calendar emojis and day-name headers unless an event is genuinely imminent.
 {FORMAT_RULES}
@@ -4109,10 +4139,15 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
         ]
         try:
             from tools.fyis import get_fyis_for_context
-            _fyis = get_fyis_for_context(limit=15)
+            from tools.user_memory import get_episodes as _eps_ctx
             recent_fyis = "\n".join(
-                f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
-                for f in _fyis
+                [
+                    f"[{f.get('category', 'misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}"
+                    for f in get_fyis_for_context(limit=15)
+                ] + [
+                    f"[{e.get('domain') or 'life'}] ({e.get('fact_date') or ''}) {e['fact']}"
+                    for e in (await asyncio.to_thread(_eps_ctx, 21))[:15]
+                ]
             )
         except Exception:
             recent_fyis = ""
@@ -5333,6 +5368,7 @@ THIS IS A DELTA, NOT A STATUS REPORT:
 SHAPE:
 - Flowing prose, 1–3 short paragraphs. No emoji section headers. No bullets unless listing 4+ parallel items (rare).
 - Weave connections instead of separating topics: "Dr Janice at 10 — bring the test reports, and it's the chance to settle the NIPT timing" beats a Baby section and a Today section.
+- RECALL: for each person, place, or occasion in today's plans, query_brain for what you know about them and weave in what's timely — a birthday means what they'd love, a dinner with someone means what you know about them. One well-timed recall beats three tenuous ones.
 - Vary the opening every day. If ALREADY TOLD THEM shows yesterday started with a greeting, start differently today. Starting mid-thought is fine: "Two things today —"
 - Last line: → /tasks /fyis for the full picture
 
@@ -5359,19 +5395,26 @@ STALENESS — before surfacing any FYI, cross-check it:
         return await self._daily.evening_brief(user_ids, user_names, already_sent=already_sent)
 
     async def fyi_story(self) -> str:
-        """The last month of FYIs woven into a story — context to catch someone
-        up, not an inbox to clear. Pulls from the vault/ledger to fill gaps."""
+        """The last month of episodes woven into a story — context to catch
+        someone up, not an inbox to clear. Pulls from the vault/ledger to fill gaps."""
         from tools.fyis import get_fyis as _get_fyis
+        from tools.user_memory import get_episodes as _get_eps
         fyis = await asyncio.to_thread(_get_fyis, 30)
-        if not fyis:
-            return ""
-        listing = "\n".join(
-            f"• ({(f.get('created_at') or '')[:10]}) [{f.get('category') or 'misc'}] {f['content']}"
+        episodes = await asyncio.to_thread(_get_eps, 35)
+        items = [
+            {"date": (f.get("created_at") or "")[:10], "tag": f.get("category") or "misc", "content": f["content"]}
             for f in fyis
-        )
+        ] + [
+            {"date": e.get("fact_date") or "", "tag": e.get("domain") or "life", "content": e["fact"]}
+            for e in episodes
+        ]
+        if not items:
+            return ""
+        items.sort(key=lambda x: x["date"], reverse=True)
+        listing = "\n".join(f"• ({i['date']}) [{i['tag']}] {i['content']}" for i in items)
         _rules = await asyncio.to_thread(_get_behavior_rules, 0)
         _rules_block = f"\nSTANDING BEHAVIOR RULES (hard rules from them):\n{_rules}\n" if _rules else ""
-        prompt = f"""Here is the last month of FYIs Ansen and Jess shared with each other (newest first):
+        prompt = f"""Here is the last month of life events Ansen and Jess logged (newest first):
 
 {listing}
 
@@ -5396,6 +5439,50 @@ Write the story these tell — what's been happening in their life this month. T
             if len(tail) > 200:
                 text = tail
         return _fix_md(text)
+
+    async def consolidate_episodes(self) -> dict:
+        """Sleep-cycle consolidation: episodes older than 45 days either reveal
+        a durable pattern (→ fact) or fade. Keeps recall sharp as memory grows."""
+        from tools.user_memory import get_active_entries, supersede_entries, add_brain_entry
+        cutoff = (date.today() - timedelta(days=45)).isoformat()
+        old = [
+            e for e in await asyncio.to_thread(get_active_entries, None, "episode")
+            if (e.get("fact_date") or "") < cutoff
+        ]
+        if not old:
+            return {"promoted": [], "faded": 0}
+        listing = "\n".join(
+            f"{i}. ({e.get('fact_date')}) [{e.get('domain')}] {e['fact']}"
+            for i, e in enumerate(old)
+        )
+        prompt = f"""These dated episodes in Ansen & Jess's memory are over six weeks old. Consolidate them the way a sleeping brain does:
+
+{listing}
+
+- Several episodes revealing a durable pattern → write it as ONE timeless fact ("three kaya-waffle mentions → Jess loves the kaya waffles from Rice Bakehouse")
+- An episode whose outcome is a lasting truth (an application submitted and still pending, an account opened) → rewrite as a fact anchored "as of [month]"
+- Spent one-offs (a bill paid, a delivery that arrived) → nothing; they just fade
+- Every fact must still be true and useful in a year
+
+Return ONLY JSON: {{"facts": [{{"fact": "...", "domain": "baby|wedding|travel|money|life"}}]}}
+Empty facts array is a fine answer. All listed episodes fade after this pass regardless."""
+        try:
+            resp = await self.client.messages.create(
+                model=CHAT_MODEL, max_tokens=1200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            m = re.search(r"\{.*\}", resp.content[0].text, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {"facts": []}
+        except Exception:
+            # Consolidation failing must never lose episodes — leave them for next week
+            return {"promoted": [], "faded": 0, "error": "consolidation failed; episodes untouched"}
+        promoted = []
+        for f in data.get("facts", [])[:10]:
+            if f.get("fact"):
+                await asyncio.to_thread(add_brain_entry, f["fact"], f.get("domain") or "life", "consolidation")
+                promoted.append(f["fact"])
+        await asyncio.to_thread(supersede_entries, [e["id"] for e in old])
+        return {"promoted": promoted, "faded": len(old)}
 
     async def triage_expiring_fyis(self, expiring: list[dict]) -> dict:
         """Classify expiring FYIs: durable facts auto-promote to the brain,

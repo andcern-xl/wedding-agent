@@ -20,7 +20,7 @@ the table exists in its SQL file:
 | `user_summaries` | `supabase_wedding.sql` |
 | `wedding_payments` | `supabase_wedding.sql` |
 | `check_ins` | `supabase_check_ins.sql` |
-| `brain_entries` | `supabase_brain_entries.sql` |
+| `brain_entries` | `supabase_brain_entries.sql` (+ `kind` col: `supabase_brain_kind.sql`) |
 | `loop_state` | `supabase_loop_state.sql` |
 | `threads` | `supabase_threads.sql` |
 
