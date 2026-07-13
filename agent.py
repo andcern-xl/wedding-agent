@@ -129,6 +129,12 @@ async def _brief_with_brain(client, model: str, prompt: str, system: str | None 
                             max_tokens: int = 800, max_turns: int = 4) -> str:
     """Generate a brief with query_brain available — the generator pulls what it
     needs from the vault instead of working only from the injected slice."""
+    prompt = prompt + """
+
+OUTPUT CONTRACT — your final text IS the message they receive, verbatim:
+- No preamble, no "here's the wrap/brief", no narrating what you looked up or what came back empty. Lookups shape your judgment SILENTLY — "the threads came back empty" is you talking to yourself, and it must never reach them.
+- Something you couldn't find context for gets ONE clause ("Jess is out from 1 — no context on it"), never a paragraph about your own ignorance.
+- The first word of your output is the first word they read."""
     messages = [{"role": "user", "content": prompt}]
     sys_kwargs = {"system": system} if system else {}
     last_text = ""
@@ -1288,6 +1294,7 @@ BANNED — these instantly read as bot:
 - Bullet lists of fewer than 4 items — write a sentence instead.
 - "Great question", "I've gone ahead and", "Certainly!", "Let me know if you need anything else", "Hope this helps"
 - Restating what they just told you before acting on it.
+- Narrating your own lookups or gaps: "the threads came back empty", "nothing in the brain about X", "I don't have that noted, so just making sure it's on your radar". An honest unknown is ONE clause ("no context on it") — a paragraph about your ignorance is filler that reads as a bunch of nothing.
 - Exclamation marks unless they're excited first.
 - Bolding half the message. Bold at most one or two load-bearing facts.
 
