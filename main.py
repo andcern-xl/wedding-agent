@@ -29,6 +29,20 @@ from tools.check_ins import (
 from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id, mark_calendar_added as mark_show_calendar_added, delete_show as _delete_show_by_id
 
 ANSEN_ID = 63756531
+JESS_ID = 6927468999
+
+# Per-person nightly Reddit nuggets — his = dad's-eye view, hers = the pregnant
+# person's own experience.
+_NUGGET_FEEDS = [
+    {
+        "user_id": ANSEN_ID, "state_key": "daddit_nuggets", "subreddits": ["daddit"],
+        "angle": "This goes to Ansen — address him directly as 'you', never in third person. 1-3 nuggets from r/daddit, learning from dads who've been there, to support Jess through pregnancy and prep for the baby. Pick takeaways for him: partner empathy, what actually helps a pregnant partner, newborn prep, dad mindset.",
+    },
+    {
+        "user_id": JESS_ID, "state_key": "babybumps_nuggets", "subreddits": ["BabyBumps", "pregnant"],
+        "angle": "This goes to Jess — address her directly as 'you', never in third person (don't call her 'Jess', say 'you'). 1-3 nuggets from r/BabyBumps and r/pregnant, from other pregnant women living it right now. Pick takeaways for her: what to expect this stage, symptom reality, self-advocacy at appointments, things she'd want to know from someone a few weeks ahead. Warm and reassuring, never alarming.",
+    },
+]
 
 load_dotenv()
 
@@ -1918,17 +1932,20 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception("icebox offer sweep failed")
 
-    # 🌰 Nightly learning nugget from r/daddit — Ansen only, never blocks the wrap
-    try:
-        nugget = await agent.nightly_nugget()
-        if nugget:
-            await context.bot.send_message(
-                chat_id=ANSEN_ID,
-                text="🌰 <b>Tonight's nuggets — r/daddit</b>\n\n" + nugget,
-                parse_mode="HTML",
-            )
-    except Exception:
-        logger.exception("nightly nugget failed")
+    # 🌰 Nightly learning nuggets — his from r/daddit, hers from r/BabyBumps +
+    # r/pregnant. Per-person, never blocks the wrap.
+    for feed in _NUGGET_FEEDS:
+        try:
+            nugget = await agent.nightly_nugget(feed["subreddits"], feed["state_key"], feed["angle"])
+            if nugget:
+                subs = " + ".join(f"r/{s}" for s in feed["subreddits"])
+                await context.bot.send_message(
+                    chat_id=feed["user_id"],
+                    text=f"🌰 <b>Tonight's nuggets — {subs}</b>\n\n" + nugget,
+                    parse_mode="HTML",
+                )
+        except Exception:
+            logger.exception(f"nightly nugget failed for {feed['state_key']}")
 
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):

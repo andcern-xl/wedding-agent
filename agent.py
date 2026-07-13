@@ -5448,23 +5448,31 @@ Write the story these tell — what's been happening in their life this month. T
                 text = tail
         return _fix_md(text)
 
-    async def nightly_nugget(self) -> str:
-        """1-3 synthesized learnings from r/daddit — nightly learning so Ansen
-        can support Jess's pregnancy with other dads' hindsight."""
+    async def nightly_nugget(self, subreddits: list[str], state_key: str, angle: str) -> str:
+        """1-3 synthesized learnings from the given subreddits for one recipient.
+        `angle` frames whose perspective (dad supporting Jess / Jess's own
+        pregnancy). Seen ids tracked per state_key so recipients never collide."""
         from tools.nuggets import fetch_top_posts, fetch_top_comments
         from tools.loop_state import COUPLE, load_state, save_state
-        state = await asyncio.to_thread(load_state, "daddit_nuggets", COUPLE)
+        state = await asyncio.to_thread(load_state, state_key, COUPLE)
         try:
             seen = set(json.loads(state.get("last_output") or "{}").get("seen", []))
         except Exception:
             seen = set()
 
-        posts = await asyncio.to_thread(fetch_top_posts, "daddit", "day", 25)
-        fresh = [p for p in posts if p["id"] not in seen]
+        async def _pull(window: str) -> list[dict]:
+            out = []
+            for sub in subreddits:
+                try:
+                    out += await asyncio.to_thread(fetch_top_posts, sub, window, 25)
+                except Exception:
+                    pass
+            return out
+
+        fresh = [p for p in await _pull("day") if p["id"] not in seen]
         if len(fresh) < 3:
-            weekly = await asyncio.to_thread(fetch_top_posts, "daddit", "week", 25)
             have = {p["id"] for p in fresh}
-            fresh += [p for p in weekly if p["id"] not in seen and p["id"] not in have]
+            fresh += [p for p in await _pull("week") if p["id"] not in seen and p["id"] not in have]
         # substance first: real text posts before link/photo posts, keep top ranking
         fresh.sort(key=lambda p: p["has_text"], reverse=True)
         candidates = fresh[:4]
@@ -5496,17 +5504,17 @@ Write the story these tell — what's been happening in their life this month. T
                 f"POST {p['id']}: {p['title']}\n{p['selftext'] or '(link/photo post)'}\nTop comments:\n{comments}\nLink: {p['permalink']}"
             )
 
-        prompt = f"""{baby_line} Every night Ansen gets 1-3 "nuggets" — synthesized learnings from r/daddit — to learn from dads who've been there and support Jess through pregnancy.
+        prompt = f"""{baby_line} {angle}
 
-Tonight's candidate posts (top of the subreddit, not shown before):
+Tonight's candidate posts (top of the subreddits, not shown before):
 
 {chr(10).join(blocks)}
 
-Pick the 1-3 with a genuine takeaway for HIM (pregnancy support, partner empathy, newborn prep, dad mindset). Skip pure memes/photos unless the comments carry real wisdom. Synthesize, don't summarize — what should Ansen actually take away or do? The comments often matter more than the post.
+Pick the 1-3 with a genuine takeaway. Skip pure memes/photos unless the comments carry real wisdom. Synthesize, don't summarize — what should they actually take away or do? The comments often matter more than the post.
 
 SHAPE:
 - Per nugget: 🌰 <b>punchy takeaway title</b>, then 2-4 sentences of the actual learning
-- If a nugget speaks to week {week or "?"} or to supporting Jess right now, say so explicitly
+- If a nugget speaks to week {week or "?"} right now, say so explicitly
 - End each nugget with its <a href="LINK">thread</a> link (use the post's Link URL)
 - Whole message reads in under a minute
 
@@ -5525,7 +5533,7 @@ Return ONLY the message, first line = first nugget title line. Then on the very 
         # every offered candidate counts as seen — no re-offering stale posts
         new_seen = (list(seen) + [p["id"] for p in candidates])[-150:]
         await asyncio.to_thread(
-            save_state, "daddit_nuggets", COUPLE,
+            save_state, state_key, COUPLE,
             json.dumps({"seen": new_seen}), _local_today().isoformat(),
         )
         return _fix_md(text)
