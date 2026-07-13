@@ -34,8 +34,8 @@ async def main():
             if row:
                 add_brain_entry(fact, normalize_domain(f.get("_domain")), "fyi_migration")
 
-    for f in triage["ask"]:
-        # full drain: ambiguous items become dated episodes, not cards
+    for f in triage.get("episode", []) + triage["ask"]:
+        # full drain: still-relevant and ambiguous items become dated episodes, not cards
         when = (f.get("created_at") or "")[:10] or None
         print(f"EPISODE  → ({when}) {f['content'][:100]}")
         if apply:
@@ -48,7 +48,8 @@ async def main():
             archive_fyi(f["id"])
 
     mode = "APPLIED" if apply else "DRY RUN — rerun with --apply to write"
-    print(f"\n{mode}: {len(triage['promote'])} facts, {len(triage['ask'])} episodes, {len(triage['archive'])} archived")
+    n_eps = len(triage.get("episode", [])) + len(triage["ask"])
+    print(f"\n{mode}: {len(triage['promote'])} facts, {n_eps} episodes, {len(triage['archive'])} archived")
 
 
 if __name__ == "__main__":

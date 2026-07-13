@@ -5497,13 +5497,14 @@ Empty facts array is a fine answer. All listed episodes fade after this pass reg
 
 {listing}
 
-For each, decide:
-- "promote" — a durable fact about them worth keeping forever (preference, vendor, person, constraint, decision). Rephrase it so it doesn't rot: anchor drifting figures with "as of [month]", drop "just now / this week" framing. It must still be true and useful in a year.
-- "archive" — a moment that passed: transaction logs, one-off heads-ups, completed events, anything superseded. The default for most FYIs.
-- "ask" — genuinely can't tell without the humans. Use sparingly.
+Decide for each, in this order — first test that passes wins:
+1. "promote" — does it contain a durable fact worth keeping forever? Decisions and designations ("StashAway = the baby fund", "chose DBS because 4.10% Multiplier"), preferences, vendors, constraints, references valid for years. A dated note often HIDES a fact — extract the timeless part and rephrase it rot-proof (anchor figures "as of [month]"). Expect several of these.
+2. "episode" — no durable fact, but the future still needs the dated specifics: booking/confirmation refs for upcoming stays and dinners, applications awaiting a decision, links not yet acted on. ONLY while the relevant date is still ahead — this is a narrow category, not the safe default.
+3. "archive" — spent: transaction logs, balances since changed, configs later superseded (an amount that was amended), completed one-offs. When in doubt between episode and archive, ask "will anyone need this exact detail again?" — if no, archive.
+4. "ask" — genuinely can't tell without the humans. Use sparingly.
 
 Return ONLY a JSON array, one object per note, same order:
-[{{"index": 0, "action": "promote", "fact": "rephrased durable fact", "domain": "baby|wedding|travel|money|life"}}, {{"index": 1, "action": "archive"}}]"""
+[{{"index": 0, "action": "promote", "fact": "rephrased durable fact", "domain": "baby|wedding|travel|money|life"}}, {{"index": 1, "action": "episode"}}, {{"index": 2, "action": "archive"}}]"""
         try:
             resp = await self.client.messages.create(
                 model=CHAT_MODEL, max_tokens=1500,
@@ -5514,8 +5515,8 @@ Return ONLY a JSON array, one object per note, same order:
             decisions = json.loads(m.group(0)) if m else []
         except Exception:
             # Triage failing must never lose notes — fall back to asking about all of them
-            return {"promote": [], "archive": [], "ask": list(expiring)}
-        out = {"promote": [], "archive": [], "ask": []}
+            return {"promote": [], "archive": [], "ask": list(expiring), "episode": []}
+        out = {"promote": [], "archive": [], "ask": [], "episode": []}
         decided: set = set()
         for d in decisions:
             try:
@@ -5531,6 +5532,8 @@ Return ONLY a JSON array, one object per note, same order:
                 out["promote"].append({**f, "_fact": d["fact"], "_domain": d.get("domain") or "life"})
             elif action == "archive":
                 out["archive"].append(f)
+            elif action == "episode":
+                out["episode"].append(f)
             else:
                 out["ask"].append(f)
         # anything the model skipped → ask; never silently drop a note

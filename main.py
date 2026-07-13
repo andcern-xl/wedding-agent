@@ -1970,12 +1970,24 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
                 archive_fyi(f["id"])
             except Exception:
                 logger.exception(f"auto-archive failed for FYI {f.get('id')}")
+        episoded = 0
+        for f in triage.get("episode", []):
+            try:
+                from tools.user_memory import add_brain_entry as _add_ep, normalize_domain as _nd
+                _add_ep(f["content"], _nd(f.get("category")), "fyi_graduation",
+                        (f.get("created_at") or "")[:10] or None, "episode")
+                archive_fyi(f["id"])
+                episoded += 1
+            except Exception:
+                logger.exception(f"episode conversion failed for FYI {f.get('id')}")
 
-        if promoted_lines or triage["archive"]:
+        if promoted_lines or triage["archive"] or episoded:
             lines = []
             if promoted_lines:
                 lines.append("🧠 <b>Filed into the brain this week</b>\n")
                 lines += [f"• {escape(l[:180])}" for l in promoted_lines]
+            if episoded:
+                lines.append(f"\n📖 {episoded} still-relevant note{'s' if episoded != 1 else ''} kept as dated episodes.")
             if triage["archive"]:
                 lines.append(f"\n🗑 {len(triage['archive'])} expired update{'s' if len(triage['archive']) != 1 else ''} archived quietly.")
             overflow = len(triage["ask"]) - 3
