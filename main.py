@@ -1073,6 +1073,25 @@ async def cmd_groceries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
+_FYI_FACTS_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Exact facts", callback_data="fyis_facts")]])
+
+
+async def _send_fyi_story(context, chat_id: int, placeholder_msg):
+    """FYIs as a story — context to catch up on, not an inbox to clear."""
+    story = await agent.fyi_story()
+    if not story:
+        await placeholder_msg.edit_text("Nothing shared this month yet — FYIs will build the story as they come in.")
+        return
+    sections = _split_sections("<b>📨 The month so far</b>\n\n" + story)
+    await placeholder_msg.edit_text(sections[0], parse_mode="HTML",
+                                    reply_markup=_FYI_FACTS_BUTTON if len(sections) == 1 else None)
+    for i, section in enumerate(sections[1:], start=2):
+        await context.bot.send_message(
+            chat_id=chat_id, text=section, parse_mode="HTML",
+            reply_markup=_FYI_FACTS_BUTTON if i == len(sections) else None,
+        )
+
+
 def _format_fyis(fyis: list) -> str:
     grouped: dict = {}
     for f in fyis:
@@ -1084,7 +1103,7 @@ def _format_fyis(fyis: list) -> str:
         blocks.append(f"\n{emoji} <b>{cat.title()}</b>")
         for f in items:
             when = (f.get("created_at") or "")[:10]
-            blocks.append(f"• <i>{when}</i> — {f['content']}")
+            blocks.append(f"• <i>{when}</i> — {escape(f['content'])}")
     return "\n".join(blocks)
 
 
@@ -1121,17 +1140,9 @@ def _format_fyis_with_buttons(fyis: list) -> tuple[str, InlineKeyboardMarkup | N
 async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
-    user_id = update.effective_user.id
     try:
-        fyis = get_fyis_unacked(user_id, limit=30)
-        if not fyis:
-            await update.message.reply_text("You're all caught up — no unread FYIs. 🎉")
-            return
-        text, keyboard = _format_fyis_with_buttons(fyis)
-        sections = _split_sections(text)
-        await update.message.reply_text(sections[0], parse_mode="HTML", reply_markup=keyboard)
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
+        msg = await update.message.reply_text("Reading the month's FYIs...")
+        await _send_fyi_story(context, update.effective_chat.id, msg)
     except Exception as e:
         logger.exception("cmd_fyis failed")
         await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
@@ -1161,18 +1172,11 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
     elif action == "fyis":
+        msg = await context.bot.send_message(chat_id=chat_id, text="Reading the month's FYIs...")
         try:
-            fyis = get_fyis_unacked(user_id, limit=30)
-            if not fyis:
-                await context.bot.send_message(chat_id=chat_id, text="You're all caught up — no unread FYIs. 🎉")
-                return
-            text, keyboard = _format_fyis_with_buttons(fyis)
-            sections = _split_sections(text)
-            await context.bot.send_message(chat_id=chat_id, text=sections[0], parse_mode="HTML", reply_markup=keyboard)
-            for section in sections[1:]:
-                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
+            await _send_fyi_story(context, chat_id, msg)
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
     elif action == "tasks":
         msg = await context.bot.send_message(chat_id=chat_id, text="Checking your tasks...")
@@ -1452,6 +1456,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("baby_"):
         await query.answer()
         await _handle_baby_callback(query, context, data[5:])
+
+    elif data == "fyis_facts":
+        # Raw FYI list — the exact notes behind the story
+        try:
+            fyis = get_fyis(limit=30)
+            if not fyis:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="No FYIs in the last 30 days.")
+            else:
+                sections = _split_sections(_format_fyis(fyis))
+                for section in sections:
+                    await context.bot.send_message(chat_id=update.effective_chat.id, text=section, parse_mode="HTML")
+        except Exception as e:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
     elif data.startswith("shared_"):
         await query.answer()

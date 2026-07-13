@@ -5358,6 +5358,45 @@ STALENESS — before surfacing any FYI, cross-check it:
                             already_sent: str = "") -> str:
         return await self._daily.evening_brief(user_ids, user_names, already_sent=already_sent)
 
+    async def fyi_story(self) -> str:
+        """The last month of FYIs woven into a story — context to catch someone
+        up, not an inbox to clear. Pulls from the vault/ledger to fill gaps."""
+        from tools.fyis import get_fyis as _get_fyis
+        fyis = await asyncio.to_thread(_get_fyis, 30)
+        if not fyis:
+            return ""
+        listing = "\n".join(
+            f"• ({(f.get('created_at') or '')[:10]}) [{f.get('category') or 'misc'}] {f['content']}"
+            for f in fyis
+        )
+        _rules = await asyncio.to_thread(_get_behavior_rules, 0)
+        _rules_block = f"\nSTANDING BEHAVIOR RULES (hard rules from them):\n{_rules}\n" if _rules else ""
+        prompt = f"""Here is the last month of FYIs Ansen and Jess shared with each other (newest first):
+
+{listing}
+
+Write the story these tell — what's been happening in their life this month. This is CONTEXT to catch someone up after time away, not a checklist:
+
+- Weave related items into arcs (a joint-finances setup coming together, a trip taking shape, paperwork milestones) instead of listing by category
+- Chronology inside each arc: what led to what, and where it stands now
+- Use query_brain / read_threads to fill gaps or check where something landed — if an FYI says "submitted" and the brain says "approved", tell the later chapter
+- Anchor loosely in time ("early July", "this week") — exact dates only where they matter (bookings, deadlines, references)
+- 2-4 short arcs max, each opening with a one-line bold lead-in. Skip trivia that doesn't advance any story
+- End with one line for anything genuinely still in flight
+
+{VOICE_RULES}
+{_rules_block}
+{FORMAT_RULES}
+- Flowing prose per arc, not bullets.
+- Output the story directly — no preamble about what you checked or are about to write, no --- separators. Your first line is the first arc's bold lead-in."""
+        text = await _brief_with_brain(self.client, SYNTHESIS_MODEL, prompt, max_tokens=900)
+        # If tool-loop narration leaked ahead of a --- separator, keep only the story
+        if "---" in text:
+            tail = text.split("---")[-1].strip()
+            if len(tail) > 200:
+                text = tail
+        return _fix_md(text)
+
     async def triage_expiring_fyis(self, expiring: list[dict]) -> dict:
         """Classify expiring FYIs: durable facts auto-promote to the brain,
         dead updates archive quietly, only genuine judgment calls get a card."""
