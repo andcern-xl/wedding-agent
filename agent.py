@@ -5441,6 +5441,88 @@ Write the story these tell — what's been happening in their life this month. T
                 text = tail
         return _fix_md(text)
 
+    async def nightly_nugget(self) -> str:
+        """1-3 synthesized learnings from r/daddit — nightly learning so Ansen
+        can support Jess's pregnancy with other dads' hindsight."""
+        from tools.nuggets import fetch_top_posts, fetch_top_comments
+        from tools.loop_state import COUPLE, load_state, save_state
+        state = await asyncio.to_thread(load_state, "daddit_nuggets", COUPLE)
+        try:
+            seen = set(json.loads(state.get("last_output") or "{}").get("seen", []))
+        except Exception:
+            seen = set()
+
+        posts = await asyncio.to_thread(fetch_top_posts, "daddit", "day", 25)
+        fresh = [p for p in posts if p["id"] not in seen]
+        if len(fresh) < 3:
+            weekly = await asyncio.to_thread(fetch_top_posts, "daddit", "week", 25)
+            have = {p["id"] for p in fresh}
+            fresh += [p for p in weekly if p["id"] not in seen and p["id"] not in have]
+        # substance first: real text posts before link/photo posts, keep top ranking
+        fresh.sort(key=lambda p: p["has_text"], reverse=True)
+        candidates = fresh[:4]
+        if not candidates:
+            return ""
+        # comment fetches are rate-limited (6s pause each) — only the top 3
+        for p in candidates[:3]:
+            try:
+                p["comments"] = await asyncio.to_thread(fetch_top_comments, p["id"], 6)
+            except Exception:
+                p["comments"] = []
+        for p in candidates[3:]:
+            p["comments"] = []
+
+        try:
+            from tools.baby import current_week
+            week = current_week()
+        except Exception:
+            week = None
+        baby_line = (
+            f"Ansen and Jess are expecting their first baby — week {week} of pregnancy, due 20 Feb 2027."
+            if week else "Ansen and Jess are expecting their first baby, due Feb 2027."
+        )
+
+        blocks = []
+        for p in candidates:
+            comments = "\n".join(f"  - {c}" for c in p["comments"][:6]) or "  (no comments fetched)"
+            blocks.append(
+                f"POST {p['id']}: {p['title']}\n{p['selftext'] or '(link/photo post)'}\nTop comments:\n{comments}\nLink: {p['permalink']}"
+            )
+
+        prompt = f"""{baby_line} Every night Ansen gets 1-3 "nuggets" — synthesized learnings from r/daddit — to learn from dads who've been there and support Jess through pregnancy.
+
+Tonight's candidate posts (top of the subreddit, not shown before):
+
+{chr(10).join(blocks)}
+
+Pick the 1-3 with a genuine takeaway for HIM (pregnancy support, partner empathy, newborn prep, dad mindset). Skip pure memes/photos unless the comments carry real wisdom. Synthesize, don't summarize — what should Ansen actually take away or do? The comments often matter more than the post.
+
+SHAPE:
+- Per nugget: 🌰 <b>punchy takeaway title</b>, then 2-4 sentences of the actual learning
+- If a nugget speaks to week {week or "?"} or to supporting Jess right now, say so explicitly
+- End each nugget with its <a href="LINK">thread</a> link (use the post's Link URL)
+- Whole message reads in under a minute
+
+{VOICE_RULES}
+{FORMAT_RULES}
+
+Return ONLY the message, first line = first nugget title line. Then on the very last line output exactly: USED: id1,id2 (ids of the posts you used)."""
+        resp = await self.client.messages.create(
+            model=CHAT_MODEL, max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+        if "USED:" in text:
+            text, _, _tail = text.rpartition("USED:")
+            text = text.strip()
+        # every offered candidate counts as seen — no re-offering stale posts
+        new_seen = (list(seen) + [p["id"] for p in candidates])[-150:]
+        await asyncio.to_thread(
+            save_state, "daddit_nuggets", COUPLE,
+            json.dumps({"seen": new_seen}), _local_today().isoformat(),
+        )
+        return _fix_md(text)
+
     async def consolidate_episodes(self) -> dict:
         """Sleep-cycle consolidation: episodes older than 45 days either reveal
         a durable pattern (→ fact) or fade. Keeps recall sharp as memory grows."""

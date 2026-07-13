@@ -1918,6 +1918,18 @@ async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception("icebox offer sweep failed")
 
+    # 🌰 Nightly learning nugget from r/daddit — Ansen only, never blocks the wrap
+    try:
+        nugget = await agent.nightly_nugget()
+        if nugget:
+            await context.bot.send_message(
+                chat_id=ANSEN_ID,
+                text="🌰 <b>Tonight's nuggets — r/daddit</b>\n\n" + nugget,
+                parse_mode="HTML",
+            )
+    except Exception:
+        logger.exception("nightly nugget failed")
+
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
     """Sunday sleep cycle: old episodes consolidate into durable facts or fade;
