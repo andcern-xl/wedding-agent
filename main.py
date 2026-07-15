@@ -1700,18 +1700,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
-    """Unified morning brief — narrative prose per user, merges tasks + FYIs + calendar + context."""
+    """The ONE daily driver (9am): action-first brief per user + any decision
+    cards + icebox parking offers. Absorbed the old evening wrap — a single
+    morning touchpoint instead of morning brief + nightly wrap."""
     if not ALLOWED_IDS:
         return
+
+    # Check-in lifecycle housekeeping (once daily): lapsed snoozes reopen,
+    # week-old unanswered questions expire into brain episodes.
+    try:
+        reopened = await asyncio.to_thread(reopen_due_snoozed)
+        for ci in reopened:
+            await _send_check_in_cards(context, [ci], ci.get("created_by") or ALLOWED_IDS[0])
+        expired = await asyncio.to_thread(expire_stale, 7)
+        for ci in expired:
+            try:
+                from tools.user_memory import add_brain_entry as _add_ep
+                _add_ep(f"Unanswered check-in (expired): {ci['question']}", "life",
+                        "check_in_expiry", None, "episode")
+            except Exception:
+                pass
+    except Exception:
+        logger.exception("check-in housekeeping failed")
+
     USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
     for uid in ALLOWED_IDS:
         name = USER_NAMES.get(uid, "")
         try:
             text = await agent.morning_brief(uid, name)
             delivered = await _send_or_alert(context, uid, text, "morning_brief")
-            # Save to loop state so the nightly wrap doesn't repeat it — but only
-            # if it actually reached them, else the delta logic suppresses
-            # content they never saw
             if delivered is not None:
                 try:
                     from tools.loop_state import save_state as _save_loop
@@ -1720,8 +1737,59 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.to_thread(_save_loop, "morning_brief", uid, text, today)
                 except Exception:
                     logger.exception("morning brief state save failed")
+
+            # Proactive intelligence → decision cards only. The brief carries the
+            # prose; proactive_check contributes the taps (decisions to make),
+            # which are the most action-driven thing in the message.
+            try:
+                result = await agent.proactive_check(uid, name)
+                check_ins = result.get("check_ins", []) if isinstance(result, dict) else []
+                await _send_check_in_cards(context, check_ins, uid)
+            except Exception:
+                logger.exception(f"proactive_check failed for {uid}")
         except Exception:
             logger.exception(f"send_morning_brief failed for uid {uid}")
+
+    # ❄️ Icebox offers — stale tasks get a parking decision, max 2 per morning
+    try:
+        from datetime import date as _d
+        from tools.daily import get_stale_tasks, mark_icebox_offered
+        seen: set = set()
+        stale_all: list[dict] = []
+        for uid in ALLOWED_IDS:
+            for t in await asyncio.to_thread(get_stale_tasks, uid):
+                if t["id"] in seen:
+                    continue
+                seen.add(t["id"])
+                stale_all.append(t)
+        for t in stale_all[:2]:
+            target = t.get("assigned_to") or t.get("user_id")
+            if target not in ALLOWED_IDS:
+                target = ALLOWED_IDS[0]
+            due = t.get("due_date")
+            age = f"day {(_d.today() - _d.fromisoformat(due)).days} overdue" if due \
+                else f"sitting untouched since {(t.get('created_at') or '')[:10]}"
+            label = (t.get("task") or "").strip()
+            if label.upper().startswith("TASK:"):
+                label = label[5:].strip()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Done", callback_data=f"ice:{t['id']}:done"),
+                 InlineKeyboardButton("📅 This week", callback_data=f"ice:{t['id']}:week")],
+                [InlineKeyboardButton("❄️ 2 weeks", callback_data=f"ice:{t['id']}:w2"),
+                 InlineKeyboardButton("🧊 1 month", callback_data=f"ice:{t['id']}:m1")],
+                [InlineKeyboardButton("🗑 Drop it", callback_data=f"ice:{t['id']}:drop")],
+            ])
+            try:
+                await context.bot.send_message(
+                    chat_id=target,
+                    text=f"❄️ <b>Backlog this?</b>\n{escape(label)}\n<i>{age}</i>",
+                    parse_mode="HTML", reply_markup=kb,
+                )
+                await asyncio.to_thread(mark_icebox_offered, t["id"])
+            except Exception:
+                logger.exception(f"icebox card send failed for task {t['id']}")
+    except Exception:
+        logger.exception("icebox offer sweep failed")
 
 
 async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
@@ -1807,132 +1875,12 @@ async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"Failed to send notification {notif['id']} to {notif['user_id']}")
 
 
-async def send_nightly_wrap(context: ContextTypes.DEFAULT_TYPE):
-    """ONE nightly message per person: evening recap + forward-looking flags.
-    Replaces the separate 9pm recap and 11pm proactive check — they drew from
-    the same sources and repeated each other."""
+async def send_evening_nuggets(context: ContextTypes.DEFAULT_TYPE):
+    """Evening: learning nuggets only — his from r/daddit, hers from
+    r/BabyBumps + r/pregnant. The action-driven daily brief moved to 9am; this
+    slot is purely optional wind-down reading, one message per person."""
     if not ALLOWED_IDS:
         return
-
-    # Check-in lifecycle housekeeping (once daily): lapsed snoozes reopen,
-    # week-old unanswered questions expire and downgrade to an FYI.
-    try:
-        reopened = await asyncio.to_thread(reopen_due_snoozed)
-        for ci in reopened:
-            # Snooze lapsed → re-send the card (its old buttons were removed)
-            await _send_check_in_cards(context, [ci], ci.get("created_by") or ALLOWED_IDS[0])
-        expired = await asyncio.to_thread(expire_stale, 7)
-        for ci in expired:
-            try:
-                from tools.user_memory import add_brain_entry as _add_ep
-                _add_ep(f"Unanswered check-in (expired): {ci['question']}", "life",
-                        "check_in_expiry", None, "episode")
-            except Exception:
-                pass
-    except Exception:
-        logger.exception("check-in housekeeping failed")
-
-    user_names: dict[int, str] = {}
-    for uid in ALLOWED_IDS:
-        try:
-            chat = await context.bot.get_chat(uid)
-            user_names[uid] = chat.first_name or str(uid)
-        except Exception:
-            user_names[uid] = str(uid)
-
-    try:
-        from tools.loop_state import COUPLE, load_state as _load_loop, save_state as _save_loop
-        from datetime import datetime as _dt
-        _today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
-        # Last night's wrap + this morning's briefs — the wrap must not re-narrate either
-        _blocks = []
-        _prev_wrap = (await asyncio.to_thread(_load_loop, "nightly_wrap", COUPLE)).get("last_output") or ""
-        if _prev_wrap:
-            _blocks.append(_prev_wrap)
-        for _uid in ALLOWED_IDS:
-            _mb = await asyncio.to_thread(_load_loop, "morning_brief", _uid)
-            if _mb.get("last_run_date") == _today and _mb.get("last_output"):
-                _blocks.append(f"MORNING BRIEF (sent {_today} 9am):\n{_mb['last_output']}")
-        recap = await agent.evening_brief(ALLOWED_IDS, user_names, already_sent="\n\n".join(_blocks))
-        if recap:
-            await asyncio.to_thread(_save_loop, "nightly_wrap", COUPLE, recap, _today)
-    except Exception:
-        logger.exception("evening brief generation failed")
-        recap = ""
-
-    USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
-    for uid in ALLOWED_IDS:
-        name = USER_NAMES.get(uid, str(uid))
-        try:
-            lookahead_text, check_ins = "", []
-            try:
-                result = await agent.proactive_check(uid, name)
-                if isinstance(result, dict):
-                    lookahead_text = result.get("text") or ""
-                    check_ins = result.get("check_ins", [])
-                elif result:
-                    lookahead_text = result
-            except Exception:
-                logger.exception(f"proactive_check failed for {uid}")
-
-            parts = ["🌙 <b>Evening wrap</b>"]
-            if recap:
-                parts.append(recap)
-            if lookahead_text:
-                import re as _re
-                lookahead_text = _re.sub(r'\n?---+\n?', '\n\n', lookahead_text).strip()
-                parts.append("🔮 <b>Looking ahead</b>\n\n" + lookahead_text)
-            if len(parts) > 1:
-                for section in _split_sections("\n\n".join(parts)):
-                    await _send_or_alert(context, uid, section, "nightly_wrap")
-            await _send_check_in_cards(context, check_ins, uid)
-        except Exception:
-            logger.exception(f"send_nightly_wrap failed for {uid}")
-
-    # ❄️ Icebox offers — stale tasks get a parking decision, max 2 per night
-    try:
-        from datetime import date as _d
-        from tools.daily import get_stale_tasks, mark_icebox_offered
-        seen: set = set()
-        stale_all: list[dict] = []
-        for uid in ALLOWED_IDS:
-            for t in await asyncio.to_thread(get_stale_tasks, uid):
-                if t["id"] in seen:
-                    continue
-                seen.add(t["id"])
-                stale_all.append(t)
-        for t in stale_all[:2]:
-            target = t.get("assigned_to") or t.get("user_id")
-            if target not in ALLOWED_IDS:
-                target = ALLOWED_IDS[0]
-            due = t.get("due_date")
-            age = f"day {(_d.today() - _d.fromisoformat(due)).days} overdue" if due \
-                else f"sitting untouched since {(t.get('created_at') or '')[:10]}"
-            label = (t.get("task") or "").strip()
-            if label.upper().startswith("TASK:"):
-                label = label[5:].strip()
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Done", callback_data=f"ice:{t['id']}:done"),
-                 InlineKeyboardButton("📅 This week", callback_data=f"ice:{t['id']}:week")],
-                [InlineKeyboardButton("❄️ 2 weeks", callback_data=f"ice:{t['id']}:w2"),
-                 InlineKeyboardButton("🧊 1 month", callback_data=f"ice:{t['id']}:m1")],
-                [InlineKeyboardButton("🗑 Drop it", callback_data=f"ice:{t['id']}:drop")],
-            ])
-            try:
-                await context.bot.send_message(
-                    chat_id=target,
-                    text=f"❄️ <b>Backlog this?</b>\n{escape(label)}\n<i>{age}</i>",
-                    parse_mode="HTML",
-                    reply_markup=kb,
-                )
-                await asyncio.to_thread(mark_icebox_offered, t["id"])
-            except Exception:
-                logger.exception(f"icebox card send failed for task {t['id']}")
-    except Exception:
-        logger.exception("icebox offer sweep failed")
-
-    # 🌰 Nightly learning nuggets — his from r/daddit, hers from r/BabyBumps +
-    # r/pregnant. Per-person, never blocks the wrap.
     for feed in _NUGGET_FEEDS:
         try:
             nugget = await agent.nightly_nugget(feed["subreddits"], feed["state_key"], feed["angle"])
@@ -2644,7 +2592,8 @@ def main():
         # Calendar reconciliation — sync task due_dates to match calendar changes
         app.job_queue.run_daily(send_calendar_reconciliation, time=CAL_SYNC_TIME)
         # ── MORNING 9am ──────────────────────────────────────────────
-        # Unified narrative morning brief per user (tasks + FYIs + calendar synthesized)
+        # The ONE daily driver: action-first brief + decision cards + icebox
+        # offers per user (absorbed the old nightly wrap)
         app.job_queue.run_daily(send_morning_brief, time=REMINDER_TIME)
         # Baby weekly update — every Monday
         app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
@@ -2662,9 +2611,9 @@ def main():
         # Stocks & crypto brief
         app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
         # ── NIGHT 9pm ────────────────────────────────────────────────
-        # Nightly wrap — recap + forward-looking flags + check-in cards, ONE message
-        # (replaces the old separate 9pm recap and 11pm proactive check)
-        app.job_queue.run_daily(send_nightly_wrap, time=EVENING_TIME)
+        # Evening nuggets — optional learning only (his r/daddit, hers
+        # r/BabyBumps+pregnant). The action-driven brief moved to 9am.
+        app.job_queue.run_daily(send_evening_nuggets, time=EVENING_TIME)
         # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
         # Capability gap sweep — 1st of each month, Ansen only

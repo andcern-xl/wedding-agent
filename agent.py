@@ -3911,7 +3911,7 @@ Rules:
         try:
             from tools.loop_state import already_sent as _already_sent, load_state as _load_loop
             prev_output = await asyncio.to_thread(
-                _already_sent, user_id, ["morning_brief", "proactive_check", "nightly_wrap"]
+                _already_sent, user_id, ["morning_brief", "proactive_check"]
             )
             prev_date = (await asyncio.to_thread(_load_loop, "proactive_check", user_id)).get("last_run_date") or ""
         except Exception:
@@ -5334,7 +5334,7 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
         try:
             from tools.loop_state import already_sent as _already_sent
             already_sent = (await asyncio.to_thread(
-                _already_sent, user_id, ["nightly_wrap", "proactive_check", "morning_brief"]
+                _already_sent, user_id, ["morning_brief"]
             )).strip()
         except Exception:
             pass
@@ -5355,7 +5355,7 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
 
         context = "\n\n".join(parts)
         already_block = f"""
-ALREADY TOLD THEM (last night's wrap and earlier — do NOT re-narrate any of this):
+YESTERDAY'S BRIEF (don't reopen the same day the same way — vary the framing, and if something here is unchanged and not due today, drop it):
 {already_sent}
 """ if already_sent else ""
 
@@ -5364,20 +5364,19 @@ ALREADY TOLD THEM (last night's wrap and earlier — do NOT re-narrate any of th
 
         prompt = f"""{context}
 {already_block}
-Write the morning text for {user_name}. You know their full life; write like it.
+Write the morning text for {user_name}. This is the ONE daily message — there is no evening wrap anymore, so it has to carry the day on its own. You know their full life; write like it.
 
-THIS IS A DELTA, NOT A STATUS REPORT:
-- Lead with the single most important thing about TODAY — an appointment, a deadline, the one thing that must happen. Start with that, not a greeting formula.
-- Then only what's NEW or CHANGED since last night's wrap: new FYIs, something that became urgent, a date that moved. If it's in ALREADY TOLD THEM and nothing about it changed, it does not appear.
-- EXCEPTION — OVERDUE never goes quiet: anything in OVERDUE (and any gap unresolved for 7+ days) appears EVERY day until it's done or rescheduled. Escalate brevity, not silence: full context the first time, then one terse line with the count ("Elenna follow-up — day 19 overdue"). Silently dropping an overdue item is a failure mode.
-- Standing facts (baby week number, trips weeks away, open goals) earn a mention only when something about them is different today or genuinely due.
-- A quiet day is a SHORT text. Two or three sentences is a great brief. Never pad to fill sections.
+ACTION-DRIVEN — this brief exists to tell them what to DO today, in priority order:
+- Open with the single most important ACTION for today — the appointment to prep for, the deadline, the person to chase, the decision to make. Not a greeting, not a recap. If nothing is genuinely actionable today, say that in one line ("Clear day — nothing needs you") and stop.
+- Then the rest of today's actions, most-consequential first. Each one should imply a verb: what to bring, who to message, what to decide.
+- OVERDUE never goes quiet: anything OVERDUE (or a gap unresolved 7+ days) appears EVERY day until done or rescheduled. Escalate brevity, not silence — full context once, then one terse line with the count ("Elenna follow-up — day 19 overdue").
+- Standing facts (baby week, trips weeks out, open goals) earn a line only when there's an action or a change today. A quiet day is a SHORT message — two or three sentences is great. Never pad.
 
 SHAPE:
-- Flowing prose, 1–3 short paragraphs. No emoji section headers. No bullets unless listing 4+ parallel items (rare).
-- Weave connections instead of separating topics: "Dr Janice at 10 — bring the test reports, and it's the chance to settle the NIPT timing" beats a Baby section and a Today section.
-- RECALL: for each person, place, or occasion in today's plans, query_brain for what you know about them and weave in what's timely — a birthday means what they'd love, a dinner with someone means what you know about them. One well-timed recall beats three tenuous ones.
-- Vary the opening every day. If ALREADY TOLD THEM shows yesterday started with a greeting, start differently today. Starting mid-thought is fine: "Two things today —"
+- Flowing prose, 1–3 short paragraphs. No emoji section headers. No bullets unless listing 4+ parallel action items.
+- Weave connections: "Dr Janice at 10 — bring the test reports, and it's your chance to settle the NIPT timing" beats separate Baby and Today lines.
+- RECALL: for each person, place, or occasion in today's plans, query_brain for what you know — a birthday means what they'd love, a dinner means what you know about them. One well-timed recall beats three tenuous ones.
+- Vary the opening every day.
 - Last line: → /tasks /shared for the full picture
 
 {VOICE_RULES}
