@@ -108,12 +108,20 @@ def _query_brain_sync(query: str = "", domain: str | None = None) -> dict:
         except Exception:
             pass
 
-    # Baby knowledge — its own keyword search
+    # Baby knowledge — per-word scoring (consistent with the vault and wedding
+    # drops; the old whole-string substring match dropped any multi-word query)
     baby = []
     if q_words and (domain is None or normalize_domain(domain) == "baby"):
         try:
-            from tools.baby_knowledge import search_entries as _bk_search
-            for e in _bk_search(query)[:5]:
+            from tools.baby_knowledge import get_entries as _bk_get
+            bk_scored = []
+            for e in _bk_get(limit=100):
+                text = ((e.get("summary") or "") + " " + (e.get("raw_text") or "")).lower()
+                sc = sum(1 for w in q_words if w in text)
+                if sc:
+                    bk_scored.append((sc, e))
+            bk_scored.sort(key=lambda se: se[0], reverse=True)
+            for _, e in bk_scored[:5]:
                 baby.append({"summary": (e.get("summary") or "")[:400], "source": "baby_knowledge"})
         except Exception:
             pass

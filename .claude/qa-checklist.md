@@ -92,6 +92,16 @@ ignored for weeks (handler filter only matched TEXT|PHOTO|VOICE). Grep the
 MessageHandler filters against every message type a user can plausibly send;
 check new callback_data prefixes are routed in handle_callback.
 
+## 11b. Recall-coverage sweep (RUN THE SCRIPT — don't eyeball it)
+After ANY change to memory, recall, query_brain, a store's schema, or a new
+knowledge store: run `python sweep_recall.py`. It samples real rows from every
+knowledge store and asserts unified recall surfaces them. History: 'my DJ plans
+are gone' — recall narrowed to brain_entries over many commits while
+wedding_drops (160 rows) stayed a silo nothing read. NO single diff caused it,
+so diff-review (this whole checklist) structurally could not catch it. Only a
+reachability sweep does. New knowledge store → wire it into `_query_brain_sync`
+AND add it to `sweep_recall.py`.
+
 ## 11. Dead-feature check (fake impressions)
 When a feature is retired or replaced, hunt down every surface that still
 LOOKS alive — buttons, commands, prompts mentioning it, tools writing to its
