@@ -71,8 +71,9 @@ def _get_behavior_rules(user_id: int) -> str:
 
 
 def _query_brain_sync(query: str = "", domain: str | None = None) -> dict:
-    """Keyword search over active brain_entries — shared by the chat tool loop
-    and the brief generators, so every surface pulls from the same vault."""
+    """Unified recall across ALL memory silos — the vault (brain_entries),
+    wedding drops, and baby knowledge — so it never matters which drawer a fact
+    landed in. Shared by the chat tool loop and the brief generators."""
     from tools.user_memory import get_active_entries, normalize_domain
     entries = get_active_entries(normalize_domain(domain) if domain else None)
     q_words = {w for w in (query or "").lower().split() if len(w) > 2}
@@ -83,18 +84,51 @@ def _query_brain_sync(query: str = "", domain: str | None = None) -> dict:
 
     scored = sorted(entries, key=_score, reverse=True)
     hits = [e for e in scored if _score(e) > 0][:15] or scored[:10]
+    matches = [
+        {"date": e["fact_date"], "domain": e["domain"], "fact": e["fact"], "source": "vault"}
+        for e in hits
+    ]
+
+    # Wedding drops — content search (ignores category, so the DJ schedule filed
+    # under 'venue' still surfaces). Only when the query has real keywords.
+    wedding = []
+    if q_words and (domain is None or normalize_domain(domain) == "wedding"):
+        try:
+            from tools.log import search_drops
+            for d in search_drops(query, limit=6):
+                content = (d.get("content") or "").strip()
+                if content.startswith("[screenshot]"):
+                    content = content[len("[screenshot]"):].strip()
+                wedding.append({
+                    "date": (d.get("ts") or "")[:10],
+                    "category": d.get("category"),
+                    "note": content[:500],
+                    "source": "wedding_drops",
+                })
+        except Exception:
+            pass
+
+    # Baby knowledge — its own keyword search
+    baby = []
+    if q_words and (domain is None or normalize_domain(domain) == "baby"):
+        try:
+            from tools.baby_knowledge import search_entries as _bk_search
+            for e in _bk_search(query)[:5]:
+                baby.append({"summary": (e.get("summary") or "")[:400], "source": "baby_knowledge"})
+        except Exception:
+            pass
+
     return {
-        "matches": [
-            {"date": e["fact_date"], "domain": e["domain"], "fact": e["fact"]}
-            for e in hits
-        ],
+        "matches": matches,
+        "wedding_drops": wedding,
+        "baby_knowledge": baby,
         "total_active_facts": len(entries),
     }
 
 
 _BRIEF_BRAIN_TOOL = {
     "name": "query_brain",
-    "description": "Pull facts from the couple's shared brain vault, filed by domain (baby/wedding/travel/money/life). The context you were given is a partial slice — query before claiming anything about their life, flagging something as unresolved, or stating a date. Returns matching facts with their dates.",
+    "description": "Unified recall across ALL of the couple's memory: the shared vault (facts + episodes), their wedding drops (everything dropped via /wedding — venue, budget, DJ/music, schedules, screenshots), and the baby knowledge base. Returns 'matches' (vault), 'wedding_drops', and 'baby_knowledge'. The injected context is only a partial slice — ALWAYS query here before saying 'I don't have that' or 'no previous notes', especially for anything wedding- or baby-related. Wedding content is searched by CONTENT not category, so ask by topic (e.g. 'DJ lineup music lighting').",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -2039,7 +2073,7 @@ TOOLS = [
     },
     {
         "name": "query_brain",
-        "description": "Search the shared brain vault — the couple's confirmed facts and decisions, filed by domain with dates. Call this whenever an answer depends on what's already known or decided (bookings, amounts, statuses, who's handling what, past decisions) instead of guessing or asking them to repeat themselves. Also call it before flagging something as missing/unresolved — it may already be settled. Cheap and fast; when in doubt, query.",
+        "description": "Unified recall across ALL the couple's memory: the shared vault (confirmed facts + dated episodes), their wedding drops (everything sent via /wedding — venue, budget, DJ/music, lighting, schedules, screenshots), and the baby knowledge base. Returns 'matches' (vault), 'wedding_drops', and 'baby_knowledge'. Call it whenever an answer depends on what's already known — bookings, amounts, statuses, past decisions, plans they dropped earlier — and ALWAYS before saying 'I don't have that' / 'no previous notes'. Wedding drops are searched by CONTENT, not category, so query by topic ('DJ lineup', 'lighting plan') and it'll find them even if filed elsewhere. Cheap and fast; when in doubt, query.",
         "input_schema": {
             "type": "object",
             "properties": {
