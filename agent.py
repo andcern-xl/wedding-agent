@@ -3497,6 +3497,21 @@ Output the list only — no headers, no explanation."""}],
         researched = list(await asyncio.gather(*[_research(a) for a in top]))
         log.info(f"stocks_brief: research done for {len(researched)} assets")
 
+        # Grounding audit — did web search actually return live data, or is this
+        # newsletter-vibes-only? Never let the brief fabricate prices on empty data.
+        for a in researched:
+            a["grounded"] = bool((a.get("d_price") or "").strip()
+                                 or (a.get("d_fund") or "").strip()
+                                 or (a.get("d_news") or "").strip())
+        grounded_count = sum(1 for a in researched if a["grounded"])
+        # Detect a dead search key up front (every search errored)
+        try:
+            _probe = await asyncio.to_thread(web_search, "bitcoin price", 1)
+            search_live = not (isinstance(_probe, list) and _probe and _probe[0].get("error"))
+        except Exception:
+            search_live = False
+        log.info(f"stocks_brief: grounded {grounded_count}/{len(researched)}, search_live={search_live}")
+
         # ── STEP 5: generate analyst brief ────────────────────────────────
         research_block = ""
         for a in researched:
@@ -3505,12 +3520,13 @@ Output the list only — no headers, no explanation."""}],
             if h:
                 pos = f"{h['units']} units" if h.get("units") is not None else f"{h.get('currency','SGD')} {h.get('value')}"
                 held_line = f"\n⭐ THEY HOLD THIS: {pos} on {h.get('platform') or '?'} (as of {h.get('as_of')})"
+            ground_flag = "" if a["grounded"] else "  [⚠️ NO LIVE DATA — newsletter mention only]"
             research_block += f"""
-━━━ {a['name']} ({a.get('ticker','')}) | {a.get('type','')} | newsletter: {a.get('sentiment','')}{held_line}
+━━━ {a['name']} ({a.get('ticker','')}) | {a.get('type','')} | newsletter: {a.get('sentiment','')}{ground_flag}{held_line}
 Newsletter context: {a.get('thesis','(subject line mention only)')}
-Price/momentum: {a['d_price'] or '(no search data)'}
-Fundamentals: {a['d_fund'] or '(no search data)'}
-Analyst/news: {a['d_news'] or '(no search data)'}
+Price/momentum: {a['d_price'] or '(NO DATA RETRIEVED)'}
+Fundamentals: {a['d_fund'] or '(NO DATA RETRIEVED)'}
+Analyst/news: {a['d_news'] or '(NO DATA RETRIEVED)'}
 """
 
         portfolio_block = ""
@@ -3521,55 +3537,69 @@ Analyst/news: {a['d_news'] or '(no search data)'}
                 pos_lines.append(f"• {h['asset']} ({h.get('ticker') or h.get('asset_type')}): {pos}, as of {h.get('as_of')}")
             portfolio_block = "\nTHEIR PORTFOLIO (lead the brief with what THEIR positions did; explicitly flag any held asset the newsletters are bearish on):\n" + "\n".join(pos_lines) + "\n"
 
+        data_state = (
+            "Live web search is DOWN right now — treat this as newsletter sentiment ONLY, with zero price verification."
+            if not search_live else
+            f"Live data was retrieved for {grounded_count} of {len(researched)} assets; the rest are newsletter-mention-only."
+        )
         brief_resp = await self.client.messages.create(
             model=CHAT_MODEL,
             max_tokens=3500,
-            messages=[{"role": "user", "content": f"""You are a financial analyst working for Ansen and Jess. Today is {today}.
-Write an investment brief for these assets. Use the research data below — it's from web searches done right now.
+            messages=[{"role": "user", "content": f"""You brief Ansen and Jess on what this week's newsletters flagged. Today is {today}. {data_state}
 {portfolio_block}
 {research_block}
 
-For each asset write a real analyst take. If search data has numbers, use them.
-If it says "no search data", still give your best view from what you know + the newsletter signal.
-Assets marked ⭐ THEY HOLD THIS come FIRST in the brief with a "your position" line; a bearish newsletter signal on a held asset is the single most important thing to flag.
+THIS IS NOT INVESTMENT ADVICE AND YOU ARE NOT AN ANALYST WITH A LIVE TERMINAL. Ansen has been acting on fabricated numbers — that must never happen again. Absolute rules:
+
+1. NEVER state a price, %, market cap, or any figure that is not literally present in the research data above. Not "from what you know", not "roughly", not from memory — your training data is months stale and WILL be wrong. If a number isn't in the data, you do not have it.
+2. An asset tagged [⚠️ NO LIVE DATA] gets NO price, NO momentum call, NO verdict. You may only report what the newsletter SAID about it, explicitly framed as an unverified newsletter claim ("Milkroad flagged X bullish — no current data to verify").
+3. Do NOT emit BUY/HOLD/SKIP as if it's your recommendation. Report the NEWSLETTER's stance (bullish/bearish/neutral) as theirs, and separately what the live data shows IF grounded. The reader decides.
+4. When grounded data exists, quote it with its implied source ("search: BTC ~$X"). When it doesn't, say "no current data" plainly.
 
 {FORMAT_RULES}
 
-FORMAT — use this exact template:
+FORMAT:
 
 <b>📊 This week</b>
-2 sentences on the macro theme.
+1-2 sentences on what the newsletters are collectively saying. If search is down, say so here in plain words.
 
-[per asset — use this EXACT spacing, blank line between EVERY element:]
+[per asset, blank line between every element:]
 
-<b>[emoji] Name (TICKER) — 🟢 BUY / 🟡 HOLD / 🔴 SKIP</b>
+<b>[emoji] Name (TICKER)</b>
 
-<i>[newsletter signal in 5 words]</i>
+<i>Newsletter stance: [bullish/bearish/neutral] — [which newsletter]</i>
 
-📰 <b>Thesis:</b> Why this, why now. Specific numbers. 2-3 sentences.
+📰 <b>What they said:</b> the newsletter's claim, framed as theirs. 1-2 sentences.
 
-📈 <b>Momentum:</b> Price level and trend. One line with numbers.
+📈 <b>Live data:</b> only if grounded — the actual retrieved figures. If none: "No current data retrieved — unverified."
 
-🏗 <b>Fundamentals:</b> Key metric. One line.
+⚠️ <b>Risk / caveat:</b> one line.
 
-⚠️ <b>Risk:</b> #1 downside. One line.
+[blank line before next asset]
 
-[blank line here before next asset]
+<b>Bottom line</b>
+What's worth a closer look — with the explicit reminder to verify prices themselves before acting. One or two sentences.
 
-<b>🔥 Best pick this week</b>
-One asset, one reason.
-
-RULES: <b>bold</b> only (no **), bullets •, no URLs, numbers required.
-SPACING: blank line between every single element — signal, thesis, momentum, fundamentals, risk. Mobile readability is critical."""}],
+RULES: <b>bold</b> only (no **), bullets •, no URLs. NUMBERS ONLY IF THEY APPEAR IN THE DATA ABOVE — inventing a number is the failure we are fixing."""}],
         )
         brief_text = _fix_md(brief_resp.content[0].text)
+        # Standing footer so the framing is unmissable
+        if not search_live:
+            brief_text = "⚠️ <b>Live market data unavailable</b> — newsletter sentiment only, no verified prices. Check prices yourself before acting.\n\n" + brief_text
+        brief_text += "\n\n<i>Not financial advice — newsletter digest + web snippets. Verify any number before you act on it.</i>"
         log.info("stocks_brief: brief generated successfully")
 
         # ── STEP 6: save signals to shared brain ──────────────────────────
         try:
-            sigs = [f"{a.get('ticker') or a['name']} {'🟢' if a['sentiment']=='bullish' else '🔴' if a['sentiment']=='bearish' else '🟡'}{'(held)' if a.get('held') else ''}"
+            # Persist as NEWSLETTER SENTIMENT, not a buy/sell signal — it's what a
+            # newsletter vibed, never verified advice. Labeling matters: recall
+            # must not resurface this as fact.
+            sigs = [f"{a.get('ticker') or a['name']} {a['sentiment']}{'(held)' if a.get('held') else ''}"
                     for a in researched[:5]]
-            await self._upsert_shared(f"📊 Stocks {today}: {', '.join(sigs)}", domain="money", source="stocks")
+            await self._upsert_shared(
+                f"📰 Newsletter sentiment {today} (unverified, not advice): {', '.join(sigs)}",
+                domain="money", source="stocks",
+            )
         except Exception:
             pass
 
