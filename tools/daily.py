@@ -100,16 +100,21 @@ _CLOSE_STOP = {"the", "and", "for", "with", "into", "your", "you", "send", "log"
                "task", "get", "sort", "check", "this", "that", "have", "need"}
 
 
-def close_tasks_matching(subject: str, min_overlap: int = 2) -> list[str]:
+def close_tasks_matching(subject: str, acting_user_id: int | None = None, min_overlap: int = 2) -> list[str]:
     """Mark open tasks done when their text overlaps the subject strongly — used
     when a decision resolves an open loop (e.g. 'Hyatt confirmed' closes the
-    'Book Amsterdam' and 'Log Hyatt conf#' tasks). Returns closed task labels."""
+    'Book Amsterdam' and 'Log Hyatt conf#' tasks). Only touches shared tasks and
+    the acting user's own — never the partner's private tasks. Returns labels."""
     subj_words = {w for w in _kw(subject) if w not in _CLOSE_STOP}
     if not subj_words:
         return []
     closed = []
     rows = get_client().table("daily_tasks").select("*").eq("done", False).execute().data or []
     for t in rows:
+        # Don't reach into the partner's private tasks
+        if t.get("visibility") != "shared" and acting_user_id is not None \
+                and t.get("user_id") != acting_user_id and t.get("assigned_to") != acting_user_id:
+            continue
         t_words = {w for w in _kw(t.get("task") or "") if w not in _CLOSE_STOP}
         if len(subj_words & t_words) >= min_overlap:
             try:
@@ -128,15 +133,17 @@ def _kw(text: str) -> set:
     return {w for w in re.findall(r"[a-z0-9#]{3,}", (text or "").lower())}
 
 
-def find_duplicate_open_task(task_text: str, min_overlap: int = 3) -> dict | None:
+def find_duplicate_open_task(task_text: str, min_overlap: int = 2) -> dict | None:
     """An open task that's substantially the same as task_text, so we don't
-    stack near-identical to-dos ('Book Amsterdam' x2)."""
-    words = _kw(task_text)
+    stack near-identical to-dos ('Book Amsterdam' x2). Overlap of 2 real words
+    is enough — 2-word task names ('Book Amsterdam') are common."""
+    words = {w for w in _kw(task_text) if w not in _CLOSE_STOP}
     if len(words) < min_overlap:
         return None
     rows = get_client().table("daily_tasks").select("*").eq("done", False).execute().data or []
     for t in rows:
-        if len(words & _kw(t.get("task") or "")) >= min_overlap:
+        t_words = {w for w in _kw(t.get("task") or "") if w not in _CLOSE_STOP}
+        if len(words & t_words) >= min_overlap:
             return t
     return None
 

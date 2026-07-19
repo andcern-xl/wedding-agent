@@ -2158,7 +2158,7 @@ def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
         # question stops regenerating every day.
         try:
             from tools.daily import close_tasks_matching
-            closed = close_tasks_matching(question)
+            closed = close_tasks_matching(question, acting_user_id=user_id)
             if closed:
                 notes.append(f"closed {len(closed)} related task{'s' if len(closed) != 1 else ''}")
         except Exception:
@@ -2228,12 +2228,19 @@ async def _try_capture_reply(update, context, user_id: int, text: str) -> bool:
         return True
 
     # Looks like a real value: short, not a question, not a new command/request.
-    if len(txt) <= 80 and "?" not in txt and not txt.startswith("/"):
+    # Bail if it reads like a fresh request/question (even without a '?') so a
+    # real message never gets silently written to the brain as "the value".
+    _REQUESTY = ("what", "when", "where", "who", "why", "how", "can you", "could you",
+                 "should", "is ", "are ", "do you", "does ", "add ", "remind", "book ",
+                 "tell ", "show ", "give ", "help", "please", "let's", "lets ")
+    looks_requesty = any(low.startswith(p) for p in _REQUESTY)
+    if len(txt) <= 80 and "?" not in txt and not txt.startswith("/") and not looks_requesty:
         try:
             from tools.user_memory import normalize_domain
-            append_shared_summary(f"{pending['subject']} — {txt}",
-                                  domain=normalize_domain(pending.get("category", "life")),
-                                  source="capture")
+            await asyncio.to_thread(
+                append_shared_summary, f"{pending['subject']} — {txt}",
+                normalize_domain(pending.get("category", "life")), "capture",
+            )
         except Exception:
             logger.exception("capture value save failed")
         await asyncio.to_thread(clear_pending_capture, user_id)
