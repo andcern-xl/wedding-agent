@@ -519,6 +519,11 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             if text.startswith("/"):
                 return
 
+            # Pending value-capture: they tapped "Confirmed — log conf#" and we
+            # asked for the number. Catch their reply here before the agent runs.
+            if await _try_capture_reply(update, context, user_id, text):
+                return
+
             # Prepend reply context so the agent knows what the user is referring to
             reply = update.message.reply_to_message
             if reply:
@@ -2134,7 +2139,7 @@ def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
         return "dropped, nothing saved"
 
     notes = []
-    if action == "save_decision":
+    if action in ("save_decision", "capture"):
         try:
             from tools.user_memory import normalize_domain
             append_shared_summary(decision, domain=normalize_domain(category), source="check_in")
@@ -2148,17 +2153,32 @@ def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
                 notes.append("+ baby brain")
             except Exception:
                 logger.exception("check-in baby brain save failed")
+        # Loop closure — a resolving decision closes the open tasks it settles
+        # (confirming Hyatt closes 'Book Amsterdam' + 'Log conf#'), so the same
+        # question stops regenerating every day.
+        try:
+            from tools.daily import close_tasks_matching
+            closed = close_tasks_matching(question)
+            if closed:
+                notes.append(f"closed {len(closed)} related task{'s' if len(closed) != 1 else ''}")
+        except Exception:
+            logger.exception("check-in loop closure failed")
     elif action == "create_task":
         try:
-            due = None
-            if payload.get("due_date"):
-                try:
-                    due = _date.fromisoformat(payload["due_date"])
-                except ValueError:
-                    pass
-            add_task(user_id=user_id, task=payload.get("task") or label, due_date=due,
-                     visibility="shared", category=category)
-            notes.append("task created")
+            task_text = payload.get("task") or label
+            from tools.daily import find_duplicate_open_task
+            if find_duplicate_open_task(task_text):
+                notes.append("already on your list")
+            else:
+                due = None
+                if payload.get("due_date"):
+                    try:
+                        due = _date.fromisoformat(payload["due_date"])
+                    except ValueError:
+                        pass
+                add_task(user_id=user_id, task=task_text, due_date=due,
+                         visibility="shared", category=category)
+                notes.append("task created")
         except Exception:
             logger.exception("check-in task creation failed")
     elif action == "remind":
@@ -2177,6 +2197,53 @@ def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
         except Exception:
             logger.exception("check-in reminder failed")
     return " · ".join(notes) or "noted"
+
+
+_CAPTURE_SKIP = {"skip", "nothing", "none", "no", "nope", "later", "idk",
+                 "not yet", "na", "n/a", "don't have it", "dont have it",
+                 "don't have", "dont have", "no conf", "no number", "cancel"}
+
+
+async def _try_capture_reply(update, context, user_id: int, text: str) -> bool:
+    """If a value-capture is pending for this user, treat this message as the
+    value (or a skip). Returns True if handled — caller then stops. Bails out
+    (returns False) if the message clearly isn't the value, so real messages
+    are never hijacked."""
+    from tools.check_ins import get_pending_capture, clear_pending_capture
+    pending = await asyncio.to_thread(get_pending_capture, user_id)
+    if not pending:
+        return False
+    txt = text.strip()
+    low = txt.lower().rstrip(".!")
+
+    is_skip = (
+        low in _CAPTURE_SKIP
+        or any(low.startswith(s + " ") or low == s for s in _CAPTURE_SKIP)
+        # short message containing a multi-word skip phrase ("i don't have it")
+        or (len(low) <= 30 and any(" " in s and s in low for s in _CAPTURE_SKIP))
+    )
+    if is_skip:
+        await asyncio.to_thread(clear_pending_capture, user_id)
+        await update.message.reply_text("👍 Marked done — I'll stop asking. Tell me the number whenever you have it.")
+        return True
+
+    # Looks like a real value: short, not a question, not a new command/request.
+    if len(txt) <= 80 and "?" not in txt and not txt.startswith("/"):
+        try:
+            from tools.user_memory import normalize_domain
+            append_shared_summary(f"{pending['subject']} — {txt}",
+                                  domain=normalize_domain(pending.get("category", "life")),
+                                  source="capture")
+        except Exception:
+            logger.exception("capture value save failed")
+        await asyncio.to_thread(clear_pending_capture, user_id)
+        await update.message.reply_text(f"✅ Logged: <b>{escape(txt)}</b>. Closed the related tasks.", parse_mode="HTML")
+        return True
+
+    # Message doesn't look like the value — they moved on. Drop the capture and
+    # let the normal agent handle whatever they actually said.
+    await asyncio.to_thread(clear_pending_capture, user_id)
+    return False
 
 
 async def _handle_check_in_callback(query, context, data: str):
@@ -2238,6 +2305,20 @@ async def _handle_check_in_callback(query, context, data: str):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+
+    # Value capture — the button confirmed the loop; now ask for the actual value
+    # (conf#, ref number). Their next message is caught in _process_message.
+    if opt.get("action") == "capture":
+        payload = opt.get("payload") or {}
+        prompt = payload.get("capture_prompt") or "Send it over and I'll log it — or reply “skip” and I'll just mark it done."
+        try:
+            from tools.check_ins import set_pending_capture
+            await asyncio.to_thread(set_pending_capture, user_id, ci_id, prompt,
+                                    ci["question"], ci.get("category", "life"))
+            await context.bot.send_message(chat_id=query.message.chat_id,
+                                           text=f"📝 {escape(prompt)}", parse_mode="HTML")
+        except Exception:
+            logger.exception("pending capture setup failed")
 
     if ci.get("audience") == "both":
         for uid in ALLOWED_IDS:

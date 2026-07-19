@@ -1807,11 +1807,12 @@ TOOLS = [
                         "type": "object",
                         "properties": {
                             "label": {"type": "string", "description": "Button text, under 40 chars"},
-                            "action": {"type": "string", "enum": ["save_decision", "create_task", "remind", "dismiss"], "description": "save_decision = record the answer in the right brain. create_task = also create a task. remind = also schedule a reminder. dismiss = drop the question, nothing saved."},
+                            "action": {"type": "string", "enum": ["save_decision", "create_task", "remind", "dismiss", "capture"], "description": "save_decision = record the answer in the right brain. capture = they're confirming something AND you need a value from them (a conf#, ref number, amount) — records the decision, closes related open tasks, then asks them to type the value (they can reply 'skip'). Use capture instead of create_task for any 'Confirmed — log the number' option. create_task = also create a task. remind = also schedule a reminder. dismiss = drop the question, nothing saved."},
                             "payload": {
                                 "type": "object",
                                 "properties": {
-                                    "decision": {"type": "string", "description": "For save_decision: the sentence to record, e.g. 'NIPT will be booked after the Belgium trip'. Defaults to question + label."},
+                                    "decision": {"type": "string", "description": "For save_decision/capture: the sentence to record, e.g. 'Hyatt Place Amsterdam is confirmed'. Defaults to question + label."},
+                                    "capture_prompt": {"type": "string", "description": "For capture: what to ask them to type, e.g. 'Paste the Hyatt confirmation number and I'll log it.'"},
                                     "task": {"type": "string", "description": "For create_task: short task name"},
                                     "due_date": {"type": "string", "description": "For create_task/remind: YYYY-MM-DD"},
                                     "message": {"type": "string", "description": "For remind: the reminder text"},
@@ -4000,6 +4001,17 @@ Rules:
         except Exception:
             pass
 
+        answered_ci_block = ""
+        try:
+            from tools.check_ins import get_recently_answered as _get_answered
+            _ans = await asyncio.to_thread(_get_answered, 10)
+            if _ans:
+                _ans_lines = "\n".join(f"• {c['question']} → answered \"{c.get('answer') or c.get('status')}\"" for c in _ans[:12])
+                answered_ci_block = f"""ALREADY ASKED & RESOLVED (last 10 days) — these were answered. Do NOT re-ask them, in a card or in prose. The decision is made; treat it as settled even if some downstream detail is still trickling in:
+{_ans_lines}"""
+        except Exception:
+            pass
+
         prev_block = ""
         if prev_output and prev_date:
             prev_block = f"""ALREADY SENT — everything the user has already been told (last check-in + this morning's brief), most recent {prev_date}:
@@ -4050,6 +4062,8 @@ SHARED BRAIN:
 {shows_block}
 
 {open_ci_block}
+
+{answered_ci_block}
 
 {prev_block}
 

@@ -7,7 +7,7 @@ re-asks a question it already asked, and can chase stale ones.
 from datetime import date, datetime, timezone, timedelta
 from tools.db import get_client
 
-VALID_ACTIONS = ("save_decision", "create_task", "remind", "dismiss")
+VALID_ACTIONS = ("save_decision", "create_task", "remind", "dismiss", "capture")
 MAX_OPEN = 10  # hard cap so unanswered questions can't pile up
 
 
@@ -91,6 +91,57 @@ def answer_check_in(check_in_id: str, answer: str, answered_by: int) -> bool:
         return bool(result.data)
     except Exception:
         return False
+
+
+def set_pending_capture(user_id: int, check_in_id: str, prompt: str, subject: str, category: str = "life") -> None:
+    """Remember that we're waiting for this user's next message to be a value
+    (e.g. a confirmation number) for a check-in they just confirmed."""
+    import json
+    from tools.loop_state import save_state
+    from datetime import date as _date
+    payload = json.dumps({"check_in_id": check_in_id, "prompt": prompt,
+                          "subject": subject, "category": category})
+    save_state("pending_capture", user_id, payload, _date.today().isoformat())
+
+
+def get_pending_capture(user_id: int) -> dict | None:
+    import json
+    from tools.loop_state import load_state
+    from datetime import date as _date
+    state = load_state("pending_capture", user_id) or {}
+    # Expire after the same day — a capture must not hijack a message days later
+    if state.get("last_run_date") != _date.today().isoformat():
+        return None
+    try:
+        d = json.loads(state.get("last_output") or "")
+        return d if d.get("check_in_id") else None
+    except Exception:
+        return None
+
+
+def clear_pending_capture(user_id: int) -> None:
+    from tools.loop_state import save_state
+    from datetime import date as _date
+    save_state("pending_capture", user_id, "", _date.today().isoformat())
+
+
+def get_recently_answered(days: int = 10, limit: int = 30) -> list[dict]:
+    """Answered/dismissed check-ins from the last N days — injected into the
+    proactive check so it doesn't re-ask a question already resolved."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        return (
+            get_client().table("check_ins")
+            .select("question,answer,status,answered_at")
+            .in_("status", ["answered", "dismissed"])
+            .gte("answered_at", cutoff)
+            .order("answered_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return []
 
 
 def dismiss_check_in(check_in_id: str, user_id: int) -> bool:

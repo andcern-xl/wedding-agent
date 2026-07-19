@@ -95,6 +95,52 @@ def get_tasks(user_id: int, include_done: bool = False,
     ]
 
 
+_CLOSE_STOP = {"the", "and", "for", "with", "into", "your", "you", "send", "log",
+               "confirm", "confirmation", "number", "book", "follow", "details",
+               "task", "get", "sort", "check", "this", "that", "have", "need"}
+
+
+def close_tasks_matching(subject: str, min_overlap: int = 2) -> list[str]:
+    """Mark open tasks done when their text overlaps the subject strongly — used
+    when a decision resolves an open loop (e.g. 'Hyatt confirmed' closes the
+    'Book Amsterdam' and 'Log Hyatt conf#' tasks). Returns closed task labels."""
+    subj_words = {w for w in _kw(subject) if w not in _CLOSE_STOP}
+    if not subj_words:
+        return []
+    closed = []
+    rows = get_client().table("daily_tasks").select("*").eq("done", False).execute().data or []
+    for t in rows:
+        t_words = {w for w in _kw(t.get("task") or "") if w not in _CLOSE_STOP}
+        if len(subj_words & t_words) >= min_overlap:
+            try:
+                get_client().table("daily_tasks").update({
+                    "done": True,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", t["id"]).execute()
+                closed.append((t.get("task") or "")[:60])
+            except Exception:
+                pass
+    return closed
+
+
+def _kw(text: str) -> set:
+    import re
+    return {w for w in re.findall(r"[a-z0-9#]{3,}", (text or "").lower())}
+
+
+def find_duplicate_open_task(task_text: str, min_overlap: int = 3) -> dict | None:
+    """An open task that's substantially the same as task_text, so we don't
+    stack near-identical to-dos ('Book Amsterdam' x2)."""
+    words = _kw(task_text)
+    if len(words) < min_overlap:
+        return None
+    rows = get_client().table("daily_tasks").select("*").eq("done", False).execute().data or []
+    for t in rows:
+        if len(words & _kw(t.get("task") or "")) >= min_overlap:
+            return t
+    return None
+
+
 def get_due_today(user_id: int) -> list[dict]:
     today = date.today().isoformat()
     rows = (
