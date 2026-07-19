@@ -3504,12 +3504,9 @@ Output the list only — no headers, no explanation."""}],
                                  or (a.get("d_fund") or "").strip()
                                  or (a.get("d_news") or "").strip())
         grounded_count = sum(1 for a in researched if a["grounded"])
-        # Detect a dead search key up front (every search errored)
-        try:
-            _probe = await asyncio.to_thread(web_search, "bitcoin price", 1)
-            search_live = not (isinstance(_probe, list) and _probe and _probe[0].get("error"))
-        except Exception:
-            search_live = False
+        # No asset got live data → treat the whole brief as newsletter-sentiment
+        # only (covers a dead search key and a total search whiff identically).
+        search_live = grounded_count > 0
         log.info(f"stocks_brief: grounded {grounded_count}/{len(researched)}, search_live={search_live}")
 
         # ── STEP 5: generate analyst brief ────────────────────────────────
