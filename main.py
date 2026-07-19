@@ -464,29 +464,37 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         conversations[chat_id] = load_history(chat_id)
     history = conversations[chat_id]
 
+    # effective_message covers BOTH new and EDITED messages. Without this, an
+    # edit (Jess bumping "Log this" to "…add it to shared brain") arrives as
+    # update.edited_message, update.message is None, and the instruction is lost.
+    msg = update.effective_message
+    if msg is None:
+        return
+    is_edit = update.edited_message is not None
+
     try:
-        if update.message.photo:
-            photo = update.message.photo[-1]
+        if msg.photo:
+            photo = msg.photo[-1]
             photo_file = await photo.get_file()
             photo_bytes = await photo_file.download_as_bytearray()
-            caption = update.message.caption or ""
+            caption = msg.caption or ""
 
             result = await agent.handle_image(image_bytes=bytes(photo_bytes), caption=caption, user_id=user_id, history=history)
             if result.get("notify_partner"):
                 await notify_partner(context, update, photo_bytes=bytes(photo_bytes), caption=caption, analysis=result.get("text"))
 
-        elif update.message.document:
-            doc = update.message.document
+        elif msg.document:
+            doc = msg.document
             mime = (doc.mime_type or "").lower()
-            caption = update.message.caption or ""
+            caption = msg.caption or ""
             supported = mime == "application/pdf" or mime in ("image/jpeg", "image/png", "image/gif", "image/webp")
             if not supported:
-                await update.message.reply_text(
+                await msg.reply_text(
                     "I can read PDFs and images sent as files — this file type I can't open yet."
                 )
                 return
             if doc.file_size and doc.file_size > 15 * 1024 * 1024:
-                await update.message.reply_text("That file's too big for me — 15 MB max.")
+                await msg.reply_text("That file's too big for me — 15 MB max.")
                 return
             doc_file = await doc.get_file()
             doc_bytes = await doc_file.download_as_bytearray()
@@ -498,26 +506,30 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             if result.get("notify_partner"):
                 await notify_partner(context, update, text=caption or f"sent a file: {doc.file_name}", analysis=result.get("text"), is_fyi=result.get("fyi", False))
 
-        elif update.message.voice:
+        elif msg.voice:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            voice_file = await update.message.voice.get_file()
+            voice_file = await msg.voice.get_file()
             voice_bytes = await voice_file.download_as_bytearray()
             try:
                 transcript = await _transcribe_voice(bytes(voice_bytes))
             except Exception as e:
-                await update.message.reply_text(f"Couldn't transcribe that — {e}")
+                await msg.reply_text(f"Couldn't transcribe that — {e}")
                 return
             # Echo transcript so user can see what was heard
-            await update.message.reply_text(f"🎙 <i>{escape(transcript)}</i>", parse_mode="HTML")
+            await msg.reply_text(f"🎙 <i>{escape(transcript)}</i>", parse_mode="HTML")
             # Process transcript exactly like a text message
             result = await agent.handle_message(text=transcript, user_id=user_id, history=history)
             if result.get("notify_partner"):
                 await notify_partner(context, update, text=transcript, analysis=result.get("text"), is_fyi=result.get("fyi", False))
 
         else:
-            text = update.message.text or ""
+            text = msg.text or ""
             if text.startswith("/"):
                 return
+            # An edit re-runs the agent with the new full text — tell it so it
+            # acts on what changed instead of re-greeting.
+            if is_edit and text.strip():
+                text = f"[They edited their earlier message to this — act on it]\n{text}"
 
             # Pending value-capture: they tapped "Confirmed — log conf#" and we
             # asked for the number. Catch their reply here before the agent runs.
@@ -525,7 +537,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                 return
 
             # Prepend reply context so the agent knows what the user is referring to
-            reply = update.message.reply_to_message
+            reply = msg.reply_to_message
             if reply:
                 replied_text = reply.text or reply.caption or ""
                 if replied_text and replied_text.strip():
@@ -545,7 +557,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         conversations[chat_id] = updated_history
         # Persist to Supabase so history survives restarts/deploys
         asyncio.create_task(asyncio.to_thread(save_history, chat_id, updated_history))
-        await update.message.reply_text(result["text"], parse_mode="HTML")
+        await msg.reply_text(result["text"], parse_mode="HTML")
 
         # Decision cards + category picks from this turn's tool calls
         await _send_check_in_cards(context, result.get("check_ins", []), user_id)
@@ -604,7 +616,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         logger.exception(f"Error handling message: {e}")
         err_type = type(e).__name__
         err_msg = str(e)[:300]
-        await update.message.reply_text(f"[DEBUG] {err_type}: {err_msg}")
+        await (update.effective_message or update.message).reply_text(f"[DEBUG] {err_type}: {err_msg}")
 
 
 async def _send_or_alert(context, chat_id: int, text: str, job_name: str, **kwargs):
@@ -2133,7 +2145,9 @@ def _execute_check_in_action(ci: dict, opt: dict, user_id: int) -> str:
     payload = opt.get("payload") or {}
     question, label = ci["question"], opt["label"]
     decision = payload.get("decision") or f"{question} → {label}"
-    category = ci.get("category", "life")
+    # Per-option category override lets a "which drawer?" card file the SAME
+    # content to whichever domain the user picks (screenshot routing).
+    category = payload.get("category") or ci.get("category", "life")
 
     if action == "dismiss":
         return "dropped, nothing saved"
@@ -2224,7 +2238,7 @@ async def _try_capture_reply(update, context, user_id: int, text: str) -> bool:
     )
     if is_skip:
         await asyncio.to_thread(clear_pending_capture, user_id)
-        await update.message.reply_text("👍 Marked done — I'll stop asking. Tell me the number whenever you have it.")
+        await update.effective_message.reply_text("👍 Marked done — I'll stop asking. Tell me the number whenever you have it.")
         return True
 
     # Looks like a real value: short, not a question, not a new command/request.
@@ -2244,7 +2258,7 @@ async def _try_capture_reply(update, context, user_id: int, text: str) -> bool:
         except Exception:
             logger.exception("capture value save failed")
         await asyncio.to_thread(clear_pending_capture, user_id)
-        await update.message.reply_text(f"✅ Logged: <b>{escape(txt)}</b>. Closed the related tasks.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"✅ Logged: <b>{escape(txt)}</b>. Closed the related tasks.", parse_mode="HTML")
         return True
 
     # Message doesn't look like the value — they moved on. Drop the capture and

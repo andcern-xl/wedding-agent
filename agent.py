@@ -1524,12 +1524,15 @@ When someone mentions money/costs: classify which bucket first, then log to the 
 
 INVESTMENTS ARE NOT EXPENSES: buying/selling/holding an asset, portfolio values, "StashAway is at X" → log_holding (NEVER a budget table, NEVER the brain — values live in holdings). Questions about what they own or net worth → read_holdings. Questions about day-to-day spending ("how much on the pet this month") → read_split_expenses (their Split app).
 
-⚠️ Ambiguous signals → ask before filing:
-If content could fit more than one domain, or the signal is weak, ask:
-"Should I save this to [best guess]? Or somewhere else?"
-Example: a Substack link — check the title/description first. "Hacking Motherhood" → baby_knowledge (clear). A generic productivity newsletter → FYI personal (clear). An article about postpartum finance → ask: "Save this to baby knowledge or finance FYI?"
+⚠️ Ambiguous signals → ASK WITH BUTTONS, then the tap files it:
+If content could fit more than one domain, or the signal is weak, do NOT guess and do NOT just describe it back. Call ask_check_in with the plausible domains as options, each carrying the extracted summary so one tap files it correctly:
+• question: "Where should I file this — [one-line of what it is]?"
+• each option: action=save_decision, payload.decision = the concrete extracted facts (not "this screenshot"), payload.category = that domain (baby/wedding/travel/money/life)
+Example: a postpartum-finance article → buttons [👶 Baby knowledge][💰 Money], each with the article's key point as payload.decision. Tapping either files that point into that domain — no follow-up needed.
 
-Never silently misfile. A quick confirm is better than wrong storage.
+If you can't tell what it even IS, ask one specific question. When they answer, you MUST call a save tool with the content + their answer — acknowledging without saving is the exact failure we're eliminating.
+
+Never silently misfile, never just describe. A screenshot is information to FILE. A tap-to-file card beats wrong storage, and both beat a description that saves nothing.
 
 BABY TO-DOS
 Any action item related to pregnancy, birth prep, hospital, scans, appointments, or baby gear → add_daily_task with category="baby" and visibility="shared". Baby tasks are always shared — both need to know.
@@ -1812,6 +1815,7 @@ TOOLS = [
                                 "type": "object",
                                 "properties": {
                                     "decision": {"type": "string", "description": "For save_decision/capture: the sentence to record, e.g. 'Hyatt Place Amsterdam is confirmed'. Defaults to question + label."},
+                                    "category": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Optional per-option domain override — for a 'which drawer does this belong in?' card, set each button's category so tapping files the decision into that domain."},
                                     "capture_prompt": {"type": "string", "description": "For capture: what to ask them to type, e.g. 'Paste the Hyatt confirmation number and I'll log it.'"},
                                     "task": {"type": "string", "description": "For create_task: short task name"},
                                     "due_date": {"type": "string", "description": "For create_task/remind: YYYY-MM-DD"},
@@ -4219,8 +4223,19 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
         except Exception:
             extracted_text = ""
 
-        # Build the user content: image + extracted text + caption context
-        instruction = caption if caption else "Analyse this image. Use the extracted text below to understand the content."
+        # Build the user content. A screenshot is information to FILE, not just
+        # describe — and when the destination is unclear, ASK rather than guess.
+        _file_directive = (
+            "\n\nThis is a screenshot/document they dropped"
+            + (" with a caption above." if caption else " with NO caption — so YOU decide what it is and where it belongs.")
+            + """ Your job is to FILE it, not narrate it:
+1. Identify what it is and pull the durable facts out of it.
+2. File each fact to the RIGHT store with the save tools — save_shared_context/save_to_brain with the correct domain, save_baby_knowledge, log_wedding_drop, a payment/expense tool for costs, save_show for tickets, log_episode for a dated event. Route by content (see the routing rules), not by guessing.
+3. If you genuinely can't tell WHICH domain it belongs to, do NOT dump it in a catch-all and do NOT just describe it — call ask_check_in with the plausible domains as buttons (each option: action=save_decision, payload.decision = the extracted summary, payload.category = that domain) so one tap files it correctly.
+4. If you can't even tell what the screenshot IS, ask one specific question about it — and when they answer, SAVE the screenshot's facts plus their answer to the brain immediately. Never reply "got it" without a save actually happening.
+Confirm what you filed and where in one line."""
+        )
+        instruction = (caption if caption else "Screenshot with no caption.") + _file_directive
         if extracted_text:
             instruction += f"\n\n[TEXT EXTRACTED FROM IMAGE]\n{extracted_text}"
 
