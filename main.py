@@ -471,6 +471,10 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     if msg is None:
         return
     is_edit = update.edited_message is not None
+    # A media edit (caption change) would re-download and re-file the same
+    # screenshot — only re-process TEXT edits (the "…add to shared brain" case).
+    if is_edit and (msg.photo or msg.document or msg.voice):
+        return
 
     try:
         if msg.photo:
