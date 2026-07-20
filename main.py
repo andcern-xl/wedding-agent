@@ -2714,8 +2714,9 @@ def main():
         # Appointment pre-brief — nightly check for tomorrow's medical events
         app.job_queue.run_daily(send_appointment_prebrief, time=APPOINTMENT_TIME)
         # ── EVENING 8pm ──────────────────────────────────────────────
-        # Stocks & crypto brief
-        app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
+        # Stocks & crypto brief — PAUSED at Ansen's request (Jul 2026). The
+        # /stocks command still works on demand; re-enable by uncommenting.
+        # app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
         # ── NIGHT 9pm ────────────────────────────────────────────────
         # Evening nuggets — optional learning only (his r/daddit, hers
         # r/BabyBumps+pregnant). The action-driven brief moved to 9am.
