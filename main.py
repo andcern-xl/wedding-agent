@@ -1759,12 +1759,22 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     logger.exception("morning brief state save failed")
 
-            # Proactive intelligence → decision cards only. The brief carries the
-            # prose; proactive_check contributes the taps (decisions to make),
-            # which are the most action-driven thing in the message.
+            # Proactive intelligence → forward-looking prose (what's coming, gaps
+            # on wedding/baby/travel) + decision cards. The prose used to be
+            # discarded here, which is why the proactive pings went silent. It's
+            # written to say NOTHING on a quiet day, so this won't re-spam.
             try:
                 result = await agent.proactive_check(uid, name)
-                check_ins = result.get("check_ins", []) if isinstance(result, dict) else []
+                if isinstance(result, dict):
+                    lookahead = (result.get("text") or "").strip()
+                    check_ins = result.get("check_ins", [])
+                else:
+                    lookahead, check_ins = (result or "").strip(), []
+                if lookahead:
+                    import re as _re
+                    lookahead = _re.sub(r"\n?-{3,}\n?", "\n\n", lookahead).strip()
+                    for section in _split_sections("🔮 <b>Looking ahead</b>\n\n" + lookahead):
+                        await _send_or_alert(context, uid, section, "proactive_check")
                 await _send_check_in_cards(context, check_ins, uid)
             except Exception:
                 logger.exception(f"proactive_check failed for {uid}")

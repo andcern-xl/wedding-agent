@@ -1611,6 +1611,9 @@ When the user corrects something you stated — "no that's wrong", "actually it'
 
 EXCEPTION — contact-date corrections go to the ledger, not correct_knowledge: when the correction is about WHEN someone was last contacted or replied ("last contact with Elenna was NOT 2 days ago", "I actually chased her in June", "we last heard from the venue on the 19th"), call log_contact with the corrected contact_date — read_threads first if you need the thread's topic. If they say the wrong date came from you inventing it (no thread existed), still log_contact to create the thread with the true date, and own it: "I had no record — logged Jun 19 as the real last contact, counting from there now." "Actually that's settled / she confirmed" → resolve_thread.
 
+TASK COMPLETION — ALWAYS MARK DONE, NEVER JUST ACKNOWLEDGE
+When they say they did / finished / handled / bought / booked / paid / sorted / picked up something ("got the travel insurance", "sorted Vivian's gift", "picked up the cord", "booked the hotel", "done", "handled it"), you MUST: call read_daily_tasks, find the matching open task, and call mark_task_done on it. A verbal "nice, done!" that doesn't mark the task closes NOTHING — the task resurfaces in tomorrow's brief and the reminders list, which is exactly the "I already checked that off, why is it back" complaint. If you can't find a matching task, say so ("nothing on your list matched — want me to note it?") rather than implying it's handled. Confirm with what you closed: "✅ Closed: [task]."
+
 SAVE-CLAIM HONESTY — the deal that makes feedback worth giving: never say "saved", "fixed", "logged", or "noted" unless a tool call in THIS turn returned success. If the tool errored, say exactly that — "the save failed ([reason]), trying again" or "couldn't write that, Ansen will need to look at it" — never paper over it. When a fix succeeds, show receipts from the tool result: what was removed, what's now stored, where. The user should be able to trust that a ✅ means the database changed.
 
 When the user corrects HOW you behave rather than a fact — "too long", "stop repeating this", "don't ask me about that again", "just answer directly", "fewer emojis", "you already told me this" — you MUST call save_behavior_feedback immediately with a clear standing rule (e.g. "Keep replies under 4 lines unless asked for detail"). Same principle as correct_knowledge: a verbal "noted!" without saving means the same annoyance returns next session. Scope 'both' if it's about your general style; 'me' if it's this person's personal preference. Then follow the rule from that message onward.
@@ -5389,12 +5392,29 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
             except Exception:
                 pass
 
-        # Upcoming trips
+        # Trips — an ACTIVE trip (today within its dates) drives a day-by-day plan;
+        # upcoming trips are just flagged.
         try:
             from tools.trips import get_upcoming_trips as _upcoming_trips
             trips = _upcoming_trips()
-            if trips:
-                parts.append("TRIPS: " + "; ".join(f"{t['destination']} ({t.get('start_date','TBC')})" for t in trips[:3]))
+            active = [t for t in trips if (t.get("start_date") or "9999") <= today_str <= (t.get("end_date") or "0000")]
+            upcoming = [t for t in trips if t not in active]
+            if active:
+                for t in active:
+                    day_n = ""
+                    try:
+                        from datetime import date as _d
+                        day_n = f" — day {(_d.fromisoformat(today_str) - _d.fromisoformat(t['start_date'])).days + 1}"
+                    except Exception:
+                        pass
+                    notes = (t.get("notes") or "").strip()
+                    parts.append(
+                        f"ON THE TRIP NOW: {t['destination']}{day_n} ({t.get('start_date')}–{t.get('end_date')}). "
+                        f"Surface TODAY'S ({today_str}, {weekday}) segment from the plan below — flights/shuttles/check-ins/plans for today, with times. Skip other days.\n"
+                        f"TRIP PLAN:\n{notes[:1500]}"
+                    )
+            if upcoming:
+                parts.append("TRIPS COMING UP: " + "; ".join(f"{t['destination']} ({t.get('start_date','TBC')})" for t in upcoming[:3]))
         except Exception:
             pass
 
@@ -5466,6 +5486,7 @@ Write the morning text for {user_name}. This is the ONE daily message — there 
 
 ACTION-DRIVEN — this brief exists to tell them what to DO today, in priority order:
 - Open with the single most important ACTION for today — the appointment to prep for, the deadline, the person to chase, the decision to make. Not a greeting, not a recap. If nothing is genuinely actionable today, say that in one line ("Clear day — nothing needs you") and stop.
+- IF "ON THE TRIP NOW" is present: this is a travel day — LEAD with today's trip segment (today's flights/shuttles/check-ins/plans with times, in order), then anything else that needs them. They're away from routine; the day's logistics are the priority.
 - Then the rest of today's actions, most-consequential first. Each one should imply a verb: what to bring, who to message, what to decide.
 - OVERDUE never goes quiet: anything OVERDUE (or a gap unresolved 7+ days) appears EVERY day until done or rescheduled. Escalate brevity, not silence — full context once, then one terse line with the count ("Elenna follow-up — day 19 overdue").
 - Standing facts (baby week, trips weeks out, open goals) earn a line only when there's an action or a change today. A quiet day is a SHORT message — two or three sentences is great. Never pad.
