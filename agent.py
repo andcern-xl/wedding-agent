@@ -4709,6 +4709,92 @@ RULES:
                 break
         return None
 
+    # ── Jess pregnancy companion ──────────────────────────────────────────
+    _SYMPTOMS_BY_TRIMESTER = {
+        1: ["Nausea", "Exhausted", "Sore breasts", "Food aversions", "Cramping", "Spotting"],
+        2: ["Back pain", "Heartburn", "Round ligament pain", "Headache", "Swelling", "Good energy"],
+        3: ["Swelling", "Braxton-Hicks", "Can't sleep", "Baby kicking", "Back pain", "Heartburn"],
+    }
+
+    def _symptom_taps(self) -> list[str]:
+        from tools.baby import trimester
+        base = self._SYMPTOMS_BY_TRIMESTER.get(trimester(), self._SYMPTOMS_BY_TRIMESTER[1])
+        return base[:6]
+
+    async def jess_checkin(self) -> dict:
+        """A short, warm daily companion message FOR JESS — her week, one useful
+        thing, and a 'how are you feeling?' hook. Interactive, not a broadcast:
+        the reply/taps log symptoms and get a tailored response. Returns
+        {text, symptoms}."""
+        from tools.baby import pregnancy_summary
+        from tools.user_memory import get_active_entries
+        info = pregnancy_summary()
+        try:
+            recent = [e for e in await asyncio.to_thread(get_active_entries, "baby", "episode")
+                      if e.get("source") == "symptom"][-8:]
+        except Exception:
+            recent = []
+        recent_block = "\n".join(f"- {e['fact']}" for e in recent) or "None logged yet."
+        try:
+            from tools.baby_knowledge import get_entries as _bk
+            knowledge = "\n".join(f"- {e['summary']}" for e in _bk(limit=12)) or "None."
+        except Exception:
+            knowledge = "None."
+
+        _tri = {1: "first", 2: "second", 3: "third"}.get(info["trimester"], "first")
+        prompt = f"""Write Jess's daily pregnancy check-in. She is {info['week']} weeks (day {info['day']}), {_tri} trimester, due {info['due_date']} ({info['days_until_due']} days). Address HER directly as "you" — warm, like a friend who's been through it, never clinical or alarming.
+
+WHAT WE KNOW (recent symptoms she's logged, and saved knowledge):
+Recent symptoms:
+{recent_block}
+Saved knowledge:
+{knowledge}
+
+Write, in this order, tight:
+1. One line on where she is — the week and one genuinely notable thing about THIS week (baby development she'd care about, or what her body's likely doing). Specific to week {info['week']}, not generic.
+2. One useful, practical thing for THIS week — a tip, a heads-up, something to make her more comfortable or prepared. Not homework, not a task. If her recent symptoms show a pattern, speak to it.
+3. A warm one-liner inviting her to check in: how's she feeling today? (The app will show tap buttons after your message — don't list them yourself.)
+
+Keep it to 4-6 short lines total. This is the ONE message she gets today and the reason she opens the app — make it feel like it's about her.
+
+{VOICE_RULES}
+{FORMAT_RULES}"""
+        text = await _brief_with_brain(self.client, SYNTHESIS_MODEL, prompt, max_tokens=500)
+        return {"text": _fix_md(text), "symptoms": self._symptom_taps()}
+
+    async def symptom_response(self, symptom: str, user_id: int) -> str:
+        """Log a symptom as a dated baby episode (recall + appointment prep reach
+        it) and return a specific, practical, reassuring reply for HER week."""
+        from tools.baby import current_week, pregnancy_summary
+        from tools.user_memory import add_brain_entry
+        week = current_week()
+        try:
+            await asyncio.to_thread(
+                add_brain_entry, f"Symptom (week {week}): {symptom}", "baby", "symptom",
+                None, "episode",
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("symptom log failed")
+        if symptom.lower().startswith(("good", "feeling good", "great")):
+            return "Love that. Logged a good day 🙂"
+        info = pregnancy_summary()
+        prompt = f"""Jess is {week} weeks pregnant and just told you she's experiencing: "{symptom}".
+
+Reply in 2-3 short sentences, warm and practical:
+- Normalise it if it's normal at {week} weeks (say so plainly).
+- One concrete thing that actually helps.
+- ONLY if this symptom at this stage can signal something that needs medical attention, add one clear line: "Worth flagging to Dr Joycelyn if [specific red-flag]." Do not invent red flags for benign symptoms.
+Never alarmist. You're a friend who knows, not a doctor. No numbered lists — just talk.
+
+{VOICE_RULES}
+{FORMAT_RULES}"""
+        resp = await self.client.messages.create(
+            model=CHAT_MODEL, max_tokens=350,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _fix_md(resp.content[0].text) + "\n\n<i>Logged — I'll bring it up before your next appointment.</i>"
+
     async def appointment_pre_brief(self, medical_events: list[dict],
                                     already_sent: str = "") -> str | None:
         """Night-before synthesis for medical/health appointments — questions, what to bring, relevant knowledge."""
@@ -4762,6 +4848,18 @@ RULES:
         except Exception:
             pass
 
+        # Symptoms Jess logged via her daily check-in — surface them so she
+        # walks in able to report what she's felt (closes the "I'll bring it up
+        # at your appointment" promise).
+        symptom_lines = []
+        try:
+            from tools.user_memory import get_active_entries as _gae
+            syms = [e for e in await asyncio.to_thread(_gae, "baby", "episode")
+                    if e.get("source") == "symptom"][-12:]
+            symptom_lines = [f"  [{e.get('fact_date')}] {e['fact']}" for e in syms]
+        except Exception:
+            pass
+
         # Pregnancy context
         baby_block = ""
         try:
@@ -4791,12 +4889,15 @@ RELEVANT KNOWLEDGE BASE:
 
 RELEVANT HEALTH FYIs:
 {chr(10).join(fyi_lines) if fyi_lines else "  none"}
+
+SYMPTOMS JESS LOGGED RECENTLY (surface these so she can report them — group/summarise, note anything worth raising):
+{chr(10).join(symptom_lines) if symptom_lines else "  none logged"}
 {f'''
 PREVIOUS PRE-BRIEF (already sent — if it covered this SAME appointment, respond NOTHING; only send if this is a new appointment or something material changed):
 {already_sent.strip()}
 ''' if already_sent.strip() else ""}
 Write a concise tonight reminder for tomorrow's appointment. Cover:
-1. <b>❓ Questions to ask</b> — pull from their saved list, prioritise by relevance to this appointment type. Add 1-2 smart ones they might have missed.
+1. <b>❓ Questions to ask</b> — pull from their saved list, prioritise by relevance to this appointment type. Add 1-2 smart ones they might have missed. If Jess logged symptoms, turn the notable ones into a "mention to the doctor" line.
 2. <b>📋 Bring</b> — ID, referral letters, test results they've mentioned, vitamins list if relevant, insurance card
 3. <b>💡 Heads up</b> — one practical note (eat before if it's a long appointment, wear loose clothing for scans, etc.)
 

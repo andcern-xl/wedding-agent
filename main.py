@@ -69,6 +69,7 @@ _evening_hour   = int(os.getenv("EVENING_BRIEF_HOUR", "21"))
 EVENING_TIME    = dtime(hour=_evening_hour, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — recap, knowledge sweep
 CRYPTO_TIME     = dtime(hour=20, minute=0, tzinfo=REMINDER_TIMEZONE)               # 8pm — stocks & crypto
 BABY_WEEKLY_TIME   = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
+JESS_CHECKIN_TIME  = dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE)  # 10am — Jess's daily pregnancy companion
 APPOINTMENT_TIME   = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
 CAL_SYNC_TIME      = dtime(hour=8, minute=50, tzinfo=REMINDER_TIMEZONE)  # 8:50am — calendar reconciliation before morning brief
 
@@ -923,6 +924,38 @@ async def send_baby_weekly(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error sending baby weekly brief")
 
 
+def _symptom_keyboard(symptoms: list) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for s in symptoms:
+        row.append(InlineKeyboardButton(s, callback_data=f"sym:{s[:30]}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("😊 Feeling good", callback_data="sym:Feeling good"),
+                 InlineKeyboardButton("💬 Tell you more", callback_data="sym:more")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_jess_checkin(context: ContextTypes.DEFAULT_TYPE):
+    """Jess's daily pregnancy companion — her own message, interactive. The
+    reason she opens the app: it's about her, and it does something with her reply."""
+    if JESS_ID not in ALLOWED_IDS:
+        return
+    try:
+        result = await agent.jess_checkin()
+        text = result.get("text") if isinstance(result, dict) else result
+        if not text:
+            return
+        symptoms = result.get("symptoms", []) if isinstance(result, dict) else []
+        sections = _split_sections(text)
+        for i, section in enumerate(sections):
+            kb = _symptom_keyboard(symptoms) if (i == len(sections) - 1 and symptoms) else None
+            await _send_or_alert(context, JESS_ID, section, "jess_checkin", reply_markup=kb)
+    except Exception:
+        logger.exception("Error sending Jess check-in")
+
+
 async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
@@ -1512,6 +1545,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("fyi_"):
         await query.answer()
         await _handle_fyi_callback(query, context, data[4:])
+
+    elif data.startswith("sym:"):
+        symptom = data[4:]
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        if symptom == "more":
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Tell me how you're feeling — I'll note it and bring it up before your next appointment.",
+            )
+            return
+        try:
+            reply = await agent.symptom_response(symptom, query.from_user.id)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=reply, parse_mode="HTML")
+        except Exception:
+            logger.exception("symptom response failed")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="Logged that 💛")
 
     elif data.startswith("ci:") or data.startswith("cisnz:"):
         await _handle_check_in_callback(query, context, data)
@@ -2713,6 +2766,8 @@ def main():
         app.job_queue.run_daily(send_morning_brief, time=REMINDER_TIME)
         # Baby weekly update — every Monday
         app.job_queue.run_daily(send_baby_weekly, time=BABY_WEEKLY_TIME, days=(0,))
+        # Jess's daily pregnancy companion — her own interactive check-in (10am)
+        app.job_queue.run_daily(send_jess_checkin, time=JESS_CHECKIN_TIME)
         # Show reminders — 7 days out, Ansen only
         app.job_queue.run_daily(send_show_reminders, time=REMINDER_TIME)
         # FYI graduation — every Sunday (surface notes nearing 30-day expiry)
