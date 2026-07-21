@@ -458,12 +458,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _process_message(update, context, user_id, chat_id)
 
 
+def _get_history(chat_id: int) -> list:
+    """Conversation history for a chat, hydrating from Supabase on first touch."""
+    if chat_id not in conversations:
+        conversations[chat_id] = load_history(chat_id)
+    return conversations[chat_id]
+
+
+def _thread_into_history(chat_id: int, user_turn: str, assistant_turn: str) -> None:
+    """Fold an out-of-band exchange (a tapped check-in, a seeded prompt) into the
+    persisted conversation so the NEXT message continues it instead of starting
+    cold. This is what makes button interactions conversational, not just stored."""
+    history = _get_history(chat_id)
+    history = history + [
+        {"role": "user", "content": user_turn},
+        {"role": "assistant", "content": assistant_turn},
+    ]
+    conversations[chat_id] = history[-40:]
+    asyncio.create_task(asyncio.to_thread(save_history, chat_id, conversations[chat_id]))
+
+
 async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     # Load from Supabase if this is the first message after a restart
-    if chat_id not in conversations:
-        conversations[chat_id] = load_history(chat_id)
-    history = conversations[chat_id]
+    history = _get_history(chat_id)
 
     # effective_message covers BOTH new and EDITED messages. Without this, an
     # edit (Jess bumping "Log this" to "…add it to shared brain") arrives as
@@ -952,6 +970,13 @@ async def send_jess_checkin(context: ContextTypes.DEFAULT_TYPE):
         for i, section in enumerate(sections):
             kb = _symptom_keyboard(symptoms) if (i == len(sections) - 1 and symptoms) else None
             await _send_or_alert(context, JESS_ID, section, "jess_checkin", reply_markup=kb)
+        # The check-in is the agent opening the conversation — record it so if she
+        # replies in her own words (not a tap), the agent continues from here.
+        _thread_into_history(
+            JESS_ID,
+            "[Daily pregnancy check-in sent to Jess — how is she feeling today?]",
+            text,
+        )
     except Exception:
         logger.exception("Error sending Jess check-in")
 
@@ -1553,18 +1578,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        chat_id = query.message.chat_id
         if symptom == "more":
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="Tell me how you're feeling — I'll note it and bring it up before your next appointment.",
+            invite = "Tell me how you're feeling — I'll note it and bring it up before your next appointment."
+            await context.bot.send_message(chat_id=chat_id, text=invite)
+            # Seed the thread so her free-text reply continues THIS check-in
+            # (agent sees she's about to describe how she feels) instead of cold.
+            _thread_into_history(
+                chat_id,
+                "[Tapped 'Tell you more' on today's pregnancy check-in — about to describe how she's feeling]",
+                invite,
             )
             return
         try:
-            reply = await agent.symptom_response(symptom, query.from_user.id)
-            await context.bot.send_message(chat_id=query.message.chat_id, text=reply, parse_mode="HTML")
+            history = _get_history(chat_id)
+            reply = await agent.symptom_response(symptom, query.from_user.id, history)
+            await context.bot.send_message(chat_id=chat_id, text=reply, parse_mode="HTML")
+            # Iterative, not fire-and-forget: the tap + our reply become part of
+            # the conversation so a follow-up ("is that normal?") lands in context.
+            _thread_into_history(
+                chat_id,
+                f"[Pregnancy check-in — tapped that she's feeling: {symptom}]",
+                reply,
+            )
         except Exception:
             logger.exception("symptom response failed")
-            await context.bot.send_message(chat_id=query.message.chat_id, text="Logged that 💛")
+            await context.bot.send_message(chat_id=chat_id, text="Logged that 💛")
 
     elif data.startswith("ci:") or data.startswith("cisnz:"):
         await _handle_check_in_callback(query, context, data)

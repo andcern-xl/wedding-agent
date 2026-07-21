@@ -295,6 +295,30 @@ def _fix_md(text: str) -> str:
     return text
 
 
+def _render_recent_turns(history: list[dict] | None, limit: int = 6) -> str:
+    """Flatten the last `limit` conversation turns into a plain Them:/You: block
+    so one-shot generators (symptom replies, check-in follow-ups) can react to the
+    live conversation instead of answering cold. Handles both string content and
+    Anthropic content-block lists (text blocks only)."""
+    if not history:
+        return ""
+    lines = []
+    for turn in history[-limit:]:
+        role = turn.get("role")
+        content = turn.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        content = (content or "").strip()
+        if not content:
+            continue
+        who = "Them" if role == "user" else "You"
+        lines.append(f"{who}: {content[:400]}")
+    return "\n".join(lines)
+
+
 SYSTEM_PROMPT = """You are a wedding planning assistant for a couple planning their wedding. They drop notes, screenshots, and discussions into this chat as they go — treat everything they've sent as your source of truth.
 
 Your job is to help them make sense of what they've gathered, answer questions, spot gaps, and keep things moving.
@@ -4762,9 +4786,11 @@ Keep it to 4-6 short lines total. This is the ONE message she gets today and the
         text = await _brief_with_brain(self.client, SYNTHESIS_MODEL, prompt, max_tokens=500)
         return {"text": _fix_md(text), "symptoms": self._symptom_taps()}
 
-    async def symptom_response(self, symptom: str, user_id: int) -> str:
+    async def symptom_response(self, symptom: str, user_id: int,
+                               history: list[dict] | None = None) -> str:
         """Log a symptom as a dated baby episode (recall + appointment prep reach
-        it) and return a specific, practical, reassuring reply for HER week."""
+        it) and return a specific, practical, reassuring reply for HER week —
+        built on the conversation so far, not a cold one-shot."""
         from tools.baby import current_week, pregnancy_summary
         from tools.user_memory import add_brain_entry
         week = current_week()
@@ -4779,12 +4805,18 @@ Keep it to 4-6 short lines total. This is the ONE message she gets today and the
         if symptom.lower().startswith(("good", "feeling good", "great")):
             return "Love that. Logged a good day 🙂"
         info = pregnancy_summary()
-        prompt = f"""Jess is {week} weeks pregnant and just told you she's experiencing: "{symptom}".
+        convo = _render_recent_turns(history, limit=6)
+        convo_block = f"""RECENT CONVERSATION (continue it — don't repeat yourself, react to what she's already said):
+{convo}
+
+""" if convo else ""
+        prompt = f"""{convo_block}Jess is {week} weeks pregnant and just told you she's experiencing: "{symptom}".
 
 Reply in 2-3 short sentences, warm and practical:
 - Normalise it if it's normal at {week} weeks (say so plainly).
 - One concrete thing that actually helps.
 - ONLY if this symptom at this stage can signal something that needs medical attention, add one clear line: "Worth flagging to Dr Joycelyn if [specific red-flag]." Do not invent red flags for benign symptoms.
+- If the conversation above shows she mentioned this or a related thing already, acknowledge that continuity instead of starting fresh.
 Never alarmist. You're a friend who knows, not a doctor. No numbered lists — just talk.
 
 {VOICE_RULES}
