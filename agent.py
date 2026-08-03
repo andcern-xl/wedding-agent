@@ -13,7 +13,15 @@ from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops, drop
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today, complete_task, get_task_by_id
-from tools.notifications import schedule_notification as _sched_notif, list_notifications as _list_notifs, cancel_notification as _cancel_notif
+from tools.notifications import (
+    schedule_notification as _sched_notif,
+    list_notifications as _list_notifs,
+    cancel_notification as _cancel_notif,
+    find_notifications as _find_notifs,
+    cancel_notifications as _cancel_notifs,
+    stop_series as _stop_notif_series,
+    local_time_label as _notif_time_label,
+)
 from tools.fyis import get_fyis, get_fyis_today
 from tools.daily_categories import get_all_categories, add_custom_category, detect_daily_category, BUILT_IN_CATEGORIES
 from tools.user_memory import get_summary, save_summary, get_message_count, get_shared_summary, append_shared_summary
@@ -1457,6 +1465,19 @@ NOTIFICATION MESSAGE STYLE — always write notification messages with:
 - Short, warm, direct phrasing — like a helpful friend, not a calendar alert
 - Any useful context (what to bring, what to prepare) in 1–2 sentences max
 - No "Reminder:" prefix — the emoji does that job
+Before setting up a NEW recurring reminder (daily/weekly/monthly), call find_notifications on the subject first. If something similar is already running, say so and ask whether to add a slot or move the existing one — never stack a second copy of a reminder that already fires.
+
+TURNING REMINDERS OFF — YOU CAN ALWAYS DO THIS FROM CHAT
+Anything you can switch on, you can switch off from right here. Nobody should ever have to go into the code to stop a reminder you created.
+- "can we turn off the notification for X" / "stop the X reminders" / "I'm getting too many X" → call find_notifications with the SUBJECT ("lucille medication", "condo fee") — not the whole sentence. Then call cancel_notifications with EVERY matching ID in one call.
+- NEVER say "I don't have a record of that" until find_notifications has come back empty. Your memory of what's scheduled is not evidence — the tool is.
+- NEVER ask the user for a notification ID. They can't see IDs; that's your job to look up. Asking for one is a bug, not a clarifying question.
+- If find_notifications comes back empty, call list_notifications and show them what IS scheduled: "Nothing matching X. Here's what's on: …". Let them point at the right one in words.
+- Reminders are household-wide. A reminder Jess set is one Ansen can switch off and vice versa — search the household scope by default, and say whose it was.
+- Confirm with specifics: "🔕 Turned off 13 Lucille reminders — 6 at 8:00 am, 4 at 9:00 am, 3 at 7:00 pm. Nothing left on her schedule." Never a bare "Done".
+- Partial asks are fine: "just the morning one" → cancel only the matching times, and say what's still running.
+- If they want it quieter rather than gone (fewer times, different hour), cancel the ones being dropped and reschedule the keeper — don't leave both.
+- They can also tap 🔕 on any reminder as it arrives, or run /notifications for the full list with cancel buttons. Mention those if they seem to be fighting the same reminder repeatedly.
 
 MESSAGING THE PARTNER — DO THIS PROPERLY
 When asked to "notify", "tell", "message", "ping", "let Jess know", "tell Ansen" etc → call message_partner immediately. It fires within seconds.
@@ -1486,7 +1507,7 @@ HOW TO USE TOOLS
 - "book", "schedule", "add to calendar" → create_calendar_event; then immediately call read_daily_tasks and mark_task_done on any open task that matches the same event (by name or date) — never leave a calendar event AND an open task for the same thing
 - "cancel", "remove from calendar" → delete_calendar_event (read_calendar first to get the event ID)
 - "what reminders are scheduled" → list_notifications
-- "cancel that reminder" → cancel_notification (list_notifications first to get the ID)
+- "turn off / stop / cancel / mute / delete [X] reminder" → find_notifications(subject of X) FIRST, then cancel_notifications with every matching ID (see TURNING REMINDERS OFF below)
 - Shared update / past-tense info / "FYI" / "just so you know" / "heads up" / completed action → classify first (see CONTENT CLASSIFICATION below), then use the right tool
 - "any FYIs?" / "what did we share recently?" → read_fyis
 - "going forward always do X" / "remember that I prefer X" / "from now on X" → save_preference (this persists across sessions)
@@ -2009,16 +2030,44 @@ TOOLS = [
     },
     {
         "name": "list_notifications",
-        "description": "List the current user's upcoming scheduled notifications.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "cancel_notification",
-        "description": "Cancel a scheduled notification by its ID. Call list_notifications first to get the ID.",
+        "description": "List upcoming scheduled notifications (the timed pushes, not daily tasks). Defaults to the whole household so you can see reminders either person set.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "notification_id": {"type": "string", "description": "The notification ID from list_notifications"},
+                "scope": {"type": "string", "enum": ["household", "mine"], "description": "'household' (default) = both Ansen and Jess. 'mine' = only the person you're talking to."},
+            },
+        },
+    },
+    {
+        "name": "find_notifications",
+        "description": "Search upcoming scheduled notifications by what they're about — 'lucille medication', 'condo fee', 'prenatal vitamins'. ALWAYS call this before saying a reminder doesn't exist, and before cancelling anything. Returns matching reminders with their IDs, times and a match score. Searches both people by default.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What the reminder is about, in the user's own words. Use the subject only ('lucille medication'), not the instruction ('turn off the reminder')."},
+                "scope": {"type": "string", "enum": ["household", "mine"], "description": "'household' (default) = both Ansen and Jess."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "cancel_notifications",
+        "description": "Cancel one or many scheduled notifications in a single call. Pass every ID you want gone — if find_notifications returned 13 Lucille reminders, pass all 13 here. Never ask the user for an ID; look it up with find_notifications yourself.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "notification_ids": {"type": "array", "items": {"type": "string"}, "description": "IDs from find_notifications or list_notifications"},
+            },
+            "required": ["notification_ids"],
+        },
+    },
+    {
+        "name": "cancel_notification",
+        "description": "Cancel a single scheduled notification by its ID. Prefer cancel_notifications when there may be more than one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "notification_id": {"type": "string", "description": "The notification ID from find_notifications / list_notifications"},
             },
             "required": ["notification_id"],
         },
@@ -2467,6 +2516,12 @@ class UnifiedAgent:
 
     _USER_NAMES = {63756531: "Ansen", 6927468999: "Jess"}
 
+    def _household_ids(self, user_id: int) -> list[int]:
+        """Both partners. Reminders are household plumbing — either person must
+        be able to find and switch off a reminder the other one set."""
+        ids = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
+        return ids or list(self._USER_NAMES) or [user_id]
+
     def _build_system(self, user_summary: str = "", shared_summary: str = "", user_id: int = 0, recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", query: str = "", open_check_ins: str = "") -> str:
         cat_lines = "\n".join(
             f"- {v['emoji']} {k}: {v['name']} — {v['description']}"
@@ -2629,18 +2684,52 @@ class UnifiedAgent:
                 target_ids = [user_id]
             recurrence = inputs.get("recurrence", "none")
             ids_scheduled = []
+            already_existed = False
+            similar = []
             for uid in target_ids:
                 notif = _sched_notif(uid, inputs["message"], dt, recurrence)
                 ids_scheduled.append(str(notif["id"]))
+                already_existed = already_existed or notif.get("_duplicate", False)
+                for s in notif.get("_similar", []):
+                    similar.append({"id": str(s["id"]), "when": _notif_time_label(s["scheduled_at"]),
+                                    "recurrence": s.get("recurrence", "none")})
             display = dt.strftime("%-d %b at %-I:%M %p")
-            return {"status": "scheduled", "scheduled_at": dt.isoformat(), "display": display, "ids": ids_scheduled}
+            result = {"status": "already_scheduled" if already_existed else "scheduled",
+                      "scheduled_at": dt.isoformat(), "display": display, "ids": ids_scheduled}
+            if already_existed:
+                result["note"] = "This exact reminder was already on the schedule at this time — nothing new was created. Tell the user it's already set rather than claiming you just added it."
+            if similar:
+                result["existing_same_text_other_times"] = similar
+                result["note"] = "The same reminder text is already scheduled at other times (listed above). Check with the user whether they wanted an extra dose/slot or meant to move the existing one — don't silently stack duplicates."
+            return result
 
         if name == "list_notifications":
-            notifs = _list_notifs(user_id)
-            return [{"id": str(n["id"]), "message": n["message"], "scheduled_at": n["scheduled_at"], "recurrence": n.get("recurrence", "none")} for n in notifs]
+            uids = [user_id] if inputs.get("scope") == "mine" else self._household_ids(user_id)
+            notifs = _list_notifs(user_ids=uids)
+            return [{"id": str(n["id"]), "message": n["message"], "when": _notif_time_label(n["scheduled_at"]),
+                     "scheduled_at": n["scheduled_at"], "recurrence": n.get("recurrence", "none"),
+                     "for": self._USER_NAMES.get(n["user_id"], str(n["user_id"]))} for n in notifs]
+
+        if name == "find_notifications":
+            uids = [user_id] if inputs.get("scope") == "mine" else self._household_ids(user_id)
+            matches = _find_notifs(inputs.get("query", ""), user_ids=uids)
+            if not matches:
+                return {"matches": [], "note": "Nothing upcoming matches that. Before telling the user it doesn't exist, try list_notifications to show them what IS scheduled — never ask them for a notification ID."}
+            return {"matches": [{"id": str(n["id"]), "message": n["message"], "when": _notif_time_label(n["scheduled_at"]),
+                                 "recurrence": n.get("recurrence", "none"), "score": n["score"],
+                                 "for": self._USER_NAMES.get(n["user_id"], str(n["user_id"]))} for n in matches],
+                    "count": len(matches),
+                    "note": "To switch these off, pass ALL the relevant IDs to cancel_notifications in one call."}
+
+        if name == "cancel_notifications":
+            removed = _cancel_notifs(inputs.get("notification_ids", []))
+            return {"status": "cancelled" if removed else "not_found",
+                    "count": len(removed),
+                    "cancelled": [{"message": r["message"], "when": _notif_time_label(r["scheduled_at"]),
+                                   "recurrence": r.get("recurrence", "none")} for r in removed]}
 
         if name == "cancel_notification":
-            ok = _cancel_notif(inputs["notification_id"], user_id)
+            ok = _cancel_notif(inputs["notification_id"])
             return {"status": "cancelled" if ok else "not_found"}
 
         if name == "save_preference":
@@ -5484,7 +5573,29 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
             due_today = [t for t in visible if t.get("due_date") == today_str]
             upcoming = sorted([t for t in visible if t.get("due_date") and t["due_date"] > today_str], key=lambda x: x["due_date"])[:5]
             if overdue:
-                parts.append("OVERDUE: " + "; ".join(t["task"] for t in overdue))
+                # Unchanged overdue items are not news. Same gating the retired
+                # evening wrap used (bb65066) — it was lost when the wrap folded
+                # into this brief (3bdf6db), which is why the same pile repeated
+                # every morning. Only items that crossed a line today surface:
+                # newly overdue, or hitting a weekly milestone (7/14/21…).
+                for t in overdue:
+                    try:
+                        t["_days_overdue"] = (_local_today() - _date.fromisoformat(t["due_date"])).days
+                    except Exception:
+                        t["_days_overdue"] = 0
+                newsworthy = [
+                    t for t in sorted(overdue, key=lambda x: -x["_days_overdue"])
+                    if t["_days_overdue"] == 1 or (t["_days_overdue"] and t["_days_overdue"] % 7 == 0)
+                ]
+                shown = newsworthy[:6]
+                if shown:
+                    parts.append(
+                        "OVERDUE — CROSSED A LINE TODAY (newly overdue or hit a weekly milestone; one terse line each):\n"
+                        + "\n".join(f"  ⚠️ {t['task']} — day {t['_days_overdue']} overdue" for t in shown)
+                    )
+                remaining = len(overdue) - len(shown)
+                if remaining > 0:
+                    parts.append(f"({remaining} other overdue tasks unchanged since yesterday — do NOT list or mention them, not even as a count or a 'homecoming list'; the icebox handles them)")
             if due_today:
                 parts.append("DUE TODAY: " + "; ".join(t["task"] for t in due_today))
             if upcoming:
@@ -5544,6 +5655,10 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
                     parts.append(
                         f"ON THE TRIP NOW: {t['destination']}{day_n} ({t.get('start_date')}–{t.get('end_date')}). "
                         f"Surface TODAY'S ({today_str}, {weekday}) segment from the plan below — flights/shuttles/check-ins/plans for today, with times. Skip other days.\n"
+                        f"NOTE ON THE PLAN TEXT: it is a hand-written blob, not live state. It is written ahead of the trip and is NOT updated when something resolves. "
+                        f"Any sentence in it phrased as an open question (\"deciding between\", \"still choosing\", \"need to pick\", \"TBC\") may already be settled or moot. "
+                        f"Before raising ANY such decision, check it against today ({today_str}): if the thing it decides is already underway or past — a stay whose check-in date has passed, a flight already flown, a booking whose change window has closed — the decision is DEAD. Do not raise it, do not offer to save money on it. "
+                        f"Treat dates in the plan as authoritative over the plan's own tense.\n"
                         f"TRIP PLAN:\n{notes[:1500]}"
                     )
             if upcoming:
@@ -5621,12 +5736,14 @@ ACTION-DRIVEN — this brief exists to tell them what to DO today, in priority o
 - Open with the single most important ACTION for today — the appointment to prep for, the deadline, the person to chase, the decision to make. Not a greeting, not a recap. If nothing is genuinely actionable today, say that in one line ("Clear day — nothing needs you") and stop.
 - IF "ON THE TRIP NOW" is present: this is a travel day — LEAD with today's trip segment (today's flights/shuttles/check-ins/plans with times, in order), then anything else that needs them. They're away from routine; the day's logistics are the priority.
 - Then the rest of today's actions, most-consequential first. Each one should imply a verb: what to bring, who to message, what to decide.
-- OVERDUE never goes quiet: anything OVERDUE (or a gap unresolved 7+ days) appears EVERY day until done or rescheduled. Escalate brevity, not silence — full context once, then one terse line with the count ("Elenna follow-up — day 19 overdue").
+- OVERDUE: only what is listed under "CROSSED A LINE TODAY" may be mentioned, one terse line each ("Elenna follow-up — day 21 overdue"). Everything else in the overdue pile is DEAD AIR — do not list it, count it, allude to it, or gather it into a "homecoming list" / "for when you're back" / "still outstanding" roundup. Repeating an unchanged pile is the single thing they've told us is useless. The icebox owns stale tasks.
 - Standing facts (baby week, trips weeks out, open goals) earn a line only when there's an action or a change today. A quiet day is a SHORT message — two or three sentences is great. Never pad.
 
-SHAPE:
-- Flowing prose, 1–3 short paragraphs. No emoji section headers. No bullets unless listing 4+ parallel action items.
-- Weave connections: "Dr Janice at 10 — bring the test reports, and it's your chance to settle the NIPT timing" beats separate Baby and Today lines.
+SHAPE — scannable on a phone, not an essay. They read this at 9am with one thumb:
+- Lead line: today in one short sentence, with an emoji anchor. Then a blank line.
+- Each thing that needs them = its own • bullet, one or two lines max, blank line between blocks. Times and flight numbers bolded. NEVER a paragraph that runs more than three lines — that is the wall of text they told us not to send.
+- Ceiling: about 120 words. If it doesn't fit, you are including things that don't need them today. Cut, don't compress.
+- Weave connections INSIDE a bullet ("Dr Janice <b>10:10</b> — bring the test reports, and settle NIPT timing while you're there") rather than spreading one topic across separate lines.
 - RECALL: for each person, place, or occasion in today's plans, query_brain for what you know — a birthday means what they'd love, a dinner means what you know about them. One well-timed recall beats three tenuous ones.
 - Vary the opening every day.
 - Last line: → /tasks /shared for the full picture
@@ -5638,11 +5755,11 @@ STALENESS — before surfacing any FYI, cross-check it:
 - Never surface both the pending and confirmed version of the same thing
 
 {FORMAT_RULES}
-- This is flowing prose: bold for at most one or two load-bearing facts."""
+- This brief is bulleted blocks, not prose. Bullets here are exempt from the 4+ item rule: one actionable item still gets its own •."""
 
         text = await _brief_with_brain(
             self.client, SYNTHESIS_MODEL, prompt,
-            system=DAILY_SYSTEM_PROMPT, max_tokens=600,
+            system=DAILY_SYSTEM_PROMPT, max_tokens=400,
         )
         return _fix_md(text)
 

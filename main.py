@@ -17,7 +17,11 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from agent import UnifiedAgent
 from categories import CATEGORIES
-from tools.notifications import get_pending_notifications, mark_notification_sent
+from tools.notifications import (
+    get_pending_notifications, mark_notification_sent, list_notifications as list_scheduled,
+    cancel_notification as cancel_scheduled, get_notification as get_scheduled,
+    stop_series as stop_notification_series, local_time_label, group_duplicates,
+)
 from tools.user_memory import get_shared_summary, append_shared_summary
 from tools.fyis import get_fyis, get_fyis_expiring, keep_fyi, promote_fyi, archive_fyi, ack_fyi, get_fyis_unacked
 from tools.conversation import load_history, save_history
@@ -405,6 +409,7 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Shortcuts</b>",
         "/bringmeuptospeed — full wedding overview",
         "/plan /tasks /reminders /shared",
+        "🔔 /notifications — timed reminders, with a ❌ on each to switch it off",
     ]
     for key, cat in CATEGORIES.items():
         lines.append(f"{cat['emoji']} /{key}")
@@ -1063,6 +1068,119 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_reminders failed")
+        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+
+
+_NOTIF_USER_NAMES = {ANSEN_ID: "Ansen", JESS_ID: "Jess"}
+_NOTIF_BUTTON_CAP = 20
+
+
+def _notif_label(row: dict, count: int = 1) -> str:
+    """Button text: the time, then enough of the message to recognise it."""
+    body = (row.get("message") or "").replace("\n", " ").strip()
+    body = " ".join(body.split())
+    if len(body) > 34:
+        body = body[:33].rstrip() + "…"
+    when = local_time_label(row["scheduled_at"]).split(", ")[-1]
+    suffix = f" ×{count}" if count > 1 else ""
+    return f"❌ {when} · {body}{suffix}"
+
+
+def _notif_day_header(ts: str) -> str:
+    """'Tue 4 Aug' — with the year once we're past this one, so a 2029 visa
+    alert doesn't read like next Tuesday."""
+    dt = _notif_dt(ts)
+    stamp = dt.strftime("%a %-d %b")
+    return stamp if dt.year == ddate.today().year else f"{stamp} {dt.year}"
+
+
+def _notif_dt(ts: str):
+    from datetime import datetime as _dt, timezone as _tz
+    d = _dt.fromisoformat(ts)
+    if not d.tzinfo:
+        d = d.replace(tzinfo=_tz.utc)
+    return d.astimezone(REMINDER_TIMEZONE)
+
+
+def _notifications_view(viewer_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Everything scheduled for the household, with a cancel button on each and
+    a 'stop all' on anything that recurs. This is the whole point: no reminder
+    should need a code change to switch off."""
+    rows = list_scheduled(user_ids=ALLOWED_IDS or [viewer_id])
+    if not rows:
+        return ("🔔 <b>Scheduled reminders</b>\n\nNothing scheduled.\n\n"
+                "<i>Ask me to remind you about anything at a specific time.</i>", None)
+
+    groups = group_duplicates(rows)
+    extra = sum(g["count"] - 1 for g in groups if g["duplicate"])
+    multi_user = len({r["user_id"] for r in rows}) > 1
+
+    lines = [f"🔔 <b>Scheduled reminders</b> ({len(rows)})"]
+    if extra:
+        lines.append(f"⚠️ {extra} duplicate{'s' if extra != 1 else ''} — tap ❌ on the copies you don't want.")
+    lines.append("")
+
+    by_day: dict[str, list[dict]] = {}
+    for r in rows:
+        by_day.setdefault(_notif_day_header(r["scheduled_at"]), []).append(r)
+
+    shown, hidden = 0, 0
+    for day, day_rows in by_day.items():
+        if shown >= 30:
+            hidden += len(day_rows)
+            continue
+        lines.append(f"<b>{escape(day)}</b>")
+        for r in day_rows:
+            when = local_time_label(r["scheduled_at"]).rsplit(", ", 1)[-1]
+            body = " ".join((r.get("message") or "").split())
+            if len(body) > 66:
+                body = body[:65].rstrip() + "…"
+            rec = r.get("recurrence", "none")
+            bits = [rec] if rec and rec != "none" else []
+            if multi_user:
+                bits.append(_NOTIF_USER_NAMES.get(r["user_id"], ""))
+            tail = f" <i>· {' · '.join(b for b in bits if b)}</i>" if bits else ""
+            lines.append(f"• {when} — {escape(body)}{tail}")
+            shown += 1
+        lines.append("")
+    if hidden:
+        lines.append(f"<i>+ {hidden} further out. Ask me to list them if you need to.</i>")
+
+    buttons = [[InlineKeyboardButton(_notif_label(r), callback_data=f"notifdel:{r['id']}")]
+               for r in rows[:_NOTIF_BUTTON_CAP]]
+
+    # One tap to kill an entire recurring series rather than occurrence by occurrence.
+    seen_series: list[tuple[int, str]] = []
+    for g in groups:
+        key = (g["user_id"], g["message"])
+        if g["recurrence"] and g["recurrence"] != "none" and key not in seen_series:
+            seen_series.append(key)
+    for uid, msg in seen_series[:8]:
+        row = next(r for r in rows if r["user_id"] == uid and r["message"] == msg)
+        short = " ".join(msg.split())[:24].rstrip()
+        owner = f" ({_NOTIF_USER_NAMES.get(uid, '')})" if multi_user else ""
+        buttons.append([InlineKeyboardButton(f"🔕 Stop all “{short}…”{owner}",
+                                             callback_data=f"notifstop:{row['id']}")])
+
+    if len(rows) > _NOTIF_BUTTON_CAP:
+        lines.append(f"<i>❌ buttons cover the next {_NOTIF_BUTTON_CAP}. For the rest just tell me "
+                     f"— e.g. \"turn off the Lucille reminders\".</i>")
+
+    text = "\n".join(lines).strip()
+    if len(text) > 3800:
+        text = text[:3800].rsplit("\n", 1)[0] + "\n\n<i>…trimmed. Ask me for the full list.</i>"
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    msg = await update.message.reply_text("Pulling scheduled reminders...")
+    try:
+        text, keyboard = await asyncio.to_thread(_notifications_view, update.effective_user.id)
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.exception("cmd_notifications failed")
         await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
 
 
@@ -1731,6 +1849,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    elif data.startswith("notifdel:"):
+        # Cancel one upcoming occurrence from the /notifications list.
+        notif_id = data[9:]
+        try:
+            row = await asyncio.to_thread(get_scheduled, notif_id)
+            ok = await asyncio.to_thread(cancel_scheduled, notif_id)
+        except Exception:
+            logger.exception("notifdel failed")
+            await query.answer("Couldn't cancel that — try again")
+            return
+        await query.answer("🔕 Cancelled" if ok else "Already gone")
+        current = query.message.reply_markup
+        if current:
+            new_rows = [r for r in current.inline_keyboard if not any(b.callback_data == data for b in r)]
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup(new_rows) if new_rows else None)
+            except Exception:
+                pass
+        if ok and row:
+            body = " ".join((row.get("message") or "").split())[:80]
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"🔕 Cancelled — <b>{escape(body)}</b>\n<i>{escape(local_time_label(row['scheduled_at']))}</i>",
+                parse_mode="HTML")
+        return
+
+    elif data.startswith("notifstop:"):
+        # Kill a recurring reminder for good — every pending copy of it.
+        notif_id = data[10:]
+        try:
+            result = await asyncio.to_thread(stop_notification_series, notif_id)
+        except Exception:
+            logger.exception("notifstop failed")
+            await query.answer("Couldn't stop that — try again")
+            return
+        count = result.get("cancelled", 0)
+        await query.answer(f"🔕 Stopped ({count})" if count else "Already stopped")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        body = " ".join((result.get("message") or "").split())[:80]
+        if count:
+            owner = _NOTIF_USER_NAMES.get(result.get("user_id"), "")
+            whose = f" on {owner}'s schedule" if owner and query.from_user.id != result.get("user_id") else ""
+            text = (f"🔕 Stopped <b>{escape(body)}</b>{whose}.\n"
+                    f"<i>{count} upcoming {'copy' if count == 1 else 'copies'} removed — it won't fire again.</i>")
+        else:
+            text = f"🔕 <b>{escape(body)}</b> was already off — nothing left scheduled."
+        await context.bot.send_message(chat_id=query.message.chat_id, text=text, parse_mode="HTML")
+        return
+
     elif data.startswith("trip_del:"):
         await query.answer()
         trip_id = data[9:]
@@ -1825,14 +1996,15 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         reopened = await asyncio.to_thread(reopen_due_snoozed)
         for ci in reopened:
             await _send_check_in_cards(context, [ci], ci.get("created_by") or ALLOWED_IDS[0])
+        # An unanswered question is not a memory. Writing these into the brain
+        # (18 rows by 30 Jul, all "Unanswered check-in (expired): …") duplicated
+        # each other, contradicted the facts that later resolved them, and got
+        # fed back into every brief as standing knowledge. The check_ins row is
+        # already the record — it keeps status='expired'.
         expired = await asyncio.to_thread(expire_stale, 7)
-        for ci in expired:
-            try:
-                from tools.user_memory import add_brain_entry as _add_ep
-                _add_ep(f"Unanswered check-in (expired): {ci['question']}", "life",
-                        "check_in_expiry", None, "episode")
-            except Exception:
-                pass
+        if expired:
+            logger.info("expired %d stale check-in(s): %s", len(expired),
+                        "; ".join((ci.get("question") or "")[:60] for ci in expired))
     except Exception:
         logger.exception("check-in housekeeping failed")
 
@@ -1987,9 +2159,11 @@ async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
         return
     for notif in pending:
         try:
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Got it", callback_data=f"notif_ack:{notif['id']}")
-            ]])
+            row = [InlineKeyboardButton("✅ Got it", callback_data=f"notif_ack:{notif['id']}")]
+            # Recurring reminders get an off switch right where they annoy you.
+            if (notif.get("recurrence") or "none") != "none":
+                row.append(InlineKeyboardButton("🔕 Stop these", callback_data=f"notifstop:{notif['id']}"))
+            keyboard = InlineKeyboardMarkup([row])
             await context.bot.send_message(
                 chat_id=notif["user_id"], text=notif["message"], reply_markup=keyboard
             )
@@ -2755,6 +2929,7 @@ def main():
             BotCommand("stocks", "📊 Stocks & crypto brief"),
             BotCommand("finances", "💼 Portfolio & money picture"),
             BotCommand("me", "👤 My personal tasks"),
+            BotCommand("notifications", "🔔 Scheduled reminders — view & turn off"),
         ]
         await application.bot.set_my_commands(commands)
 
@@ -2774,6 +2949,7 @@ def main():
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("reminders", cmd_reminders))
+    app.add_handler(CommandHandler(["notifications", "notifs", "alerts"], cmd_notifications))
     app.add_handler(CommandHandler("shared", cmd_shared_parent))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("testnotify", cmd_testnotify))
