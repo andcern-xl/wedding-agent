@@ -1467,6 +1467,15 @@ NOTIFICATION MESSAGE STYLE — always write notification messages with:
 - No "Reminder:" prefix — the emoji does that job
 Before setting up a NEW recurring reminder (daily/weekly/monthly), call find_notifications on the subject first. If something similar is already running, say so and ask whether to add a slot or move the existing one — never stack a second copy of a reminder that already fires.
 
+WEDDING RECALL — THE VAULT IS NOT THE ARCHIVE
+The wedding has been in planning since April 2026 and the couple have dropped 160+ notes, messages and screenshots. The shared brain only started capturing wedding facts in mid-June, and it never went back for the earlier material. So the bulk of what they've told you — the day-of running order, the food stations, the DJ and lighting plan, the solemnisation timings — exists ONLY in the wedding drops, not in the brain slice injected above.
+- The injected brain context is a thin recent slice. Treat it as a starting point, never as the full record.
+- For ANY specific wedding question, call read_wedding_drops with `query` before answering. It searches the whole archive by content. query_brain works too.
+- NEVER say "no X yet", "nothing saved for X", "all TBD" or "what's missing: …" about the wedding until a content search has come back empty. If you're about to tell them something isn't recorded, that's the signal to search again with different words — they have almost certainly told you already, and being told "you never gave me that" when they did is the single most damaging thing you can do to their trust in you.
+- Categories mislead: the day-of plan is filed under 'ceremony', lunch timings under 'budget', the event schedule and DJ timeline under 'venue', and 'timeline' contains only a question they once asked. A thin category means bad filing, not missing information.
+- When you summarise "what we have so far", search several angles first (timeline/schedule, food/catering, music/DJ, flowers/decor, attire, photography, guests/rooms, budget) and build the summary from the drops. A summary assembled only from the brain slice will be wrong and will read as amnesia.
+- Wedding day is Saturday 7 November 2026 at The Singapore EDITION (FYSH). 5–10 Nov is the GUEST ROOM BLOCK range — never report the room block dates as the wedding date.
+
 TURNING REMINDERS OFF — YOU CAN ALWAYS DO THIS FROM CHAT
 Anything you can switch on, you can switch off from right here. Nobody should ever have to go into the code to stop a reminder you created.
 - "can we turn off the notification for X" / "stop the X reminders" / "I'm getting too many X" → call find_notifications with the SUBJECT ("lucille medication", "condo fee") — not the whole sentence. Then call cancel_notifications with EVERY matching ID in one call.
@@ -1494,7 +1503,7 @@ Tell them you've done it: "I've set a reminder for [date] to check in about [thi
 HOW TO USE TOOLS
 - Always fetch context with tools before answering — never guess from memory
 - Incoming wedding message → call log_wedding_drop to save it, then respond
-- Wedding questions → read_wedding_drops (filter by category when relevant)
+- Wedding questions → read_wedding_drops with `query` (see WEDDING RECALL below). Category filters are unreliable — never answer a specific question from one.
 - Task / date-based reminder (no specific clock time) → add_daily_task — appears in the morning brief
 - Reminder with a specific time ("at 3pm", "in 2 hours", "tonight at 8", "tomorrow at noon") → schedule_notification — fires as a Telegram push at that exact moment. NEVER use add_daily_task for these.
 - Monthly recurring reminders ("every 1st", "each month", "monthly") → schedule_notification with recurrence="monthly", scheduled for the next occurrence. Just do it — don't ask which approach they prefer.
@@ -1795,13 +1804,17 @@ TOOLS = [
     },
     {
         "name": "read_wedding_drops",
-        "description": "Read wedding planning notes, messages and screenshots stored by the couple. Use for any wedding-related question.",
+        "description": "Read the couple's wedding archive — every note, message and screenshot they've dropped since April 2026. PREFER the `query` parameter: it searches the FULL archive by content, while `category` and the default recent view only see a slice. Categories are unreliable (the day-of timeline is filed under 'ceremony', lunch timings under 'budget', the DJ schedule under 'venue'), so never conclude something wasn't recorded from a category read alone.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Topic keywords, searched across ALL drops regardless of category or age — 'day of timeline solemnisation lunch', 'catering food menu stations', 'DJ music lighting'. Use this for any specific question.",
+                },
                 "category": {
                     "type": "string",
-                    "description": "Filter by category slug: venue, budget, guests, catering, photography, decor, entertainment, attire, ceremony, logistics, vendors, timeline, honeymoon. Omit for recent drops across all.",
+                    "description": "Only for browsing one bucket: venue, budget, guests, catering, photography, decor, entertainment, attire, ceremony, logistics, vendors, timeline, honeymoon. Unreliable on its own — pair it with query, or use query alone.",
                 },
                 "limit": {"type": "integer", "description": "Max results. Default 40."},
             },
@@ -2557,10 +2570,45 @@ class UnifiedAgent:
             return {"status": "logged", "category": category}
 
         if name == "read_wedding_drops":
+            from tools.log import search_drops as _search_drops, total_drops as _total_drops
             category = inputs.get("category")
+            query = (inputs.get("query") or "").strip()
             limit = inputs.get("limit", 40)
-            drops = get_drops(category=category, limit=limit) if category else get_recent_drops(limit=limit)
-            return [{"ts": d["ts"][:10], "category": d.get("category"), "kind": d["kind"], "content": d["content"]} for d in drops]
+            note = None
+
+            if query:
+                drops = _search_drops(query, limit=max(limit, 10))
+                if category:
+                    narrowed = [d for d in drops if d.get("category") == category]
+                    # Category is advisory only — never let it empty a real result set.
+                    if narrowed:
+                        drops = narrowed
+                    else:
+                        note = f"No '{category}' drops matched, so these are content matches from other categories — categories are unreliable here."
+                if not drops:
+                    drops = get_recent_drops(limit=limit)
+                    note = ("Nothing matched those words. These are the most recent drops instead. "
+                            "Try different keywords before telling the user it isn't recorded — "
+                            f"there are {_total_drops()} drops going back to April 2026, and the archive "
+                            "predates the shared brain, so the vault NOT having something proves nothing.")
+            elif category:
+                drops = get_drops(category=category, limit=limit)
+                if len(drops) < 5:
+                    widened = _search_drops(category, limit=10)
+                    extra = [d for d in widened if d["id"] not in {x["id"] for x in drops}]
+                    if extra:
+                        drops = drops + extra
+                        note = (f"The '{category}' category only had {len(drops) - len(extra)} drop(s) — thin categories "
+                                "are a filing artefact, not a gap. Added content matches from other categories.")
+            else:
+                drops = get_recent_drops(limit=limit)
+                note = (f"This is only the {len(drops)} most recent of {_total_drops()} drops (archive starts April 2026). "
+                        "For any specific question, call again with `query` — most of the wedding substance "
+                        "is older than this window.")
+
+            results = [{"ts": (d.get("ts") or "")[:10], "category": d.get("category"),
+                        "kind": d.get("kind"), "content": d.get("content")} for d in drops]
+            return {"drops": results, "count": len(results), "note": note} if note else results
 
         if name == "read_daily_tasks":
             tasks = get_tasks(user_id, include_done=inputs.get("include_done", False))
@@ -5246,15 +5294,31 @@ When asked to build something:
         Returns {approved: {category: [facts]}, rejected_count: int}
         """
         import re as _re
+        from datetime import timedelta as _td
         from tools.fyis import get_fyis as _get_fyis
         from tools.baby_knowledge import get_entries as _get_baby
-        from tools.log import get_recent_drops
+        from tools.log import get_drops_since
+        from tools.loop_state import load_state as _load_ls, save_state as _save_ls, COUPLE as _COUPLE
         from tools.daily import get_tasks
 
         # ── Gather raw data ──────────────────────────────────────────
         fyis = _get_fyis(limit=40)
         baby_entries = _get_baby(limit=30)
-        wedding_drops = get_recent_drops(limit=20)
+
+        # Wedding drops: everything since the last sweep, not "the last 20".
+        # A count window loses whatever overflows it, permanently — which is how
+        # April and May 2026 (115 drops) never made it into the vault.
+        _SWEEP_LOOP = "knowledge_sweep_drops"
+        watermark = (_load_ls(_SWEEP_LOOP, _COUPLE) or {}).get("last_output") or ""
+        if not watermark:
+            watermark = (datetime.now(timezone.utc) - _td(days=8)).isoformat()
+        wedding_drops, dropped = get_drops_since(watermark)
+        if dropped:
+            import logging as _cap_log
+            _cap_log.getLogger(__name__).warning(
+                "knowledge_sweep: %d drops beyond the per-run cap — they stay unswept "
+                "until the next run advances the watermark past them", dropped)
+        new_watermark = max((d.get("ts") or "") for d in wedding_drops) if wedding_drops else watermark
 
         all_user_ids = list(self._USER_NAMES.keys())
         completed_tasks = []
@@ -5337,7 +5401,9 @@ Output only the JSON array."""
                     all_candidates.append((domain, f))
 
         if not all_candidates:
-            return {"approved": {}, "rejected_count": 0}
+            if not dry_run:
+                _save_ls(_SWEEP_LOOP, _COUPLE, new_watermark, date.today().isoformat())
+            return {"approved": {}, "rejected_count": 0, "drops_swept": len(wedding_drops)}
 
         # ── Phase 2: Verifier (the gate) ─────────────────────────────
         candidate_lines = "\n".join(
@@ -5408,8 +5474,12 @@ Be strict. When in doubt, reject."""
                     await self._upsert_shared_batch(facts, domain, source="sweep")
                 except Exception:
                     pass
+            # Only now — a run that bailed early leaves the watermark alone so
+            # those drops get another chance next week.
+            _save_ls(_SWEEP_LOOP, _COUPLE, new_watermark, date.today().isoformat())
 
-        return {"approved": approved_grouped, "rejected_count": rejected_count}
+        return {"approved": approved_grouped, "rejected_count": rejected_count,
+                "drops_swept": len(wedding_drops)}
 
     async def brain_synthesis(self) -> str:
         """Synthesise shared brain (facts + recent episodes) + budget buckets into a unified knowledge base."""

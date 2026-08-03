@@ -7,3 +7,4 @@ migrate.py
 supabase_daily_tasks.sql
 get_gcal_token.py
 .DS_Store
+.backfill_cache_*.json
