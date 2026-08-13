@@ -6,6 +6,7 @@ and chat must come from here; anything else is fabrication.
 from datetime import date, datetime, timezone
 
 from tools.db import get_client
+from tools.tz import local_today
 
 _OPEN_STATUSES = ("open", "waiting_them", "waiting_us")
 
@@ -14,7 +15,7 @@ def _days_since(d: str | None) -> int | None:
     if not d:
         return None
     try:
-        return (date.today() - date.fromisoformat(d[:10])).days
+        return (local_today() - date.fromisoformat(d[:10])).days
     except ValueError:
         return None
 
@@ -39,7 +40,7 @@ def log_contact(person: str, topic: str, direction: str, note: str = "",
                 status: str | None = None) -> dict:
     """Record a dated interaction. Reuses the person's open thread on the same
     topic when one exists (keyword overlap), otherwise starts a new thread."""
-    raw = (contact_date or date.today().isoformat())[:10]
+    raw = (contact_date or local_today().isoformat())[:10]
     try:
         when = date.fromisoformat(raw).isoformat()
     except ValueError:

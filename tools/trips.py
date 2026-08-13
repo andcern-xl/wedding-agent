@@ -1,5 +1,6 @@
 from datetime import date
 from tools.db import get_client
+from tools.tz import local_today
 
 
 def add_trip(
@@ -24,7 +25,7 @@ def add_trip(
 
 
 def get_upcoming_trips() -> list[dict]:
-    today = date.today().isoformat()
+    today = local_today().isoformat()
     return (
         get_client().table("trips").select("*")
         .gte("end_date", today)

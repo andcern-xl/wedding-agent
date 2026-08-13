@@ -6,6 +6,7 @@ re-asks a question it already asked, and can chase stale ones.
 """
 from datetime import date, datetime, timezone, timedelta
 from tools.db import get_client
+from tools.tz import local_today
 
 VALID_ACTIONS = ("save_decision", "create_task", "remind", "dismiss", "capture")
 MAX_OPEN = 10  # hard cap so unanswered questions can't pile up
@@ -101,7 +102,7 @@ def set_pending_capture(user_id: int, check_in_id: str, prompt: str, subject: st
     from datetime import date as _date
     payload = json.dumps({"check_in_id": check_in_id, "prompt": prompt,
                           "subject": subject, "category": category})
-    save_state("pending_capture", user_id, payload, _date.today().isoformat())
+    save_state("pending_capture", user_id, payload, local_today().isoformat())
 
 
 def get_pending_capture(user_id: int) -> dict | None:
@@ -110,7 +111,7 @@ def get_pending_capture(user_id: int) -> dict | None:
     from datetime import date as _date
     state = load_state("pending_capture", user_id) or {}
     # Expire after the same day — a capture must not hijack a message days later
-    if state.get("last_run_date") != _date.today().isoformat():
+    if state.get("last_run_date") != local_today().isoformat():
         return None
     try:
         d = json.loads(state.get("last_output") or "")
@@ -122,7 +123,7 @@ def get_pending_capture(user_id: int) -> dict | None:
 def clear_pending_capture(user_id: int) -> None:
     from tools.loop_state import save_state
     from datetime import date as _date
-    save_state("pending_capture", user_id, "", _date.today().isoformat())
+    save_state("pending_capture", user_id, "", local_today().isoformat())
 
 
 def get_recently_answered(days: int = 10, limit: int = 30) -> list[dict]:
@@ -164,7 +165,7 @@ def dismiss_check_in(check_in_id: str, user_id: int) -> bool:
 
 def snooze_check_in(check_in_id: str, days: int = 3) -> bool:
     try:
-        until = (date.today() + timedelta(days=days)).isoformat()
+        until = (local_today() + timedelta(days=days)).isoformat()
         result = (
             get_client().table("check_ins")
             .update({"status": "snoozed", "snooze_until": until})
@@ -180,7 +181,7 @@ def snooze_check_in(check_in_id: str, days: int = 3) -> bool:
 def reopen_due_snoozed() -> list[dict]:
     """Snoozed check-ins whose snooze has lapsed go back to open. Returns reopened rows."""
     try:
-        today = date.today().isoformat()
+        today = local_today().isoformat()
         return (
             get_client().table("check_ins")
             .update({"status": "open", "snooze_until": None})

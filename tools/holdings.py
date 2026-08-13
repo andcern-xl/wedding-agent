@@ -3,6 +3,7 @@
 from datetime import date, datetime, timezone
 
 from tools.db import get_client
+from tools.tz import local_today
 
 STALE_DAYS = 30
 
@@ -17,7 +18,7 @@ def add_holding(asset: str, asset_type: str = "stock", owner: str = "joint",
         "asset_type": asset_type,
         "owner": owner,
         "currency": currency,
-        "as_of": as_of or date.today().isoformat(),
+        "as_of": as_of or local_today().isoformat(),
     }
     for k, v in (("ticker", ticker), ("platform", platform), ("units", units),
                  ("avg_cost", avg_cost), ("value", value), ("notes", notes)):
@@ -42,7 +43,7 @@ def update_holding(holding_id: str, units: float | None = None,
                    avg_cost: float | None = None, value: float | None = None,
                    notes: str | None = None, as_of: str | None = None) -> dict | None:
     payload: dict = {
-        "as_of": as_of or date.today().isoformat(),
+        "as_of": as_of or local_today().isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     for k, v in (("units", units), ("avg_cost", avg_cost), ("value", value), ("notes", notes)):
@@ -78,7 +79,7 @@ def summary() -> dict:
     by_type: dict = {}
     totals_by_currency: dict = {}
     stale = []
-    today = date.today()
+    today = local_today()
     for h in items:
         by_type.setdefault(h.get("asset_type") or "other", []).append(h)
         if h.get("value") is not None:

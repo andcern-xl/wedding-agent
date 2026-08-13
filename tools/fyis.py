@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone, timedelta
 from tools.db import get_client
+from tools.tz import local_today
 
 
 def log_fyi(user_id: int, content: str, category: str | None = None) -> dict:
@@ -63,7 +64,7 @@ def get_fyis_expiring(days_threshold: int = 21, limit: int = 15) -> list[dict]:
 
 
 def get_fyis_today() -> list[dict]:
-    today_start = f"{date.today().isoformat()}T00:00:00+00:00"
+    today_start = f"{local_today().isoformat()}T00:00:00+00:00"
     try:
         return (
             get_client().table("fyis")

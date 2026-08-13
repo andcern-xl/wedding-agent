@@ -102,6 +102,25 @@ so diff-review (this whole checklist) structurally could not catch it. Only a
 reachability sweep does. New knowledge store → wire it into `_query_brain_sync`
 AND add it to `sweep_recall.py`.
 
+## 12. Date & timezone check
+Two separate failure modes, both shipped once:
+
+**Day names must be looked up, never computed.** Any prompt that can write a
+date or a day name must interpolate `date_block()` from agent.py — same
+contract as FORMAT_RULES. History: the Alyssa dinner on Mon 17 Aug 2026 was
+announced as "Sunday" for days. The chat prompt had a deterministic date table
+but (a) no other generator got it and (b) it only spanned 7 days, so an event
+9 days out fell off the end and the model filled the gap by guessing. Grep:
+every `{FORMAT_RULES}` site that emits dated prose should have `{date_block()}`
+next to it.
+
+**Calendar dates come from SGT, not the server.** Never use bare
+`date.today()` in tools/ — use `local_today()` from `tools/tz.py`. Railway runs
+UTC, so `date.today()` returns YESTERDAY for anything between 00:00 and 08:00
+SGT: due dates, fact_dates and day counts all came out one day short for
+late-night messages. Instants (`created_at`, `updated_at`) stay
+`datetime.now(timezone.utc)` — those are timestamptz and UTC is correct.
+
 ## 11. Dead-feature check (fake impressions)
 When a feature is retired or replaced, hunt down every surface that still
 LOOKS alive — buttons, commands, prompts mentioning it, tools writing to its

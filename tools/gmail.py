@@ -6,6 +6,7 @@ from html import unescape as _html_unescape
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from tools.tz import local_today
 
 _log = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ def _safe_query(sender_hint: str | None = None, days_back: int | None = None) ->
 
     if days_back:
         from datetime import date, timedelta
-        cutoff = (date.today() - timedelta(days=days_back)).strftime("%Y/%m/%d")
+        cutoff = (local_today() - timedelta(days=days_back)).strftime("%Y/%m/%d")
         query += f" after:{cutoff}"
 
     return query

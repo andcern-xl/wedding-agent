@@ -44,6 +44,23 @@ The wedding has 160+ drops going back to April 2026, but `brain_entries` only st
 
 Prompt section WEDDING RECALL forbids "no X yet" / "all TBD" about the wedding until a content search has come back empty. Categories mislead: the day-of plan is under `ceremony`, lunch timings under `budget`, the event schedule and DJ timeline under `venue`, and `timeline` holds only a question. Wedding day is **Sat 7 Nov 2026** at FYSH, The Singapore EDITION; **5–10 Nov is the guest room block**, not the wedding date.
 
+## Dates — looked up, never computed
+The model does not do date arithmetic; it looks dates up. `date_block()` in agent.py
+returns the rule plus a resolved table that runs both ways — weekday name → ISO date
+(so "Friday" schedules on the right day) and ISO date → weekday name (so a dinner on
+the 17th is called Monday), across a 35-day horizon. **Every prompt that can write a
+date or a day name must interpolate it**, the same way they all interpolate
+`FORMAT_RULES`. The Aug 2026 bug: the table existed only in the chat system prompt and
+only spanned 7 days, so the briefs and check-in cards — which had nothing but "today is
+X" — announced the Mon 17 Aug Alyssa dinner as "Sunday" for days, and check-in rows were
+written with the wrong day baked into their text.
+
+Calendar dates come from the users' timezone, not the server's: `local_today()` in
+`tools/tz.py`, never bare `date.today()`. Railway runs UTC, so `date.today()` returns
+yesterday for anything between 00:00 and 08:00 SGT — a task added at 1am got yesterday's
+due_date. Instants stay `datetime.now(timezone.utc)`; `created_at`/`updated_at` are
+timestamptz and UTC is right for those.
+
 ## Scheduled notifications — everything switchable from Telegram
 `scheduled_notifications` are the timed pushes (distinct from `daily_tasks`, which is what `/reminders` shows). Nothing the agent schedules should ever need a code change to switch off, so there are three ways to kill one, all in-chat:
 1. **In words** — "turn off the Lucille reminders" → `find_notifications(subject)` fuzzy-matches upcoming rows household-wide, then `cancel_notifications([ids])` kills them all in one call. The system prompt (TURNING REMINDERS OFF) forbids two failure modes that shipped in Aug 2026: claiming "I don't have a record" before searching, and asking the user for a notification UUID.

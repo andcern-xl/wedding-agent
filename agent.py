@@ -41,14 +41,24 @@ def _local_today() -> date:
     return datetime.now(_LOCAL_TZ).date()
 
 
-def _date_reference(now: datetime) -> str:
+_DATE_HORIZON = 35
+
+
+def _date_reference(now: datetime | None = None, horizon: int = _DATE_HORIZON) -> str:
     """Explicit resolved date table so the model never has to compute weekday→date itself.
 
     LLMs reliably mis-count named weekdays ("Friday") into calendar dates, causing
     off-by-one reminder scheduling. We resolve every upcoming weekday deterministically
     and hand the model a lookup table instead of asking it to do arithmetic.
+
+    The table runs BOTH ways, because both directions were getting invented:
+    weekday name → ISO date (off-by-one reminder scheduling), and ISO date →
+    weekday name (the Aug 2026 bug: the 17th is a Monday, briefs called it Sunday
+    for days). Anything the briefs can talk about has to be IN here, so the horizon
+    covers a month rather than the original 7 days — a dinner 9 days out fell off
+    the end of the old table and the model filled the gap by guessing.
     """
-    today = now.date()
+    today = (now or datetime.now(_LOCAL_TZ)).date()
     lines = [
         f"- today = {today.isoformat()} ({today.strftime('%A')})",
         f"- tomorrow = {(today + timedelta(days=1)).isoformat()} ({(today + timedelta(days=1)).strftime('%A')})",
@@ -58,7 +68,31 @@ def _date_reference(now: datetime) -> str:
     for offset in range(1, 8):
         d = today + timedelta(days=offset)
         lines.append(f"- {d.strftime('%A')} = {d.isoformat()}")
+    # Date → weekday, for every day the briefs can reference.
+    lines.append(f"CALENDAR — every date in the next {horizon} days and its day name:")
+    for offset in range(0, horizon + 1):
+        d = today + timedelta(days=offset)
+        tag = " (today)" if offset == 0 else " (tomorrow)" if offset == 1 else ""
+        out = "today" if offset == 0 else "1 day out" if offset == 1 else f"{offset} days out"
+        lines.append(f"- {d.isoformat()} = {d.strftime('%A')}{tag} — {out}")
     return "\n".join(lines)
+
+
+_DATE_RULE = """DATES — look them up, never compute them. You get date arithmetic wrong.
+- Writing a day name for a date (\"the 17th is a...\") → find the date in the CALENDAR table below and copy its day name. If the date is not in the table, write the date alone (\"17 Aug\") and NO day name.
+- Reading a day name the user said (\"Friday\", \"next Monday\") → take the ISO date from the table. A named weekday means its SOONEST upcoming occurrence.
+- Never say \"tomorrow\", \"this weekend\", or \"in N days\" unless the table confirms it.
+"""
+
+
+def date_block(now: datetime | None = None) -> str:
+    """The date rule + resolved table, ready to interpolate into any prompt.
+
+    Every generator that writes a date or a day name must include this — same
+    contract as FORMAT_RULES. A generator that rolls its own date context is how
+    the Sunday/Monday bug shipped.
+    """
+    return _DATE_RULE + "\n" + _date_reference(now)
 
 
 def _get_behavior_rules(user_id: int) -> str:
@@ -587,6 +621,7 @@ Key decisions not made yet for this area. One bullet per item using •
 <b>Next Step</b>
 One concrete thing to do next.
 
+{date_block()}
 {FORMAT_RULES}
 - This is a structured LIST VIEW: start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 party, ✅ confirmed booking, 🔍 still researching) and put a blank line between each bullet."""
 
@@ -648,6 +683,7 @@ Wedding categories with nothing dropped yet. One bullet per item using •
 <b>One Thing To Do Next</b>
 The single most useful next action right now.
 
+{date_block()}
 {FORMAT_RULES}
 - This is a structured LIST VIEW: start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, ✅ confirmed, 🔍 in progress, ❌ untouched) and put a blank line between each bullet."""
 
@@ -755,6 +791,7 @@ Categories with no progress or that have gone quiet. Name the risk and the actio
 <b>Blockers & Open Questions</b>
 Key unresolved decisions that are holding up other planning. What needs to be decided before they can move forward elsewhere.
 
+{date_block()}
 {FORMAT_RULES}
 - This is a structured LIST VIEW: start every bullet with a relevant emoji (🏨 venue, 💰 budget, 📸 photography, 💄 hair/makeup, 👗 attire, 🎵 entertainment/DJ, 🍽️ catering, 💒 ceremony, 🌸 decor/flowers, 🗓️ logistics, 🥂 after-party, 🔥 urgent, ✅ going well) and put a blank line between each bullet."""
 
@@ -1318,6 +1355,7 @@ SHAPE:
 
 {VOICE_RULES}
 {_rules_block}
+{date_block()}
 {FORMAT_RULES}
 - This is flowing prose: times inline, bold for at most one or two key facts."""
 
@@ -1418,7 +1456,6 @@ Tasks with visibility "private" belong only to the person who created them. Neve
 NOW (Singapore time): {now_sgt}
 TIMEZONE: Asia/Singapore (SGT = UTC+8)
 
-DATE REFERENCE — resolve relative dates by LOOKING THEM UP here. Do NOT compute weekday→date yourself; you get it wrong. "Friday", "next Monday", "this weekend" → use the ISO date from this table. A named weekday always means its SOONEST upcoming occurrence.
 {date_reference}
 When you schedule_notification or add a task, the scheduled_at / due_date MUST match the ISO date from this table for the day the user named.
 
@@ -2552,7 +2589,7 @@ class UnifiedAgent:
         return UNIFIED_SYSTEM_PROMPT.format(
             categories=cat_lines,
             now_sgt=_now_sgt_str,
-            date_reference=_date_reference(_now_sg),
+            date_reference=date_block(_now_sg),
             user_summary=(current_user_line + "\n\n") + (user_summary or "Nothing yet — this is the start of our history together."),
             shared_summary=filtered_shared or "Nothing shared yet.",
             recent_fyis=recent_fyis or "No recent FYIs.",
@@ -4203,6 +4240,8 @@ OPEN GAP RULES — apply before deciding what to surface:
 
         system = f"""You are a proactive intelligence agent for {user_name}. Today is {today_str} ({tz_name}).
 
+{date_block()}
+
 IDENTITIES:
 - Ansen: Singaporean passport
 - Jess / Jessica: US passport (American)
@@ -4282,7 +4321,7 @@ INTELLIGENCE TRIGGERS — actively look for these:
 RULES:
 - Use search_web when you detect a travel destination, visa question, or anything needing real-time info — don't guess
 - DECISION QUESTIONS: when a flag needs {user_name}'s call (which option, who handles it, before/after, book or skip), call ask_check_in — it sends a separate card with tap buttons and the answer is saved automatically. Do NOT also pose the question in your text; mention the topic in one line and move on. Max 2 ask_check_in calls per run. Purely informational flags stay as prose.
-- Lead with imminent events if any — give each one a named header using the ACTUAL day name from the calendar date, e.g. ⚡ <b>Tomorrow: [Event Name]</b> only if it's genuinely the next calendar day; otherwise use the weekday name: ⚡ <b>Tuesday: [Event Name]</b>. Never label something "Tomorrow" unless it falls on tomorrow's date.
+- Lead with imminent events if any — give each one a named header using the day name you LOOKED UP in the CALENDAR table for that event's date, e.g. ⚡ <b>Tomorrow: [Event Name]</b> only if the table says the date is tomorrow; otherwise the table's day name: ⚡ <b>Tuesday: [Event Name]</b>. Never label something "Tomorrow" unless it falls on tomorrow's date, and never write a day name you did not read off the table.
 - Be selective — max 3 items on a normal night. If nothing is genuinely worth flagging, say NOTHING
 - RECALL: for each person or occasion in the upcoming window (birthdays, dinners, vendor meetings, trips), query_brain for what you know about them — surfacing "she loves the kaya waffles from Rice Bakehouse" ahead of Jess's birthday is worth more than any reminder. Dormant knowledge at the right moment is the job.
 - Don't repeat what the morning brief already covers (today's due tasks)
@@ -4514,6 +4553,7 @@ UPCOMING MILESTONES (next 4 weeks):
 
 Focus ONLY on what's practical and actionable. Skip baby size comparisons and development descriptions entirely.
 
+{date_block()}
 {FORMAT_RULES}
 
 FORMAT — use this exact template:
@@ -4586,6 +4626,7 @@ Rules:
 - Pending decisions/open questions: own bullet starting with ⚠️, one line
 - Keep it tight — no filler text, just the facts
 
+{date_block()}
 {FORMAT_RULES}
 - This is a structured CARD: sections keep their • bullets even with 1–3 facts — the 4+ item rule doesn't apply here."""
 
@@ -5824,6 +5865,7 @@ STALENESS — before surfacing any FYI, cross-check it:
 - If a FYI says "awaiting / enquiry sent / pending / looking into" AND the shared brain or calendar confirms that thing is now booked/confirmed → skip the stale FYI, use the confirmed version only
 - Never surface both the pending and confirmed version of the same thing
 
+{date_block()}
 {FORMAT_RULES}
 - This brief is bulleted blocks, not prose. Bullets here are exempt from the 4+ item rule: one actionable item still gets its own •."""
 
@@ -5875,6 +5917,7 @@ Write the story these tell — what's been happening in their life this month. T
 
 {VOICE_RULES}
 {_rules_block}
+{date_block()}
 {FORMAT_RULES}
 - Flowing prose per arc, not bullets.
 - Output the story directly — no preamble about what you checked or are about to write, no --- separators. Your first line is the first arc's bold lead-in."""

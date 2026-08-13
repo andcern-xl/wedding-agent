@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from tools.db import get_client
+from tools.tz import local_today
 
 # Canonical task domains. baby_questions is kept distinct because the
 # appointment prebrief and /baby → Questions views filter on it.
@@ -76,7 +77,7 @@ def is_iceboxed(task: dict) -> bool:
     """Parked in the backlog: hidden from briefs, reminders, and nagging until
     iceboxed_until passes, then it resurfaces automatically."""
     until = task.get("iceboxed_until")
-    return bool(until) and until > date.today().isoformat()
+    return bool(until) and until > local_today().isoformat()
 
 
 def get_tasks(user_id: int, include_done: bool = False,
@@ -149,7 +150,7 @@ def find_duplicate_open_task(task_text: str, min_overlap: int = 2) -> dict | Non
 
 
 def get_due_today(user_id: int) -> list[dict]:
-    today = date.today().isoformat()
+    today = local_today().isoformat()
     rows = (
         get_client().table("daily_tasks")
         .select("*")
@@ -169,7 +170,7 @@ def icebox_task(task_id: str, days: int) -> bool:
     from datetime import timedelta
     try:
         result = get_client().table("daily_tasks").update({
-            "iceboxed_until": (date.today() + timedelta(days=days)).isoformat(),
+            "iceboxed_until": (local_today() + timedelta(days=days)).isoformat(),
         }).eq("id", task_id).execute()
         return bool(result.data)
     except Exception:
@@ -181,7 +182,7 @@ def bump_task(task_id: str, days: int = 7) -> bool:
     from datetime import timedelta
     try:
         result = get_client().table("daily_tasks").update({
-            "due_date": (date.today() + timedelta(days=days)).isoformat(),
+            "due_date": (local_today() + timedelta(days=days)).isoformat(),
             "iceboxed_until": None,
         }).eq("id", task_id).execute()
         return bool(result.data)
@@ -194,7 +195,7 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
     """Tasks ripe for an icebox decision: overdue 7+ days, or undated and
     untouched for 14+. Skips tasks offered in the last reoffer_days."""
     from datetime import timedelta
-    today = date.today()
+    today = local_today()
     overdue_cutoff = (today - timedelta(days=overdue_days)).isoformat()
     created_cutoff = (today - timedelta(days=undated_days)).isoformat()
     reoffer_cutoff = (today - timedelta(days=reoffer_days)).isoformat()
@@ -214,7 +215,7 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
 def mark_icebox_offered(task_id: str) -> None:
     try:
         get_client().table("daily_tasks").update({
-            "icebox_offered_at": date.today().isoformat(),
+            "icebox_offered_at": local_today().isoformat(),
         }).eq("id", task_id).execute()
     except Exception:
         pass
@@ -223,8 +224,8 @@ def mark_icebox_offered(task_id: str) -> None:
 def get_resurfaced_today(user_id: int) -> list[dict]:
     """Tasks whose icebox period just ended (came back within the last day)."""
     from datetime import timedelta
-    today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today = local_today().isoformat()
+    yesterday = (local_today() - timedelta(days=1)).isoformat()
     return [
         t for t in get_tasks(user_id)
         if t.get("iceboxed_until") and yesterday <= t["iceboxed_until"] <= today
@@ -262,7 +263,7 @@ def complete_task(task_id: str, user_id: int) -> bool:
 
 def get_completed_today(user_id: int) -> list[dict]:
     """Return tasks completed since UTC midnight today."""
-    today_start = f"{date.today().isoformat()}T00:00:00+00:00"
+    today_start = f"{local_today().isoformat()}T00:00:00+00:00"
     rows = (
         get_client().table("daily_tasks")
         .select("*")
@@ -282,7 +283,7 @@ def update_task_date(task_id: str, new_date: str) -> bool:
 
 def get_all_tasks_for_brief(user_id: int) -> dict:
     """Return structured task data for brief generation."""
-    today = date.today().isoformat()
+    today = local_today().isoformat()
     all_tasks = get_tasks(user_id, include_done=False)
     overdue = [t for t in all_tasks if t.get("due_date") and t["due_date"] < today]
     due_today = [t for t in all_tasks if t.get("due_date") == today]

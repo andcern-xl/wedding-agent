@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 from tools.db import get_client
+from tools.tz import local_today
 
 ANSEN_ID = 63756531
 
@@ -24,7 +25,7 @@ def add_show(
 
 
 def get_upcoming_shows(include_past: bool = False) -> list[dict]:
-    today = date.today().isoformat()
+    today = local_today().isoformat()
     q = get_client().table("shows").select("*").eq("user_id", ANSEN_ID).order("show_date", desc=False)
     if not include_past:
         q = q.gte("show_date", today)
@@ -37,7 +38,7 @@ def get_show_by_id(show_id: str) -> dict | None:
 
 
 def get_shows_in_n_days(n: int) -> list[dict]:
-    target = (date.today() + timedelta(days=n)).isoformat()
+    target = (local_today() + timedelta(days=n)).isoformat()
     return get_client().table("shows").select("*").eq("show_date", target).execute().data or []
 
 

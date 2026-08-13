@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from tools.db import get_client
+from tools.tz import local_today
 
 SHARED_BRAIN_ID = 0  # sentinel user_id for the couple's shared context
 
@@ -77,7 +78,7 @@ def get_active_entries(domain: str | None = None, kind: str | None = None) -> li
 
 def get_episodes(days: int = 45) -> list[dict]:
     """Active episodes (dated life events), newest first, within the window."""
-    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    cutoff = (local_today() - timedelta(days=days)).isoformat()
     rows = [
         e for e in get_active_entries(kind="episode")
         if (e.get("fact_date") or "") >= cutoff
@@ -92,7 +93,7 @@ def add_brain_entry(fact: str, domain: str = "life", source: str = "chat",
         "fact": fact.strip(),
         "domain": normalize_domain(domain),
         "source": source,
-        "fact_date": fact_date or date.today().isoformat(),
+        "fact_date": fact_date or local_today().isoformat(),
         "kind": kind,
     }
     try:
@@ -136,8 +137,13 @@ def get_legacy_shared_blob() -> str:
 
 
 def get_shared_summary() -> str:
+    """Facts only. Episodes are dated life events — they reach the agent through
+    RECALL (query_brain / get_episodes), not by being injected into every brief's
+    brain slice. Rendering them here fed dead nags ("Unanswered check-in: travel
+    insurance still not done") back in as standing knowledge, which is how briefs
+    ended up repeating resolved items."""
     try:
-        entries = get_active_entries()
+        entries = get_active_entries(kind="fact")
     except Exception:
         entries = []
     return render_shared_summary(entries) if entries else get_legacy_shared_blob()
