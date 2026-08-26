@@ -108,6 +108,52 @@ Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding
 ## Loop state (delta briefs)
 `loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
+## Stale items settle themselves — asked once, then concluded
+
+Ansen: "for information that is stale/outdated, but not closed, either ask me if
+its done or dont surface it if its old already."
+
+A task had only two states, open and done, so nothing could conclude "this is
+dead". The icebox deferred and then RE-OFFERED after `reoffer_days`, which made
+the backlog immortal: 8 of 14 open tasks had been offered in the previous 11 days
+and ignored, 5 were already done, and two were errands for trips that had ended.
+
+`settle_stale_items()` runs at 9am before the icebox offer, so the offer only
+ever asks about genuinely live work. Three **ordered** tests, first match wins:
+
+1. **done** — recall already resolves it. Requires evidence, never inference.
+2. **moot** — the world moved on: an errand for a finished trip, prep for an
+   appointment already held, a deadline that only mattered before it. Merely
+   being old is not moot; a wedding item is live until 7 Nov whatever its date.
+3. **live** — left alone, and gets exactly ONE offer.
+
+Ties break toward live: a wrongly settled item is invisible, a wrongly kept one
+costs one question. A parse failure settles nothing.
+
+Ordering is the whole design — the FYI triage learned it the hard way, archiving
+upcoming bookings on v1 and making everything an episode on v2 before ordered
+tests fixed it. Two details that cost a debugging round each:
+
+- **Probe recall with the task's distinctive terms, not its whole sentence.** A
+  long query scores weakly against everything: "Pick up extension cord from
+  Mondrain Hotel" returned pregnancy pillows and breast pumps, so every verdict
+  came back `live` for want of usable evidence.
+- **The moot test needs world-state, not brain evidence.** Nothing in the vault
+  says an errand is dead; the finished-trip list does. Trips are passed in.
+
+`icebox_offered_at` means asked-once. `get_stale_tasks` now skips anything ever
+offered, and `settle_unanswered_tasks(7)` concludes it if no answer came —
+silence is an answer. Asking twice is the failure mode, because an unanswered
+card teaches its reader to ignore the next one (40 of 73 cards expired
+unanswered).
+
+`settled_at` + `settled_reason` are the terminal state, filtered centrally in
+`get_tasks` — the one chokepoint all 18 readers pass through, because filtering
+at call sites means the reader you missed keeps surfacing it. `/settled` lists
+what was concluded with a button to bring any back, and `unsettle_task` is the
+reverse gear. Migration: `supabase_settled.sql`. Pre-migration the writes fail
+closed and log loudly rather than looking like a pass that decided nothing.
+
 ## Nothing becomes invisible without a record and a reverse gear
 
 This is the rule that generalises every memory regression this bot has shipped.

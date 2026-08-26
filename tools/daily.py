@@ -80,9 +80,70 @@ def is_iceboxed(task: dict) -> bool:
     return bool(until) and until > local_today().isoformat()
 
 
+def is_settled(task: dict) -> bool:
+    """Settled = concluded without being done: its moment passed, or it was
+    offered once and left unanswered. Terminal — nothing surfaces it again.
+    Distinct from iceboxed, which is a deferral that comes back on a date."""
+    return bool(task.get("settled_at"))
+
+
+def settle_task(task_id: str, reason: str) -> bool:
+    """Conclude a task that will never be actioned. Reversible via unsettle_task,
+    and the reason is recorded so it can be explained later."""
+    try:
+        res = (
+            get_client().table("daily_tasks")
+            .update({"settled_at": local_today().isoformat(),
+                     "settled_reason": (reason or "")[:200]})
+            .eq("id", task_id)
+            .is_("settled_at", "null")
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def unsettle_task(task_id: str) -> bool:
+    """The reverse gear. A settled task is hidden, never destroyed."""
+    try:
+        res = (
+            get_client().table("daily_tasks")
+            .update({"settled_at": None, "settled_reason": None,
+                     "icebox_offered_at": None})
+            .eq("id", task_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def get_settled(limit: int = 40) -> list[dict]:
+    """What was concluded, so it can be reviewed or brought back."""
+    try:
+        return (
+            get_client().table("daily_tasks")
+            .select("*")
+            .not_.is_("settled_at", "null")
+            .order("settled_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return []
+
+
 def get_tasks(user_id: int, include_done: bool = False,
-              include_iceboxed: bool = False) -> list[dict]:
-    """Return tasks visible to this user: their own, assigned to them, or shared."""
+              include_iceboxed: bool = False,
+              include_settled: bool = False) -> list[dict]:
+    """Return tasks visible to this user: their own, assigned to them, or shared.
+
+    This is the single chokepoint every reader goes through, which is the only
+    safe place to hide a settled task — filtering at call sites would mean the
+    one reader that was missed keeps surfacing it, which is exactly the class of
+    bug that made the briefs untrustworthy."""
     q = get_client().table("daily_tasks").select("*")
     if not include_done:
         q = q.eq("done", False)
@@ -93,6 +154,7 @@ def get_tasks(user_id: int, include_done: bool = False,
             or r["user_id"] == user_id
             or r.get("assigned_to") == user_id)
         and (include_iceboxed or not is_iceboxed(r))
+        and (include_settled or not is_settled(r))
     ]
 
 
@@ -202,7 +264,10 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
     stale = []
     for t in get_tasks(user_id):
         offered = t.get("icebox_offered_at")
-        if offered and offered > reoffer_cutoff:
+        if offered:
+            # Asked once already. It is never asked a second time — silence is an
+            # answer, and settle_unanswered_tasks() concludes it once the answer
+            # window has passed. Re-offering is what made the backlog immortal.
             continue
         due = t.get("due_date")
         created = (t.get("created_at") or "")[:10]
@@ -210,6 +275,33 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
             stale.append(t)
     stale.sort(key=lambda t: t.get("due_date") or (t.get("created_at") or "")[:10])
     return stale
+
+
+def settle_unanswered_tasks(answer_days: int = 7) -> list[dict]:
+    """Conclude tasks that were offered a decision and never got one.
+
+    Silence is the answer here. An unanswered card is not a neutral event — 40 of
+    73 check-in cards expired unanswered, and each one taught its reader to
+    ignore the next. Asking twice about the same thing is the failure mode."""
+    from datetime import timedelta
+    cutoff = (local_today() - timedelta(days=answer_days)).isoformat()
+    settled = []
+    try:
+        rows = (
+            get_client().table("daily_tasks")
+            .select("*")
+            .eq("done", False)
+            .is_("settled_at", "null")
+            .lte("icebox_offered_at", cutoff)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return []
+    for t in rows:
+        if settle_task(t["id"], f"offered {t.get('icebox_offered_at')}, no answer in {answer_days}d"):
+            settled.append(t)
+    return settled
 
 
 def mark_icebox_offered(task_id: str) -> None:

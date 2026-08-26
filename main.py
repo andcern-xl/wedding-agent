@@ -1901,6 +1901,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML")
         return
 
+    elif data.startswith("unsettle:"):
+        from tools.daily import unsettle_task
+        ok = await asyncio.to_thread(unsettle_task, data[9:])
+        await query.edit_message_text(
+            "↩️ Back on your list — and it won't be settled again without asking."
+            if ok else "⚠️ Couldn't bring that one back.")
+        return
+
     elif data.startswith("feed:"):
         # feed:{state_key}:{on|off} — only ever your own feed, never your partner's.
         try:
@@ -2090,10 +2098,33 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.exception(f"send_morning_brief failed for uid {uid}")
 
-    # ❄️ Icebox offers — stale tasks get a parking decision, max 2 per morning
+    # 🧹 Settle first, ask second. An item whose answer is already known, or
+    # whose moment has passed, must never reach the offer below — it was asking
+    # about finished trips and payments it had already recorded.
     try:
-        from datetime import date as _d
+        from tools.daily import settle_unanswered_tasks
+        settled = await agent.settle_stale_items(list(ALLOWED_IDS))
+        lapsed = await asyncio.to_thread(settle_unanswered_tasks)
+        lines = []
+        for item in settled.get("done", []):
+            lines.append(f"• {escape(item['task'])} — already done ({escape(item['why'])})")
+        for item in settled.get("moot", []):
+            lines.append(f"• {escape(item['task'])} — no longer applies ({escape(item['why'])})")
+        for t in lapsed:
+            lines.append(f"• {escape((t.get('task') or '')[:90])} — asked once, no answer")
+        if lines:
+            await _send_or_alert(
+                context, ANSEN_ID,
+                "🧹 <b>Cleared these off your plate</b>\n\n" + "\n".join(lines[:8])
+                + "\n\n<i>Nothing was deleted — /settled to see them or bring any back.</i>",
+                "settle_stale")
+    except Exception:
+        logger.exception("settle pass failed")
+
+    # ❄️ Icebox offers — stale tasks get ONE parking decision, max 2 per morning
+    try:
         from tools.daily import get_stale_tasks, mark_icebox_offered
+        from tools.tz import local_today as _d_today
         seen: set = set()
         stale_all: list[dict] = []
         for uid in ALLOWED_IDS:
@@ -2107,7 +2138,9 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
             if target not in ALLOWED_IDS:
                 target = ALLOWED_IDS[0]
             due = t.get("due_date")
-            age = f"day {(_d.today() - _d.fromisoformat(due)).days} overdue" if due \
+            # local_today(), not date.today() — the server runs UTC and would
+            # report yesterday for anything before 8am SGT.
+            age = f"day {(_d_today() - ddate.fromisoformat(due)).days} overdue" if due \
                 else f"sitting untouched since {(t.get('created_at') or '')[:10]}"
             label = (t.get("task") or "").strip()
             if label.upper().startswith("TASK:"):
@@ -2122,7 +2155,8 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=target,
-                    text=f"❄️ <b>Backlog this?</b>\n{escape(label)}\n<i>{age}</i>",
+                    text=f"❄️ <b>Backlog this?</b>\n{escape(label)}\n<i>{age} — "
+                         f"asking once; no answer and I'll drop it</i>",
                     parse_mode="HTML", reply_markup=kb,
                 )
                 await asyncio.to_thread(mark_icebox_offered, t["id"])
@@ -2237,6 +2271,32 @@ async def cmd_nuggets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines += ["", "Sent 9pm daily. Yours is yours to switch — this doesn't touch your partner's."]
     await msg.reply_text("\n".join(lines), parse_mode="HTML",
                          reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+
+async def cmd_settled(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """What was concluded without being done, and a button to bring it back.
+
+    A settled item is hidden, never destroyed — anything the bot decides on its
+    own has to be visible and reversible from chat."""
+    if not allowed(update):
+        return
+    from tools.daily import get_settled
+    rows = await asyncio.to_thread(get_settled, 12)
+    if not rows:
+        await update.effective_message.reply_text(
+            "🧹 Nothing has been settled — your open list is all genuinely open.")
+        return
+    lines = ["🧹 <b>Settled</b>", "", "<i>Concluded without being done. Tap to bring one back.</i>", ""]
+    buttons = []
+    for t in rows:
+        label = (t.get("task") or "").strip()[:70]
+        lines.append(f"• {escape(label)}")
+        lines.append(f"  <i>{escape((t.get('settled_reason') or '')[:80])} · {t.get('settled_at')}</i>")
+        buttons.append([InlineKeyboardButton(f"↩️ {label[:34]}",
+                                             callback_data=f"unsettle:{t['id']}")])
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons[:8]))
 
 
 async def send_evening_nuggets(context: ContextTypes.DEFAULT_TYPE):
@@ -3034,6 +3094,7 @@ def main():
             BotCommand("me", "👤 My personal tasks"),
             BotCommand("notifications", "🔔 Scheduled reminders — view & turn off"),
             BotCommand("nuggets", "🌰 Nightly reading — switch your feed on/off"),
+            BotCommand("settled", "🧹 Things I closed for you — undo any"),
         ]
         await application.bot.set_my_commands(commands)
 
@@ -3069,6 +3130,7 @@ def main():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("compress", cmd_compress))
     app.add_handler(CommandHandler("nuggets", cmd_nuggets))
+    app.add_handler(CommandHandler("settled", cmd_settled))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))

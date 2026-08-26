@@ -6204,6 +6204,188 @@ Empty facts array is a fine answer. All listed episodes fade after this pass reg
         await asyncio.to_thread(supersede_entries, [e["id"] for e in old], _rep)
         return {"promoted": promoted, "faded": len(old)}
 
+    async def settle_stale_items(self, user_ids: list[int]) -> dict:
+        """Conclude stale-but-open tasks so they stop being asked about.
+
+        Ansen: "for information that is stale/outdated, but not closed, either
+        ask me if its done or dont surface it if its old already."
+
+        Three ordered tests, first match wins. Order is the whole design — the
+        FYI triage learned this the hard way: an open-ended prompt archived
+        upcoming bookings on v1 and made everything an episode on v2, and only
+        ordered decision tests fixed it.
+
+          1 DONE  the evidence already resolves it — close, never ask
+          2 MOOT  the world moved on (the trip happened, the deadline is past
+                  and the thing it was for is over) — close, never ask
+          3 LIVE  still actionable — leave it for ONE offer, which is what
+                  asks him
+
+        Ties break toward LIVE. A wrongly settled item is invisible; a wrongly
+        kept one costs a single question. Parse failure settles nothing.
+        """
+        import json as _json
+        from tools.daily import get_tasks, settle_task
+        from tools.tz import local_today
+
+        today = local_today()
+        cutoff_overdue = (today - timedelta(days=10)).isoformat()
+        cutoff_undated = (today - timedelta(days=21)).isoformat()
+
+        cands, seen = [], set()
+        for uid in user_ids:
+            for t in await asyncio.to_thread(get_tasks, uid):
+                # Deliberately NOT skipping already-offered tasks. The Elenna
+                # room-block follow-up was offered yesterday and has been done
+                # since 14 June; excluding offered items would settle it as "no
+                # answer" when the truth is "already done". The right reason
+                # matters — it is what /settled shows him later.
+                if t["id"] in seen:
+                    continue
+                due = t.get("due_date")
+                created = (t.get("created_at") or "")[:10]
+                if (due and due <= cutoff_overdue) or (not due and created and created <= cutoff_undated):
+                    seen.add(t["id"])
+                    cands.append(t)
+        if not cands:
+            return {"done": [], "moot": [], "live": 0}
+
+        # Evidence per item, from unified recall — the same path chat uses, so a
+        # task whose answer is already in the brain is caught here rather than
+        # carded for the fourth time.
+        def _probe(label: str) -> str:
+            """Query recall with the task's DISTINCTIVE terms, not its whole
+            sentence. A long query scores weakly against everything: asking the
+            brain for "Pick up extension cord from Mondrain Hotel" came back with
+            pregnancy pillows and breast pumps, so every verdict was "live" for
+            want of usable evidence."""
+            from tools.user_memory import fact_specifics
+            ents = [e for e in fact_specifics(label)["entities"] if len(e) > 3]
+            if ents:
+                return " ".join(sorted(ents, key=len, reverse=True)[:3])
+            words = [w for w in re.findall(r"[A-Za-z]{5,}", label)
+                     if w.lower() not in ("about", "there", "their", "which", "would")]
+            return " ".join(words[:3]) or label[:40]
+
+        blocks = []
+        for i, t in enumerate(cands):
+            label = (t.get("task") or "").strip()
+            ev = ""
+            try:
+                res = await asyncio.to_thread(_query_brain_sync, _probe(label))
+                ev = "\n".join(
+                    "      " + " ".join(str(v) for v in item.values())[:170]
+                    for sec, items in res.items() if isinstance(items, list)
+                    for item in items[:4]) or "      (nothing)"
+            except Exception:
+                ev = "      (lookup failed)"
+            due = t.get("due_date")
+            created = (t.get("created_at") or "")[:10]
+            if due:
+                try:
+                    age = f"deadline passed {(today - date.fromisoformat(due)).days} days ago"
+                except ValueError:
+                    age = f"due {due}"
+            else:
+                try:
+                    age = f"no deadline; opened {(today - date.fromisoformat(created)).days} days ago"
+                except ValueError:
+                    age = "no deadline"
+            blocks.append(
+                f"{i}: {label}\n   {age}\n"
+                f"   what the brain returns for it:\n{ev}")
+
+        # The moot test is about the world moving on, so it needs to know what
+        # has already happened. Trips are the usual carrier: "pick up the
+        # extension cord from Mondrain Hotel" is dead because that trip ended in
+        # August, and no amount of brain evidence says so.
+        trips_ctx = ""
+        try:
+            from tools.trips import get_all_trips as _all_trips
+            rows = await asyncio.to_thread(_all_trips)
+        except Exception:
+            rows = []
+        if rows:
+            past, coming = [], []
+            for tr in rows:
+                end = tr.get("end_date") or tr.get("start_date") or ""
+                line = f"{tr.get('destination')} ({tr.get('start_date')} to {tr.get('end_date')})"
+                (past if end and end < today.isoformat() else coming).append(line)
+            if past:
+                trips_ctx += "\nTrips that are OVER: " + "; ".join(past[:10])
+            if coming:
+                trips_ctx += "\nTrips still ahead: " + "; ".join(coming[:10])
+
+        prompt = f"""Today is {today.isoformat()}. Each item below is an open task that has gone stale.
+
+Wedding: 7 November 2026. Baby due: 20 February 2027.{trips_ctx}
+
+{chr(10).join(blocks)}
+
+For each item give ONE verdict, applying these tests IN ORDER and stopping at the first that fits:
+
+1. "done"  — the evidence already resolves it. Requires evidence, not inference.
+             If nothing in the evidence resolves it, it is NOT done.
+2. "moot"  — it can no longer be actioned because the world moved on. This is
+             about the WORLD, not about the item being old:
+               • an errand tied to a trip, stay or event that is now over
+                 ("pick up X from the hotel" for a finished trip)
+               • preparation for an appointment that already happened
+               • a deadline long past for something that only mattered before it
+             An old task for a future event is LIVE, not moot. A wedding item is
+             live until 7 November whatever its date says.
+3. "live"  — still actionable.
+
+Judge each item on its own; do not assume a run of similar verdicts.
+Return exactly one object per item, including the ones you judge live.
+
+Reply ONLY a JSON array, in item order:
+[{{"i": 0, "verdict": "done|moot|live", "why": "<12 words; for done, name the evidence>"}}]"""
+
+        try:
+            resp = await self.client.messages.create(
+                model=SYNTHESIS_MODEL, max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+            verdicts = _json.loads(re.search(r"\[.*\]", raw, re.DOTALL).group())
+        except Exception:
+            # Fail closed: settling on a bad parse would hide live work.
+            import logging as _lg
+            _lg.getLogger(__name__).exception("settle_stale_items: no usable verdicts")
+            return {"done": [], "moot": [], "live": len(cands), "error": "no verdicts"}
+
+        if isinstance(verdicts, list) and len(verdicts) < len(cands):
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "settle: %d verdicts for %d items — %d left untouched",
+                len(verdicts), len(cands), len(cands) - len(verdicts))
+
+        out = {"done": [], "moot": [], "live": 0, "failed": []}
+        for v in verdicts if isinstance(verdicts, list) else []:
+            i = v.get("i")
+            if not isinstance(i, int) or not (0 <= i < len(cands)):
+                continue
+            t, verdict = cands[i], (v.get("verdict") or "live").lower()
+            why = (v.get("why") or "").strip()
+            if verdict not in ("done", "moot"):
+                out["live"] += 1
+                continue
+            label = (t.get("task") or "")[:90]
+            if await asyncio.to_thread(settle_task, t["id"], f"{verdict}: {why}"):
+                out[verdict].append({"task": label, "why": why})
+            else:
+                # A verdict that could not be written must not vanish. Dropping
+                # it silently made a working pass look like it had decided
+                # nothing, when in fact supabase_settled.sql had not been run.
+                out["failed"].append({"task": label, "verdict": verdict, "why": why})
+        if out["failed"]:
+            import logging as _lg
+            _lg.getLogger(__name__).error(
+                "settle: %d verdict(s) could not be written — has supabase_settled.sql "
+                "been run? first: %s", len(out["failed"]), out["failed"][0]["task"])
+        return out
+
     async def triage_expiring_fyis(self, expiring: list[dict]) -> dict:
         """Classify expiring FYIs: durable facts auto-promote to the brain,
         dead updates archive quietly, only genuine judgment calls get a card."""
