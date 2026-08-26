@@ -76,6 +76,7 @@ BABY_WEEKLY_TIME   = dtime(hour=9, minute=0, tzinfo=REMINDER_TIMEZONE)
 JESS_CHECKIN_TIME  = dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE)  # 10am — Jess's daily pregnancy companion
 APPOINTMENT_TIME   = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
 CAL_SYNC_TIME      = dtime(hour=8, minute=50, tzinfo=REMINDER_TIMEZONE)  # 8:50am — calendar reconciliation before morning brief
+SELF_AUDIT_TIME    = dtime(hour=8, minute=20, tzinfo=REMINDER_TIMEZONE)  # 8:20am Mon — memory self-audit, before any brief is built on it
 
 # Medical/appointment keywords for event title detection
 APPOINTMENT_KEYWORDS = {
@@ -2790,6 +2791,40 @@ async def send_brain_compress(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("send_brain_compress failed")
 
 
+async def send_self_audit(context: ContextTypes.DEFAULT_TYPE):
+    """Weekly memory self-audit — the bot checks its own invariants.
+
+    Three memory regressions shipped to this bot and all three were found by
+    Ansen noticing bad answers weeks later, because nothing silently invisible
+    ever raises. A guard rail for the first one existed (sweep_recall.py, plus a
+    QA checklist line saying to run it) and had been failing for weeks with
+    nobody running it.
+
+    So this runs itself, before Monday's brief is built on the memory it checks,
+    and messages ONLY on failure. A quiet Monday means the invariants hold.
+    """
+    try:
+        import self_audit
+        results = await asyncio.to_thread(self_audit.run_all)
+        report = self_audit.telegram_report(results)
+        if report:
+            await _send_or_alert(context, ANSEN_ID, report, "self_audit")
+        else:
+            logger.info("self-audit: all %d invariants hold", len(results))
+    except Exception:
+        # A silent audit failure is the exact failure mode this exists to end.
+        logger.exception("send_self_audit failed")
+        try:
+            await context.bot.send_message(
+                chat_id=ANSEN_ID,
+                text="⚠️ The weekly memory self-audit could not run. Worth a look "
+                     "in the Railway logs — while it is down, nothing is watching "
+                     "the vault.",
+            )
+        except Exception:
+            logger.exception("self-audit failure alert could not be sent")
+
+
 async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
     """Weekly 3-phase maker-checker knowledge sweep."""
     if not ALLOWED_IDS:
@@ -3003,6 +3038,9 @@ def main():
         app.job_queue.run_daily(send_evening_nuggets, time=EVENING_TIME)
         # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
+
+        # Memory invariants, Monday 8:20am — before the 9am brief reads the vault
+        app.job_queue.run_daily(send_self_audit, time=SELF_AUDIT_TIME, days=(0,))
         # Capability gap sweep — 1st of each month, Ansen only
         app.job_queue.run_monthly(send_capability_gap_sweep, when=dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE), day=1)
         # Shared brain compression — 15th of each month (merge/dedupe accumulated entries)

@@ -126,3 +126,22 @@ When a feature is retired or replaced, hunt down every surface that still
 LOOKS alive — buttons, commands, prompts mentioning it, tools writing to its
 store — and either remove them or route them to the replacement. A button that
 writes to a store nothing reads gives the user a fake "saved ✅".
+
+## 12. MEMORY INVARIANTS (added 26 Aug 2026)
+
+Run `python self_audit.py` after ANY change to memory, recall, supersession or a
+scheduled job. It asserts five invariants and exits non-zero on failure:
+reachability, preservation, loop closure, freshness, contradiction.
+
+Also run `python test_supersession_guard.py` after touching `fact_specifics` or
+`supersession_is_safe` — those cases are the real Aug 2026 losses, and if they
+stop passing the vault is eroding again.
+
+**Do not add a memory rule as a prompt instruction if it can be a guard in the
+write path.** See "Nothing becomes invisible without a record and a reverse gear"
+in CLAUDE.md. Prompt-level rules did not stop check-in duplication; the
+`schedule_notification` dedup did stop reminder duplication.
+
+Any new operation that hides information (supersede, expire, archive, dedupe,
+truncate, "last N", top-k) must record what replaced it, be reversible, and log
+what it dropped — and gets an assertion in `self_audit.py` before it ships.

@@ -108,6 +108,75 @@ Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding
 ## Loop state (delta briefs)
 `loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
+## Nothing becomes invisible without a record and a reverse gear
+
+This is the rule that generalises every memory regression this bot has shipped.
+All three had the same shape — information silently stopped being visible,
+nothing crashed, and the only detector was Ansen noticing bad answers weeks or
+months later:
+
+| | What broke |
+|---|---|
+| Jul 2026 | recall narrowed while `wedding_drops` stayed a silo — "my DJ plans are gone" |
+| Aug 2026 | `knowledge_sweep` read "the last 20 drops"; April's 50 overflowed and were lost |
+| Aug 2026 | supersession retired facts with no containment check — 43 of 85 dropped a specific |
+
+So: **any operation that makes information invisible — supersede, expire,
+archive, dedupe, consolidate, truncate, "last N", top-k — must record what
+replaced it, be reversible, and log what it dropped.** Truncation with no log is
+the same bug as deletion. If a limit is applied, say so in the output.
+
+Two corollaries that follow from the same reasoning:
+
+- **Put the invariant in the write path, not in a review.** `schedule_notification`
+  got dedup in Aug 2026, so Lucille's 13 daily pushes structurally cannot recur.
+  `create_check_in` was left to prompt instructions and is still duplicating —
+  Bangkok was carded three times on 19, 20 and 21 Aug; Jess answered the third
+  and the first two kept nagging for days. Where a rule can be code at the point
+  of writing, it must never be a prompt line or a checklist item.
+- **Failing open beats failing closed.** A blocked merge costs a duplicate row. A
+  wrong merge costs a fact, permanently, with nothing to notice it. Prefer the
+  duplicate every time.
+
+### The supersession guard
+
+`supersession_is_safe(old, new)` in `tools/user_memory.py` gates every retirement.
+Entities and governing **terms** must carry over literally; money and dates may
+change value but must not vanish entirely. Wired into all four write paths:
+`_upsert_shared`, `_upsert_shared_batch`, the whole-domain `compress` (which used
+to retire every row in a domain against an LLM paraphrase — the main erosion
+source), and `consolidate_episodes`.
+
+The terms dimension is why Emily's row is the canonical case: `$350`, `$525` and
+`Emily` all survived in other facts, so every specifics check said nothing was
+lost — while "no upfront deposit, payment due after the event" was gone, which is
+the only part that decides whether to chase a payment in August for a November
+set. `test_supersession_guard.py` locks this behaviour; run it after any change
+to `fact_specifics`.
+
+`restore_entries()` is the reverse gear. `restore_eroded.py` is the one-time
+recovery (dry-run by default; 24 facts reactivated 26 Aug 2026).
+
+### The weekly self-audit
+
+`self_audit.py`, wired to `send_self_audit` at **Monday 8:20am** — before the 9am
+brief is built on the memory it checks. It messages Ansen **only on failure**; a
+quiet Monday means the invariants hold. If the audit itself cannot run, it says
+so, because a silent audit failure is the exact thing it exists to end.
+
+Five invariants: **reachability** (every store surfaceable through unified
+recall), **preservation** (no recent retirement dropped a specific),
+**loop closure** (no open question whose answer is already known, no question
+asked twice), **freshness** (no store or scheduled loop gone quiet — this is what
+catches a job dying silently, as Jess's `proactive_check` did for two weeks),
+**contradiction** (no active fact arguing with another).
+
+Why this and not the QA checklist: `sweep_recall.py` was written in July for
+invariant 1 and the checklist said to run it after any memory change. It had been
+failing for weeks and nobody ran it. **A check a human must remember during
+unrelated work is not a guarantee.** New invariants go here, as code, not as
+prose. When a complaint turns out to be a class of bug, add the assertion.
+
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)
 - Individual brain architecture: how Ansen's personal context interacts with shared brain

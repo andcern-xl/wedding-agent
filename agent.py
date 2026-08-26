@@ -3380,6 +3380,58 @@ class UnifiedAgent:
                     return messages[i:]
         return []  # nothing clean — start fresh
 
+    @staticmethod
+    def _safe_retirements(candidates: list[dict], new_facts: list[tuple[str, str]]):
+        """Which of `candidates` may actually be retired by `new_facts`?
+
+        A supersession is a delete — the row stops being visible to every reader
+        and there was no way to notice. The Aug 2026 audit found 43 of 85 real
+        retirements had destroyed a specific (Emily's payment terms, the FYSH
+        contract total, the bar vendor's name). An old row is only retired here
+        if some new fact demonstrably carries its entities, money and dates.
+
+        new_facts: (fact_text, row_id) so each retirement records what replaced it.
+        Returns (retire, blocked) where retire is [(entry_id, superseded_by)].
+        """
+        from tools.user_memory import supersession_is_safe
+
+        retire, blocked = [], []
+        for e in candidates:
+            old = e.get("fact", "")
+            for text, row_id in new_facts:
+                ok, _ = supersession_is_safe(old, text)
+                if ok:
+                    retire.append((e["id"], row_id))
+                    break
+            else:
+                why = supersession_is_safe(old, new_facts[0][0])[1] if new_facts else "no replacement"
+                blocked.append((old, why))
+        return retire, blocked
+
+    @staticmethod
+    def _apply_retirements(retire: list[tuple[str, str]], blocked: list, where: str) -> None:
+        """Retire in groups by replacement id so superseded_by is always recorded —
+        50 of 85 historical retirements had no link, which is what made the
+        erosion invisible."""
+        import logging as _lg
+        from collections import defaultdict as _dd
+        from tools.user_memory import supersede_entries as _sup
+
+        by_rep = _dd(list)
+        for entry_id, rep_id in retire:
+            by_rep[rep_id].append(entry_id)
+        for rep_id, ids in by_rep.items():
+            try:
+                _sup(ids, rep_id)
+            except Exception:
+                # A failed retirement leaves the old row active — a duplicate,
+                # which is the safe direction. Never let it abort the write.
+                _lg.getLogger(__name__).exception("supersede failed for %d row(s)", len(ids))
+        if blocked:
+            _lg.getLogger(__name__).info(
+                "%s: kept %d fact(s) a merge wanted to retire — %s", where, len(blocked),
+                "; ".join(f"[{w}] {o[:70]}" for o, w in blocked[:5]))
+
     async def _upsert_shared(self, new_content: str, domain: str = "life",
                              source: str = "chat") -> str:
         """Write one fact to the shared brain vault. Merges against same-domain
@@ -3426,7 +3478,10 @@ Which existing facts does the new info REPLACE or CONTRADICT (same topic/entity,
 
         row = await asyncio.to_thread(add_brain_entry, store, domain, source)
         if stale_ids:
-            await asyncio.to_thread(supersede_entries, stale_ids, row.get("id"))
+            by_id = {e["id"]: e for e in entries}
+            retire, blocked = self._safe_retirements(
+                [by_id[i] for i in stale_ids if i in by_id], [(store, row.get("id"))])
+            await asyncio.to_thread(self._apply_retirements, retire, blocked, "upsert_shared")
         return store
 
     async def _upsert_shared_batch(self, facts: list[str], domain: str,
@@ -3480,13 +3535,14 @@ For each new fact, decide what it replaces. Reply with ONLY a JSON array, one ob
             v = verdicts[i] if i < len(verdicts) and isinstance(verdicts[i], dict) else {}
             store = (v.get("store") or f).strip()
             row = await asyncio.to_thread(add_brain_entry, store, domain, source)
-            ids = [
-                entries[j]["id"] for j in (v.get("supersedes") or [])
+            cands = [
+                entries[j] for j in (v.get("supersedes") or [])
                 if isinstance(j, int) and 0 <= j < len(entries) and entries[j]["id"] not in stale_all
             ]
-            if ids:
-                stale_all.update(ids)
-                await asyncio.to_thread(supersede_entries, ids, row.get("id"))
+            if cands:
+                retire, blocked = self._safe_retirements(cands, [(store, row.get("id"))])
+                stale_all.update(eid for eid, _ in retire)
+                await asyncio.to_thread(self._apply_retirements, retire, blocked, "upsert_batch")
 
     async def _run_loop(self, user_content, user_id: int, history: list, user_summary: str, shared_summary: str = "", recent_fyis: str = "", baby_context: str = "", mem0_context: str = "", open_check_ins: str = "") -> dict:
         import logging as _logging
@@ -4739,10 +4795,17 @@ Rules:
             if not parsed:
                 continue  # fail-closed — leave this domain as-is
 
+            written: list[tuple[str, str]] = []
             for fact_date, fact in parsed:
-                await asyncio.to_thread(add_brain_entry, fact.strip(), domain, "compress", fact_date)
-            await asyncio.to_thread(supersede_entries, [e["id"] for e in entries])
-            reports.append(f"{domain}: {len(entries)} → {len(parsed)}")
+                _row = await asyncio.to_thread(
+                    add_brain_entry, fact.strip(), domain, "compress", fact_date)
+                written.append((fact.strip(), _row.get("id")))
+            # Compression used to retire EVERY row in the domain against an LLM
+            # paraphrase, unlinked. That is where most of the vault erosion came
+            # from. An original now survives unless a compressed line carries it.
+            retire, blocked = self._safe_retirements(entries, written)
+            await asyncio.to_thread(self._apply_retirements, retire, blocked, f"compress:{domain}")
+            reports.append(f"{domain}: {len(entries)} → {len(parsed)} (kept {len(blocked)})")
 
         if not reports:
             return "Shared brain is lean — no compression needed."
@@ -6060,17 +6123,22 @@ Empty facts array is a fine answer. All listed episodes fade after this pass reg
             # Consolidation failing must never lose episodes — leave them for next week
             return {"promoted": [], "faded": 0, "error": "consolidation failed; episodes untouched"}
         promoted = []
+        _written: list[tuple[str, str]] = []
         for f in data.get("facts", [])[:10]:
             if f.get("fact"):
                 try:
-                    await asyncio.to_thread(add_brain_entry, f["fact"], f.get("domain") or "life", "consolidation")
+                    _r = await asyncio.to_thread(add_brain_entry, f["fact"], f.get("domain") or "life", "consolidation")
+                    _written.append((f["fact"], _r.get("id")))
                     promoted.append(f["fact"])
                 except Exception:
                     # Skip the one fact rather than abort mid-loop — an aborted loop
                     # leaves episodes active and re-promotes duplicates next Sunday
                     import logging
                     logging.getLogger(__name__).exception("consolidation fact write failed")
-        await asyncio.to_thread(supersede_entries, [e["id"] for e in old])
+        # Episodes are meant to fade into facts, so they retire even when the
+        # consolidated line is shorter — but record what replaced each one.
+        _rep = _written[0][1] if _written else None
+        await asyncio.to_thread(supersede_entries, [e["id"] for e in old], _rep)
         return {"promoted": promoted, "faded": len(old)}
 
     async def triage_expiring_fyis(self, expiring: list[dict]) -> dict:
