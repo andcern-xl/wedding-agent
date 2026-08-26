@@ -209,6 +209,65 @@ def _read_threads_tool_sync(person: str | None = None, status: str | None = None
         return {"error": str(exc)}
 
 
+# ── Prompt caching ──────────────────────────────────────────────────────────
+# Caching is a PREFIX match, and the render order is tools → system → messages.
+# Every generator here re-sends an identical tools+system prefix on each turn of
+# its loop, so without breakpoints the whole prefix is reprocessed at full price
+# every iteration. Measured Aug 2026: TOOLS alone is 10,961 tokens and the chat
+# system prompt is 11,642, so a chat turn that takes three tool calls was paying
+# for ~68K input tokens of the same bytes.
+#
+# Two breakpoints, for two different reuse windows:
+#
+#   _cache_tools  marks the last tool definition. Tools render at position 0 and
+#                 the tools cache tier SURVIVES a system-prompt change, so this
+#                 one is read across separate requests — which matters because
+#                 _build_system interpolates the user's query (it filters the
+#                 brain by relevance), so the system prompt legitimately differs
+#                 every turn and can never cache across turns.
+#   _cache_system marks the system block, caching tools+system together. Read by
+#                 every later turn of the same loop.
+#
+# Minimum cacheable prefix is model-dependent and NOT monotonic: 4096 tokens on
+# Haiku 4.5 (CHAT_MODEL), 1024 on Sonnet 4.6 (SYNTHESIS_MODEL). Below it there is
+# no error and no cache — just a silent miss. Only mark a tool list that clears
+# the bar; a two-tool brief list (a few hundred tokens) never would.
+_CACHE_EPHEMERAL = {"type": "ephemeral"}
+
+
+def _cache_system(system: str | None) -> dict:
+    """system= as a cache-marked block, or {} when there is no system prompt."""
+    if not system:
+        return {}
+    return {"system": [{"type": "text", "text": system,
+                        "cache_control": _CACHE_EPHEMERAL}]}
+
+
+def _cache_tools(tools: list[dict]) -> list[dict]:
+    """Mark the last tool so the tools tier caches on its own. Copies rather than
+    mutating — TOOLS is a module-level constant and every call site shares it."""
+    if not tools:
+        return tools
+    return [*tools[:-1], {**tools[-1], "cache_control": _CACHE_EPHEMERAL}]
+
+
+def _log_cache(resp, where: str) -> None:
+    """Cache misses are silent by design, so record the hit rate. If reads stay
+    at zero across repeated calls, something in the prefix is varying per
+    request and the breakpoints are only paying the 1.25x write premium."""
+    try:
+        u = resp.usage
+        read = getattr(u, "cache_read_input_tokens", 0) or 0
+        write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        if read or write:
+            import logging as _l
+            _l.getLogger(__name__).info(
+                "cache[%s] read=%d write=%d uncached=%d", where, read, write,
+                getattr(u, "input_tokens", 0) or 0)
+    except Exception:
+        pass
+
+
 async def _brief_with_brain(client, model: str, prompt: str, system: str | None = None,
                             max_tokens: int = 800, max_turns: int = 4) -> str:
     """Generate a brief with query_brain available — the generator pulls what it
@@ -220,7 +279,7 @@ OUTPUT CONTRACT — your final text IS the message they receive, verbatim:
 - Something you couldn't find context for gets ONE clause ("Jess is out from 1 — no context on it"), never a paragraph about your own ignorance.
 - The first word of your output is the first word they read."""
     messages = [{"role": "user", "content": prompt}]
-    sys_kwargs = {"system": system} if system else {}
+    sys_kwargs = _cache_system(system)
     last_text = ""
     for turn in range(max_turns):
         force_text = {"tool_choice": {"type": "none"}} if turn == max_turns - 1 else {}
@@ -228,6 +287,7 @@ OUTPUT CONTRACT — your final text IS the message they receive, verbatim:
             model=model, max_tokens=max_tokens, messages=messages,
             tools=[_BRIEF_BRAIN_TOOL, _BRIEF_THREADS_TOOL], **sys_kwargs, **force_text,
         )
+        _log_cache(resp, "brief")
         turn_text = "".join(b.text for b in resp.content if b.type == "text").strip()
         if turn_text:
             last_text = turn_text
@@ -3556,10 +3616,11 @@ For each new fact, decide what it replaces. Reply with ONLY a JSON array, one ob
             last_response = await self.client.messages.create(
                 model=CHAT_MODEL,
                 max_tokens=2048,
-                system=system_prompt,
-                tools=TOOLS,
+                tools=_cache_tools(TOOLS),
                 messages=messages,
+                **_cache_system(system_prompt),
             )
+            _log_cache(last_response, "chat")
 
             if last_response.stop_reason == "end_turn":
                 reply = next((b.text for b in last_response.content if hasattr(b, "text")), "")
@@ -4401,10 +4462,11 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
                 response = await self.client.messages.create(
                     model=SYNTHESIS_MODEL,
                     max_tokens=800,
-                    system=system,
-                    tools=proactive_tools,
+                    tools=_cache_tools(proactive_tools),
                     messages=messages,
+                    **_cache_system(system),
                 )
+                _log_cache(response, "proactive")
             except Exception:
                 return None
 
@@ -4946,10 +5008,11 @@ RULES:
                 response = await self.client.messages.create(
                     model=SYNTHESIS_MODEL,
                     max_tokens=700,
-                    system=system,
                     tools=tools,
                     messages=messages,
+                    **_cache_system(system),
                 )
+                _log_cache(response, "trip")
             except Exception:
                 return None
 
