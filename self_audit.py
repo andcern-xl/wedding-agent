@@ -51,11 +51,18 @@ SILENT_DAYS = {
     "conversation_history": 7,
     "wedding_drops": 30,
 }
+# Every scheduled loop that is supposed to leave a trace, and how long it may go
+# quiet. Checked against the EXPECTED list, not against whatever rows happen to
+# exist — priority_brief had no row at all because it had crashed on every run
+# since inception, and a check that iterates existing rows cannot see a job that
+# has never run once. "Never ran" is a worse failure than "stopped running" and
+# was the harder one to notice.
 LOOP_SILENT_DAYS = {
     "morning_brief": 3,
     "proactive_check": 5,
     "baby_weekly": 10,
-    "daddit_nuggets": 5,
+    "priority_brief": 10,        # Sunday wedding priorities
+    "appointment_prebrief": 30,  # only fires the night before a medical event
     "babybumps_nuggets": 5,
     "knowledge_sweep_drops": 14,
 }
@@ -327,19 +334,29 @@ def check_freshness() -> Result:
     except Exception as e:
         r.fail(f"loop_state unreadable ({str(e)[:40]})")
         return r
+    by_name = defaultdict(list)
     for row in loops:
-        name = row.get("loop_name") or ""
-        limit_days = LOOP_SILENT_DAYS.get(name)
-        if limit_days is None:
+        by_name[row.get("loop_name") or ""].append(row)
+
+    for name, limit_days in LOOP_SILENT_DAYS.items():
+        rows = by_name.get(name) or []
+        if not rows:
+            # No row has ever been written. Either it is newly added, or every
+            # run has thrown before reaching its state save.
+            r.fail(f"loop '{name}' has NEVER run — no state row exists")
             continue
-        last = row.get("last_run_date") or ""
-        try:
-            age = (today - date.fromisoformat(last)).days
-        except ValueError:
-            continue
-        if age > limit_days:
-            r.fail(f"loop '{name}' (user {row.get('user_id')}): last ran {last}, "
-                   f"{age}d ago (limit {limit_days}d)")
+        for row in rows:
+            last = row.get("last_run_date") or ""
+            try:
+                age = (today - date.fromisoformat(last)).days
+            except ValueError:
+                r.fail(f"loop '{name}' (user {row.get('user_id')}): unreadable last_run_date {last!r}")
+                continue
+            if age > limit_days:
+                r.fail(f"loop '{name}' (user {row.get('user_id')}): last ran {last}, "
+                       f"{age}d ago (limit {limit_days}d)")
+            else:
+                r.note(f"loop '{name}' ran {age}d ago")
     return r
 
 

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from tools.db import get_client
+from tools.db import as_num, get_client
 
 
 def create_goal(user_id: int, title: str, visibility: str = "shared", category: str | None = None) -> dict:
@@ -29,7 +29,7 @@ def get_goals(status: str = "active") -> list[dict]:
         .execute().data or []
     )
     for g in goals:
-        g["goal_steps"] = sorted(g.get("goal_steps") or [], key=lambda s: s.get("sort_order", 0))
+        g["goal_steps"] = sorted(g.get("goal_steps") or [], key=lambda s: as_num(s.get("sort_order")))
     return goals
 
 
@@ -38,7 +38,7 @@ def get_goal_by_id(goal_id: str) -> dict | None:
     if not rows:
         return None
     g = rows[0]
-    g["goal_steps"] = sorted(g.get("goal_steps") or [], key=lambda s: s.get("sort_order", 0))
+    g["goal_steps"] = sorted(g.get("goal_steps") or [], key=lambda s: as_num(s.get("sort_order")))
     return g
 
 
@@ -53,7 +53,7 @@ def get_next_steps(goal_id: str) -> list[dict]:
         blocker = s.get("blocked_by")
         if blocker is None or blocker in done_ids:
             result.append(s)
-    return sorted(result, key=lambda s: s.get("sort_order", 0))
+    return sorted(result, key=lambda s: as_num(s.get("sort_order")))
 
 
 def complete_step(step_id: str) -> dict:

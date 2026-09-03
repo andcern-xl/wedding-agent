@@ -11,6 +11,7 @@ from categories import CATEGORIES, detect_category
 from tools.memory import get_all_memory, get_category_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
 from tools.log import get_drops, get_recent_drops, drop
+from tools.db import as_num as _as_num
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today, complete_task, get_task_by_id
 from tools.notifications import (
@@ -638,14 +639,21 @@ If this image has no financial content, return: {"skip": true}"""
                 for p in fin["payments"]:
                     status_label = {"paid": "paid", "deposit": "deposit", "owing": "owing", "quote": "quote"}.get(p.get("status", ""), p.get("status", ""))
                     cur = p.get("currency", "")
-                    amt = p.get("amount", 0)
+                    amt = _as_num(p.get("amount"))
                     by = f" — {p['paid_by']}" if p.get("paid_by") else ""
                     lines.append(f"  {p.get('vendor', 'unknown')}: {cur} {amt:,} ({status_label}){by}")
-                lines.append(f"\nTotal paid/deposited: {list(fin['by_person'].items())[0][1] if fin['by_person'] else 0:,}")
+                # Was reporting the FIRST person's subtotal as the overall
+                # total — masked for months because this whole block was
+                # swallowing the payments TypeError and rendering nothing.
+                lines.append(f"\nTotal paid/deposited: SGD {fin['total_paid']:,.2f}")
                 for person, amt in fin["by_person"].items():
-                    lines.append(f"  {person}: {amt:,}")
+                    lines.append(f"  {person}: SGD {amt:,.2f}")
+                if fin.get("other_currencies"):
+                    lines.append("  plus, in other currencies (NOT part of the SGD total): "
+                                 + ", ".join(f"{c} {v:,.0f}"
+                                             for c, v in sorted(fin["other_currencies"].items())))
                 if fin["total_owing"]:
-                    lines.append(f"Still owing: {fin['total_owing']:,}")
+                    lines.append(f"Still owing: SGD {fin['total_owing']:,.2f}")
                 parts.append("\n".join(lines))
 
         if drops:
@@ -810,8 +818,12 @@ The single most useful next action right now.
 
         if fin["payments"]:
             context_parts.append(
-                f"BUDGET LOGGED: {fin['total_paid']:,} paid/deposited"
-                + (f", {fin['total_owing']:,} still owing" if fin["total_owing"] else "")
+                f"BUDGET LOGGED: SGD {fin['total_paid']:,.2f} paid/deposited"
+                + (f", SGD {fin['total_owing']:,.2f} still owing" if fin["total_owing"] else "")
+                + (" (plus "
+                   + ", ".join(f"{c} {v:,.0f}" for c, v in sorted(fin["other_currencies"].items()))
+                   + " logged in other currencies — do not add these to the SGD figure)"
+                   if fin.get("other_currencies") else "")
             )
 
         context = "\n\n".join(context_parts)
@@ -2751,8 +2763,9 @@ class UnifiedAgent:
         if name == "read_payments":
             fin = payment_summary()
             return {
-                "total_paid": fin["total_paid"],
-                "total_owing": fin["total_owing"],
+                "total_paid_sgd": fin["total_paid"],
+                "total_owing_sgd": fin["total_owing"],
+                "paid_by_currency": fin["paid_by_currency"],
                 "by_person": fin["by_person"],
                 "payments": [{"vendor": p.get("vendor"), "amount": p.get("amount"), "currency": p.get("currency"), "status": p.get("status"), "paid_by": p.get("paid_by")} for p in fin["payments"]],
             }

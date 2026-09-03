@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from tools.db import get_client
+from tools.db import as_num, get_client
 
 
 def add_payment(entry: dict):
@@ -12,30 +12,47 @@ def get_all_payments() -> list:
 
 
 def summary() -> dict:
+    """Wedding payment totals, per currency.
+
+    Summing across currencies was giving a wedding spend of S$1.24M, because a
+    KRW 1,204,280 Seoul hotel row (about S$1,240) was added straight into the
+    SGD total. Six currencies are in this table. `total_paid`/`total_owing` stay
+    scalars for the callers that format them, but they are SGD ONLY — everything
+    else is in the per-currency maps, so a caller can report it rather than
+    silently fold it in. Same shape holdings.py already uses.
+    """
     payments = get_all_payments()
-    total_paid = 0
-    total_owing = 0
+    paid_by_currency: dict = {}
+    owing_by_currency: dict = {}
     by_person: dict = {}
     by_vendor: dict = {}
 
     for p in payments:
-        amount = p.get("amount", 0)
+        amount = as_num(p.get("amount"))
         status = p.get("status", "unknown")
         paid_by = p.get("paid_by", "unknown")
         vendor = p.get("vendor", "unknown")
+        cur = p.get("currency") or "SGD"
 
         if status in ("paid", "deposit"):
-            total_paid += amount
-            by_person[paid_by] = by_person.get(paid_by, 0) + amount
+            paid_by_currency[cur] = paid_by_currency.get(cur, 0) + amount
+            by_person.setdefault(cur, {})
+            by_person[cur][paid_by] = by_person[cur].get(paid_by, 0) + amount
         elif status == "owing":
-            total_owing += amount
+            owing_by_currency[cur] = owing_by_currency.get(cur, 0) + amount
 
-        by_vendor[vendor] = by_vendor.get(vendor, 0) + amount
+        by_vendor.setdefault(cur, {})
+        by_vendor[cur][vendor] = by_vendor[cur].get(vendor, 0) + amount
 
     return {
-        "total_paid": total_paid,
-        "total_owing": total_owing,
-        "by_person": by_person,
-        "by_vendor": by_vendor,
+        # SGD only — see the docstring. Other currencies are in the maps below.
+        "total_paid": paid_by_currency.get("SGD", 0),
+        "total_owing": owing_by_currency.get("SGD", 0),
+        "currency": "SGD",
+        "paid_by_currency": paid_by_currency,
+        "owing_by_currency": owing_by_currency,
+        "other_currencies": {c: v for c, v in paid_by_currency.items() if c != "SGD"},
+        "by_person": by_person.get("SGD", {}),
+        "by_vendor": by_vendor.get("SGD", {}),
         "payments": payments,
     }
