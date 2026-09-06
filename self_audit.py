@@ -25,6 +25,7 @@ Invariants asserted:
   3 loop closure   no open question whose answer is already known
   4 freshness      no store or scheduled loop has gone quiet
   5 contradiction  no active fact argues with another
+  6 duplicates     nothing recorded twice, no impossible date ranges
 """
 import json
 import re
@@ -360,6 +361,41 @@ def check_freshness() -> Result:
     return r
 
 
+# ── 6. duplicate records ────────────────────────────────────────────────────
+
+def check_duplicates() -> Result:
+    """The same thing recorded twice is not cosmetic: the Seoul trip had its
+    flights in one row and its hotel in the other, so neither could answer a
+    question about the trip, and the travel view listed Seoul twice. Nothing
+    deduplicated trips on insert until Sep 2026."""
+    r = Result("duplicates", "nothing recorded twice")
+    try:
+        from tools.trips import find_duplicate_trips
+        pairs = find_duplicate_trips()
+    except Exception as e:
+        r.fail(f"trip duplicate check failed ({str(e)[:50]})")
+        return r
+    for a, b in pairs[:4]:
+        r.fail(f"same trip twice — {a.get('destination')} {a.get('start_date')} "
+               f"({a['id'][:8]} / {b['id'][:8]})")
+    if len(pairs) > 4:
+        r.fail(f"…and {len(pairs)-4} more duplicate trip pair(s)")
+
+    # An end date before a start date sorts the trip into the wrong month and
+    # hides it — the Bangkok bachelor trip vanished exactly this way.
+    try:
+        rows = get_client().table("trips").select("*").execute().data or []
+    except Exception:
+        rows = []
+    for t in rows:
+        st, en = t.get("start_date"), t.get("end_date")
+        if st and en and en < st:
+            r.fail(f"impossible dates — {t.get('destination')} runs {st} to {en}")
+    if not r.failures:
+        r.note(f"{len(rows)} trip(s), no duplicates, all date ranges valid")
+    return r
+
+
 # ── 5. contradiction ────────────────────────────────────────────────────────
 
 def check_contradictions(max_pairs: int = 25) -> Result:
@@ -437,7 +473,7 @@ Reply ONLY JSON:
 # ── runner ──────────────────────────────────────────────────────────────────
 
 CHECKS = (check_reachability, check_preservation, check_loop_closure,
-          check_freshness, check_contradictions)
+          check_freshness, check_contradictions, check_duplicates)
 
 
 def run_all() -> list[Result]:

@@ -2431,7 +2431,7 @@ TOOLS = [
     },
     {
         "name": "save_trip",
-        "description": "Save a new trip to the shared travel list. Use when either person mentions going somewhere — 'we're going to Japan', 'booked flights to Bali', 'planning a trip to Seoul'. After saving, search visa requirements for both Singapore and US passports and call update_trip to store the visa info.",
+        "description": "Save a new trip to the shared travel list. Use when either person mentions going somewhere — 'we're going to Japan', 'booked flights to Bali', 'planning a trip to Seoul'. ALWAYS establish who is going: if they did not say, pass travellers='unknown' and ask them in your reply ('is this both of you, or just you?') — a trip filed to one person is invisible to the other. If the trip matches one already saved it is merged into it, and the result says so; tell them you added to the existing trip rather than claiming a new one. After saving, search visa requirements for both Singapore and US passports and call update_trip to store the visa info.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2441,9 +2441,10 @@ TOOLS = [
                 "end_date": {"type": "string", "description": "Return date in YYYY-MM-DD format"},
                 "status": {"type": "string", "enum": ["planning", "booked", "completed", "cancelled"], "description": "Trip status. Default: planning"},
                 "notes": {"type": "string", "description": "Any initial notes — flight refs, hotel, purpose of trip"},
-                "visibility": {"type": "string", "enum": ["shared", "ansen", "jess"], "description": "Who this trip belongs to. Default shared. Use 'ansen' or 'jess' if only one person is going."},
+                "visibility": {"type": "string", "enum": ["shared", "ansen", "jess"], "description": "Deprecated — set travellers instead."},
+                "travellers": {"type": "string", "enum": ["both", "ansen", "jess", "unknown"], "description": "Who is actually going. Pass 'unknown' if they did not say — do NOT guess. A trip filed to the wrong person is invisible to the other one, and 'both' is not a safe default: the Phuket trip in December is Ansen only because Jess will be 32 weeks pregnant."},
             },
-            "required": ["destination"],
+            "required": ["destination", "travellers"],
         },
     },
     {
@@ -3184,6 +3185,7 @@ class UnifiedAgent:
 
         if name == "save_trip":
             from tools.trips import add_trip
+            travellers = (inputs.get("travellers") or "").lower()
             trip = add_trip(
                 destination=inputs["destination"],
                 country=inputs.get("country"),
@@ -3192,8 +3194,23 @@ class UnifiedAgent:
                 status=inputs.get("status", "planning"),
                 notes=inputs.get("notes"),
                 visibility=inputs.get("visibility", "shared"),
+                travellers=travellers if travellers in ("both", "ansen", "jess") else None,
             )
-            result: dict = {"status": "saved", "id": str(trip["id"]), "destination": inputs["destination"]}
+            result: dict = {
+                "status": "merged into existing trip" if trip.get("_merged") else "saved",
+                "id": str(trip["id"]), "destination": inputs["destination"],
+                "travellers": travellers or "unknown",
+                "visibility": trip.get("visibility"),
+            }
+            if trip.get("_merged"):
+                result["tell_them"] = ("This joined the trip already on file rather than creating a "
+                                       "second one — say so, do not report it as a new trip.")
+            if trip.get("_date_warning"):
+                result["date_warning"] = trip["_date_warning"]
+            if travellers == "unknown" or not travellers:
+                result["ask_them"] = ("Who is going was not established. Ask in your reply — both of "
+                                      "you, or just one — and call update_trip once they answer. "
+                                      "Filed as shared in the meantime so neither of them loses it.")
             gap = _trip_gap_check(trip)
             if gap:
                 result["gap_warning"] = gap
