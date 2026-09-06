@@ -1949,8 +1949,8 @@ TOOLS = [
                 "due_date": {"type": "string", "description": "Due date YYYY-MM-DD, or null"},
                 "visibility": {
                     "type": "string",
-                    "enum": ["private", "shared"],
-                    "description": "private = only this user sees it. shared = both see it. Infer from me/I (private) vs us/we/both (shared).",
+                    "enum": ["private", "shared", "unknown"],
+                    "description": "private = only this user sees it. shared = both see it. Pass 'unknown' if the message does not make it clear — do NOT guess. Otherwise infer from me/I (private) vs us/we/both (shared).",
                 },
                 "category": {
                     "type": "string",
@@ -2336,7 +2336,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "The key information to save — concise, factual, one clear paragraph or a few bullet points."},
-                "audience": {"type": "string", "enum": ["shared", "private"], "description": "Who this is for: 'shared' = both Ansen and Jess; 'private' = current user only."},
+                "audience": {"type": "string", "enum": ["shared", "private", "unknown"], "description": "Who this is for: 'shared' = both Ansen and Jess; 'private' = current user only."},
                 "topic": {"type": "string", "description": "Short topic label, e.g. 'confinement nanny options', 'prenatal supplements', 'venue deposit policy'"},
                 "domain": {"type": "string", "enum": ["baby", "wedding", "travel", "money", "life"], "description": "Which part of their life this belongs to. Pick the closest one; default life."},
             },
@@ -2574,7 +2574,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "What you're trying to achieve"},
-                "visibility": {"type": "string", "enum": ["private", "shared"]},
+                "visibility": {"type": "string", "enum": ["private", "shared", "unknown"]},
                 "category": {"type": "string", "description": "Category slug: wedding, baby, travel, finance, health, work, social, personal"},
                 "steps": {
                     "type": "array",
@@ -2672,7 +2672,58 @@ class UnifiedAgent:
             behavior_rules=behavior_rules or "None yet.",
         )
 
+    # Fields where guessing produces a silently wrong record. Ansen has raised
+    # this three times — cards with no option that fits, stale items neither
+    # asked about nor dropped, and a trip filed to one person that the other
+    # then cannot see. Each time it was patched in the one tool that came up,
+    # which is why it kept coming back. It belongs here, once, in the write
+    # path: the tool still runs, but the result carries an instruction to ask.
+    #
+    # This is NOT "ask about everything". "remind me to call the venue" is
+    # unambiguous. It fires only when the field was left unset or explicitly
+    # marked unknown.
+    _CLARIFY: dict[str, dict[str, str]] = {
+        "save_trip": {
+            "travellers": "who is actually going on this trip — both of you, or one of you",
+        },
+        "add_daily_task": {
+            "visibility": "whose task this is — theirs alone, or something you both see",
+        },
+        "save_to_brain": {
+            "audience": "whether this is shared between you both or private to the person who said it",
+        },
+        "create_goal": {
+            "visibility": "whether this goal is shared or private",
+        },
+    }
+
     async def _execute_tool(self, name: str, inputs: dict, user_id: int, flags: dict):
+        """Run the tool, then attach a question when a person-or-ownership field
+        was guessed rather than known."""
+        result = await self._execute_tool_inner(name, inputs, user_id, flags)
+        try:
+            wanted = self._CLARIFY.get(name) or {}
+            _UNSET = object()
+            missing = []
+            for field, question in wanted.items():
+                value = inputs.get(field, _UNSET)
+                # `value or "unknown"` would read a legitimate False or 0 as
+                # unknown and ask a question nobody needed.
+                if value is _UNSET or value is None or \
+                        (isinstance(value, str) and value.strip().lower() in ("", "unknown")):
+                    missing.append(question)
+            if missing and isinstance(result, dict) and "ask_them" not in result:
+                result["ask_them"] = (
+                    "You did not establish " + "; ".join(missing) +
+                    ". Ask them in your reply, in one short question, and correct the record "
+                    "once they answer. Do not guess and do not stay silent about it — a record "
+                    "filed to the wrong person is invisible to the other one."
+                )
+        except Exception:
+            pass
+        return result
+
+    async def _execute_tool_inner(self, name: str, inputs: dict, user_id: int, flags: dict):
         if name == "log_wedding_drop":
             category = inputs.get("category") or detect_category(inputs["content"])
             drop(category, "text", inputs["content"], user_id)

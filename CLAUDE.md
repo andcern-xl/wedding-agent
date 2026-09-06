@@ -108,6 +108,39 @@ Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding
 ## Loop state (delta briefs)
 `loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
+## Ask when you don't know who it's for — centrally, not per tool
+
+Ansen has raised this three times: a check-in card with no option that fit, stale
+items neither asked about nor dropped, and a Bangkok trip Jess sent that never
+reached his list. Each time it was fixed in whichever tool had come up, which is
+exactly why it kept coming back.
+
+The mechanism is now one place — `UnifiedAgent._CLARIFY` plus the wrapper in
+`_execute_tool`. A tool still runs; if a person-or-ownership field was left unset
+or marked `"unknown"`, the result carries an `ask_them` instruction telling the
+agent to ask in its reply and correct the record afterwards. Covered today:
+`save_trip.travellers`, `add_daily_task.visibility`, `save_to_brain.audience`,
+`create_goal.visibility`. Add a row to extend it.
+
+Three things this deliberately gets right:
+
+- **It is not "ask about everything."** "Remind me to call the venue" is
+  unambiguous and asks nothing. It fires only on unset or explicit `"unknown"`.
+- **The schemas allow `"unknown"`.** A model cannot pass a value the enum
+  forbids, so telling it to admit ignorance requires giving it the word. Tool
+  descriptions that said "Infer from…" were instructing it to guess.
+- **Missing is not the same as false.** The first version tested
+  `inputs.get(f) or "unknown"`, which reads a legitimate `False` as unknown and
+  asks a question nobody needed.
+
+`schedule_notification` is deliberately NOT in the registry: its field is a
+boolean with a sensible default and `/notifications` can undo it, so a question
+there is noise. Guessing is only worth interrupting for when the wrong guess
+hides the record from someone — a trip filed to one person is invisible to the
+other.
+
+`test_clarify.py` locks all of this, including the False case.
+
 ## Stale items settle themselves — asked once, then concluded
 
 Ansen: "for information that is stale/outdated, but not closed, either ask me if

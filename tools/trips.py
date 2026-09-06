@@ -48,7 +48,7 @@ def find_similar_trip(destination: str, start_date: str | None = None,
     31 Aug trip on SQ0720, merged into one row that then reported neither."""
     key, new_flights = _dest_key(destination), _flights(notes or "")
     for t in get_client().table("trips").select("*").execute().data or []:
-        if t.get("status") in ("cancelled", "merged"):
+        if t.get("status") in ("cancelled", "merged", "split"):
             continue
         same_place = key and key == _dest_key(t.get("destination") or "")
         shared_flight = bool(new_flights & _flights(t.get("notes") or ""))
@@ -181,7 +181,7 @@ def merge_trips(keep_id: str, drop_id: str) -> bool:
 def find_duplicate_trips() -> list[tuple[dict, dict]]:
     """Pairs of rows that describe the same journey."""
     rows = [t for t in (get_client().table("trips").select("*").execute().data or [])
-            if t.get("status") not in ("cancelled", "merged")]
+            if t.get("status") not in ("cancelled", "merged", "split")]
     pairs, used = [], set()
     for i, a in enumerate(rows):
         if a["id"] in used:
@@ -206,6 +206,7 @@ def get_upcoming_trips() -> list[dict]:
         .gte("end_date", today)
         .neq("status", "cancelled")
         .neq("status", "merged")
+        .neq("status", "split")
         .order("start_date")
         .execute().data or []
     )
