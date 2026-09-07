@@ -36,12 +36,15 @@ DOCS = [
          notes="LTVP (FIN). PR application in progress — reference ISC2607SS004960, "
                "submitted 12 Jul 2026"),
 
-    # Ansen — the passport number is genuinely not recorded anywhere.
+    # Ansen. He was right that he had shared this — K5529076A was in his
+    # user_summaries row all along. My first search reported it missing because
+    # it truncated the output and capped the hits; the number was there.
+    # Expiry is genuinely not recorded anywhere, and the six-month check needs
+    # it, so it stays blank until he provides it.
     dict(person="ansen", doc_type="passport", nationality="Singapore",
-         status="missing",
-         notes="Number and expiry not on file. A vault fact from Jul 2026 says he "
-               "still needed to apply — confirm whether he now holds one, then add "
-               "the number and expiry."),
+         number="K5529076A",
+         notes="Expiry NOT on file — needed for the six-month validity check. "
+               "UK ETA approved 20 Jul 2026, ref 2020-0000-5698-8925, valid to 12 Jul 2028."),
     dict(person="ansen", doc_type="nric", nationality="Singapore",
          number="S9219342Z", notes="Singapore Pink IC"),
 ]

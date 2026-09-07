@@ -26,6 +26,7 @@ Invariants asserted:
   4 freshness      no store or scheduled loop has gone quiet
   5 contradiction  no active fact argues with another
   6 duplicates     nothing recorded twice, no impossible date ranges
+  7 structured IDs durable identifiers are queryable, not buried in prose
 """
 import json
 import re
@@ -191,6 +192,56 @@ def check_reachability(sample: int = 4) -> Result:
                    f"— e.g. {misses[0]}")
         else:
             r.note(f"{name}: {len(rows)} rows, {len(tested)} sampled, all reachable")
+    return r
+
+
+def check_structured_identifiers() -> Result:
+    """Durable identifiers must live in a queryable store, not in prose.
+
+    Ansen's Singapore passport number sat in user_summaries for months. That
+    store reaches chat by injection but is invisible to query_brain, so
+    trip_milestone_brief — the thing that writes his travel reminders — could
+    not see it, and neither could I when I went looking: I told him it was not
+    recorded and he correctly said he had shared it.
+
+    Wiring user_summaries into unified recall wholesale is not the fix; it holds
+    a wallet address, medication and a dentist, and _query_brain_sync has no
+    user context, so one person's private summary would surface in the other's
+    chat. The invariant instead: if a durable identifier appears in prose, it
+    must ALSO exist in the purpose-built store. Only the identifier's TYPE is
+    reported, never its value.
+    """
+    r = Result("structured identifiers", "durable IDs are queryable, not just prose")
+    patterns = {
+        "passport/NRIC-format ID": re.compile(r"\b[A-Z]\d{7}[A-Z]\b"),
+    }
+    try:
+        summaries = get_client().table("user_summaries").select("user_id,summary").execute().data or []
+    except Exception as e:
+        r.fail(f"could not read user_summaries ({str(e)[:40]})")
+        return r
+
+    try:
+        from tools.travel_docs import get_docs
+        known = {(d.get("number") or "").strip() for d in get_docs(include_inactive=True)}
+    except Exception:
+        known = set()
+
+    orphans: dict = {}
+    for row in summaries:
+        text = row.get("summary") or ""
+        for label, rx in patterns.items():
+            for match in set(rx.findall(text)):
+                if match not in known:
+                    # The value is deliberately never printed — only its type
+                    # and where it is stranded.
+                    orphans.setdefault((row.get("user_id"), label), 0)
+                    orphans[(row.get("user_id"), label)] += 1
+    for (uid, label), count in orphans.items():
+        r.fail(f"{count} {label}(s) sit only in user_summaries(user_id={uid}) — not in "
+               f"travel_docs, so no brief can quote them and no search will find them")
+    if not orphans:
+        r.note(f"{len(summaries)} summaries scanned, every identifier also in a store")
     return r
 
 
@@ -479,7 +530,8 @@ Reply ONLY JSON:
 # ── runner ──────────────────────────────────────────────────────────────────
 
 CHECKS = (check_reachability, check_preservation, check_loop_closure,
-          check_freshness, check_contradictions, check_duplicates)
+          check_freshness, check_contradictions, check_duplicates,
+          check_structured_identifiers)
 
 
 def run_all() -> list[Result]:
