@@ -169,17 +169,38 @@ def _query_brain_sync(query: str = "", domain: str | None = None) -> dict:
         except Exception:
             pass
 
+    # Travel documents. A store that is not wired in here is a silo, and a silo
+    # is what lost the DJ plans in July — see CLAUDE.md.
+    docs = []
+    try:
+        from tools.travel_docs import search as _doc_search
+        for d in _doc_search(query)[:6]:
+            bits = [d.get("person", "").capitalize(), (d.get("doc_type") or "").replace("_", " ")]
+            if d.get("nationality"):
+                bits.append(d["nationality"])
+            if d.get("status") == "missing":
+                bits.append("NOT ON FILE")
+            else:
+                if d.get("number"):
+                    bits.append(f"no. {d['number']}")
+                if d.get("expires"):
+                    bits.append(f"expires {d['expires']}")
+            docs.append({"doc": " — ".join(b for b in bits if b), "source": "travel_docs"})
+    except Exception:
+        pass
+
     return {
         "matches": matches,
         "wedding_drops": wedding,
         "baby_knowledge": baby,
+        "travel_docs": docs,
         "total_active_facts": len(entries),
     }
 
 
 _BRIEF_BRAIN_TOOL = {
     "name": "query_brain",
-    "description": "Unified recall across ALL of the couple's memory: the shared vault (facts + episodes), their wedding drops (everything dropped via /wedding — venue, budget, DJ/music, schedules, screenshots), and the baby knowledge base. Returns 'matches' (vault), 'wedding_drops', and 'baby_knowledge'. The injected context is only a partial slice — ALWAYS query here before saying 'I don't have that' or 'no previous notes', especially for anything wedding- or baby-related. Wedding content is searched by CONTENT not category, so ask by topic (e.g. 'DJ lineup music lighting').",
+    "description": "Unified recall across ALL of the couple's memory: the shared vault (facts + episodes), their wedding drops (everything dropped via /wedding — venue, budget, DJ/music, schedules, screenshots), and the baby knowledge base. Returns 'matches' (vault), 'wedding_drops', 'baby_knowledge', and 'travel_docs' (passport numbers, expiry dates, passes — ask here for anything document-related rather than saying you don't have it). The injected context is only a partial slice — ALWAYS query here before saying 'I don't have that' or 'no previous notes', especially for anything wedding- or baby-related. Wedding content is searched by CONTENT not category, so ask by topic (e.g. 'DJ lineup music lighting').",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -2284,7 +2305,7 @@ TOOLS = [
     },
     {
         "name": "query_brain",
-        "description": "Unified recall across ALL the couple's memory: the shared vault (confirmed facts + dated episodes), their wedding drops (everything sent via /wedding — venue, budget, DJ/music, lighting, schedules, screenshots), and the baby knowledge base. Returns 'matches' (vault), 'wedding_drops', and 'baby_knowledge'. Call it whenever an answer depends on what's already known — bookings, amounts, statuses, past decisions, plans they dropped earlier — and ALWAYS before saying 'I don't have that' / 'no previous notes'. Wedding drops are searched by CONTENT, not category, so query by topic ('DJ lineup', 'lighting plan') and it'll find them even if filed elsewhere. Cheap and fast; when in doubt, query.",
+        "description": "Unified recall across ALL the couple's memory: the shared vault (confirmed facts + dated episodes), their wedding drops (everything sent via /wedding — venue, budget, DJ/music, lighting, schedules, screenshots), and the baby knowledge base. Returns 'matches' (vault), 'wedding_drops', 'baby_knowledge', and 'travel_docs' (passport numbers, expiry dates, passes — ask here for anything document-related rather than saying you don't have it). Call it whenever an answer depends on what's already known — bookings, amounts, statuses, past decisions, plans they dropped earlier — and ALWAYS before saying 'I don't have that' / 'no previous notes'. Wedding drops are searched by CONTENT, not category, so query by topic ('DJ lineup', 'lighting plan') and it'll find them even if filed elsewhere. Cheap and fast; when in doubt, query.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -5039,6 +5060,21 @@ Rules:
         if not _open_gaps and days_until > 14:
             return None
 
+        # Passport details go into every travel reminder verbatim. Ansen: "we
+        # always have to bump it up." Before this they lived only as prose in
+        # user_summaries, which this generator never reads.
+        docs_block = ""
+        nat_block = ""
+        try:
+            from tools.travel_docs import nationalities as _nats, render_for_reminder as _render_docs
+            docs_block = await asyncio.to_thread(_render_docs, trip.get("start_date"))
+            nats = await asyncio.to_thread(_nats)
+            if nats:
+                nat_block = "\n".join(
+                    f"  {p.capitalize()}: {n} passport" for p, n in sorted(nats.items()))
+        except Exception:
+            docs_block = "TRAVEL DOCUMENTS: could not be read — say so rather than omitting them."
+
         confirmed_block = "\n".join(f"  ✅ {c}" for c in _confirmed) if _confirmed else "  none yet"
         gaps_block = "\n".join(f"  ⚠️ {g}" for g in _open_gaps) if _open_gaps else "  none — all clear"
         need_visa_search = any("visa" in g.lower() for g in _open_gaps)
@@ -5065,12 +5101,23 @@ RELATED FYIs:
 RELATED TASKS:
 {chr(10).join(task_lines) if task_lines else "  none"}
 
+{docs_block}
+
 IDENTITIES:
 - Ansen: Singaporean passport (visa-free for most countries)
 - Jess: US passport (American — requirements often differ)
+{nat_block}
 - Wedding: 7 November 2026  |  Baby due: 20 February 2027
 
-YOUR JOB: Surface only the OPEN GAPS above. {"Use search_web to check current entry requirements for any open visa gaps — look for recent system changes (ETA schemes, biometric requirements, health declarations)." if need_visa_search else "Visa is already confirmed — skip the visa search."}
+ALWAYS INCLUDE THE DOCUMENTS. End the message with the passport line for each of
+them, copied from TRAVEL DOCUMENTS above — numbers and expiry dates, verbatim.
+They have to look these up by hand every single trip; that is the point of
+including them. If a document is NOT ON FILE, say so plainly and ask for it —
+never leave a person out silently. If a ⚠️ validity warning is shown, lead with
+it: a passport under six months of validity at travel is refused at check-in by
+many carriers, and that is a bigger problem than any visa.
+
+YOUR JOB: Surface only the OPEN GAPS above. {"Check entry requirements SEPARATELY FOR EACH PASSPORT — a Singapore passport and a US passport rarely have the same rules, so one search does not cover both. Run a search per nationality listed above and answer per person, naming the passport each answer applies to. Look for recent system changes (ETA schemes, biometric requirements, health declarations, onward-ticket and passport-validity rules)." if need_visa_search else "Visa is already confirmed — skip the visa search."}
 
 For each open gap: give a specific, actionable step (not "book accommodation" but "consider checking Booking.com — {dest} in peak season can fill fast").
 

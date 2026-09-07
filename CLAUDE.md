@@ -108,6 +108,44 @@ Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding
 ## Loop state (delta briefs)
 `loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
+## Travel documents live in a store, not in prose
+
+Ansen: "for travel related reminder, always include our passport details in the
+reminder - we always have to bump it up. and for visa reminder, remember to
+check what is needed against each of our passports."
+
+A detail a reminder must ALWAYS carry cannot depend on recall finding it. The
+passport numbers were prose inside `user_summaries(user_id=63756531)` — injected
+into chat but invisible to `query_brain`, so `trip_milestone_brief`, the thing
+that actually writes the pre-trip reminders, could not see them at all.
+
+`travel_docs` (migration `supabase_travel_docs.sql`, seed
+`seed_travel_docs.py`): one row per document per person, with `expires`.
+`render_for_reminder()` produces the block the brief pastes in verbatim, and the
+prompt requires it to end every travel message with the passport line for each
+of them.
+
+Three things this gets right that prose could not:
+
+- **`missing` is a first-class status.** Ansen's Singapore passport number is
+  nowhere in the database (the only related fact is that as of Jul 2026 he still
+  needed to apply), so it is recorded as missing and the reminder asks for it.
+  Silence reads as "nothing to say", which is how they ended up looking these up
+  by hand every trip.
+- **The six-month validity rule is checked.** `validity_warning()` flags a
+  passport with under six months of validity *at the travel date* — an in-date
+  passport that will still be refused at check-in. Nobody checks this by hand.
+- **Visa is checked per passport.** A Singapore passport and a US passport
+  rarely share rules, so one search does not cover both. `nationalities()` feeds
+  the prompt, which must search per nationality and answer per person, naming
+  the passport each answer applies to.
+
+Correction worth keeping: **A06688257 is JESS's US passport.** It sits in
+ANSEN's summary, which is how an earlier note recorded it as his.
+
+Wired into `_query_brain_sync` and the audit's reachability check, per the rule
+that a new store which is not is a silo.
+
 ## Calendar: reads are live, copies are reconciled daily
 
 Ansen: "when we update the shared calendar - delete an event, the agent still

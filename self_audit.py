@@ -147,6 +147,11 @@ def check_reachability(sample: int = 4) -> Result:
         ("baby_knowledge", lambda: c.table("baby_knowledge").select("summary")
                                    .limit(200).execute().data or [],
          lambda x: x.get("summary", "")),
+        # Travel documents must be reachable, because the pre-trip reminder is
+        # required to quote them and cannot fall back on prose in a summary.
+        ("travel_docs", lambda: c.table("travel_docs").select("*").limit(50).execute().data or [],
+         lambda x: " ".join(str(x.get(k) or "") for k in
+                            ("person", "doc_type", "nationality", "number", "notes"))),
     ]
 
     for name, loader, textof in stores:
