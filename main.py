@@ -100,6 +100,7 @@ JESS_CHECKIN_TIME  = dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE)  # 10am 
 APPOINTMENT_TIME   = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
 CAL_SYNC_TIME      = dtime(hour=8, minute=50, tzinfo=REMINDER_TIMEZONE)  # 8:50am — calendar reconciliation before morning brief
 SELF_AUDIT_TIME    = dtime(hour=8, minute=20, tzinfo=REMINDER_TIMEZONE)  # 8:20am Mon — memory self-audit, before any brief is built on it
+CONVO_SWEEP_TIME   = dtime(hour=23, minute=30, tzinfo=REMINDER_TIMEZONE)  # 11:30pm — sweep the day's conversations before the window rolls
 
 # Medical/appointment keywords for event title detection
 APPOINTMENT_KEYWORDS = {
@@ -505,7 +506,23 @@ def _thread_into_history(chat_id: int, user_turn: str, assistant_turn: str) -> N
         {"role": "assistant", "content": assistant_turn},
     ]
     conversations[chat_id] = history[-40:]
-    asyncio.create_task(asyncio.to_thread(save_history, chat_id, conversations[chat_id]))
+    _spawn(asyncio.to_thread(save_history, chat_id, conversations[chat_id]))
+
+
+# asyncio keeps only a WEAK reference to a task, so a fire-and-forget
+# create_task with nothing holding it can be garbage-collected mid-flight. That
+# is how conversation history stopped persisting after 27 Aug 2026 while the DB
+# accepted writes perfectly well when tested: the save was scheduled, the task
+# was collected, and save_history swallowed the exception either way. Anything
+# spawned in the background must be held until it finishes.
+_BG_TASKS: set = set()
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
@@ -609,7 +626,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         updated_history = result.get("history", history)
         conversations[chat_id] = updated_history
         # Persist to Supabase so history survives restarts/deploys
-        asyncio.create_task(asyncio.to_thread(save_history, chat_id, updated_history))
+        _spawn(asyncio.to_thread(save_history, chat_id, updated_history))
         await msg.reply_text(result["text"], parse_mode="HTML")
 
         # Decision cards + category picks from this turn's tool calls
@@ -3060,6 +3077,48 @@ async def send_self_audit(context: ContextTypes.DEFAULT_TYPE):
             logger.exception("self-audit failure alert could not be sent")
 
 
+async def send_conversation_sweep(context: ContextTypes.DEFAULT_TYPE):
+    """Daily: pull durable facts out of what was actually said.
+
+    Daily rather than weekly because conversation_history is a capped window —
+    anything not extracted before it rolls off is gone. Reports only when it
+    wrote something; a quiet day says nothing.
+    """
+    if not ALLOWED_IDS:
+        return
+    try:
+        result = await agent.conversation_sweep()
+    except Exception:
+        logger.exception("conversation_sweep failed")
+        return
+    if result.get("error"):
+        await _send_or_alert(
+            context, ANSEN_ID,
+            f"⚠️ <b>Conversation sweep</b> — {escape(result['error'])}. Nothing was written; "
+            f"today's conversations stay unswept until the next run.",
+            "conversation_sweep")
+        return
+    approved = result.get("approved") or {}
+    if not approved and not result.get("docs"):
+        return
+    _HEADERS = {"baby": "🍼 <b>Baby</b>", "wedding": "💍 <b>Wedding</b>",
+                "travel": "✈️ <b>Travel</b>", "money": "💰 <b>Money</b>",
+                "life": "🌿 <b>Life</b>"}
+    lines = ["🧠 <b>Learned from today's conversations</b>", ""]
+    for domain, facts in approved.items():
+        lines.append(_HEADERS.get(domain, f"<b>{escape(domain.title())}</b>"))
+        lines += [f"• {escape(f)}" for f in facts[:5]]
+        lines.append("")
+    if result.get("docs"):
+        lines.append("📄 <b>Filed as documents</b>")
+        lines += [f"• {escape(d)}" for d in result["docs"]]
+        lines.append("")
+    if result.get("rejected_count"):
+        lines.append(f"<i>{result['rejected_count']} candidate(s) rejected as duplicate, "
+                     f"stale or not durable.</i>")
+    await _send_or_alert(context, ANSEN_ID, "\n".join(lines).strip(), "conversation_sweep")
+
+
 async def send_knowledge_sweep(context: ContextTypes.DEFAULT_TYPE):
     """Weekly 3-phase maker-checker knowledge sweep."""
     if not ALLOWED_IDS:
@@ -3277,6 +3336,10 @@ def main():
         app.job_queue.run_daily(send_evening_nuggets, time=EVENING_TIME)
         # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
+
+        # Conversations are swept DAILY — conversation_history is a capped
+        # window, so a weekly pass would lose whatever rolled off in between.
+        app.job_queue.run_daily(send_conversation_sweep, time=CONVO_SWEEP_TIME)
 
         # Memory invariants, Monday 8:20am — before the 9am brief reads the vault
         app.job_queue.run_daily(send_self_audit, time=SELF_AUDIT_TIME, days=(0,))

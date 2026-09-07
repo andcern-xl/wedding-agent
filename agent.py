@@ -5578,6 +5578,220 @@ When asked to build something:
         )
         return response.content[0].text
 
+    async def conversation_sweep(self, dry_run: bool = False) -> dict:
+        """Extract durable facts from what was actually SAID.
+
+        The gap this closes: nothing ever re-read the conversations. A fact
+        reached the shared brain only if the agent happened to call a save tool
+        in the moment — about one a day — and the weekly sweep reads
+        wedding_drops, never chat. Everything else survived only as compressed
+        prose in user_summaries, which query_brain cannot see.
+
+        Ansen's passport is the proof. He shared it, it was written into his
+        summary, and the brief that needs to quote it could never find it. He
+        was told it wasn't on file.
+
+        conversation_history is capped at _MAX_MESSAGES per chat, so unextracted
+        detail rolls off for good — this runs daily, not weekly, and the
+        watermark is a message FINGERPRINT because messages carry no timestamps.
+
+        Same maker-checker shape as knowledge_sweep: extract, verify, write.
+        Fail-closed — a verifier error writes nothing.
+        """
+        import hashlib
+        import json as _json
+        import re as _re
+        from tools.conversation import load_history
+        from tools.loop_state import load_state as _load_ls, save_state as _save_ls
+        from tools.tz import local_today
+
+        def _fingerprint(msg: dict) -> str:
+            content = msg.get("content")
+            text = content if isinstance(content, str) else _json.dumps(content, sort_keys=True)[:400]
+            return hashlib.sha256(f"{msg.get('role')}:{text}".encode()).hexdigest()[:16]
+
+        def _render(msg: dict) -> str:
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content
+            else:
+                text = " ".join(str(b.get("text", "")) for b in content
+                                if isinstance(b, dict) and b.get("type") == "text")
+            who = "THEM" if msg.get("role") == "user" else "AGENT"
+            return f"{who}: {text.strip()[:900]}"
+
+        transcripts, new_marks = [], {}
+        for uid, name in self._USER_NAMES.items():
+            try:
+                msgs = await asyncio.to_thread(load_history, uid)
+            except Exception:
+                continue
+            if not msgs:
+                continue
+            mark = (_load_ls("conversation_sweep", uid) or {}).get("last_output") or ""
+            start = 0
+            if mark:
+                for i, m in enumerate(msgs):
+                    if _fingerprint(m) == mark:
+                        start = i + 1
+                        break
+                # Mark not found means the window rolled past it; take the lot
+                # rather than skip — losing a fact is worse than re-proposing
+                # one, which the verifier rejects as DUPLICATE anyway.
+            fresh = msgs[start:]
+            if fresh:
+                transcripts.append(f"=== conversation with {name} ===\n" +
+                                   "\n".join(_render(m) for m in fresh))
+            new_marks[uid] = _fingerprint(msgs[-1])
+
+        if not transcripts:
+            return {"approved": {}, "rejected_count": 0, "turns": 0, "docs": []}
+
+        existing = get_shared_summary() or ""
+        transcript_text = "\n\n".join(transcripts)[:24000]
+
+        extractor = f"""Read these conversations between Ansen, Jess and their assistant, and propose facts worth remembering permanently.
+
+EXISTING SHARED BRAIN — do NOT re-propose anything already here:
+{existing or "(empty)"}
+
+{transcript_text}
+
+Propose only facts that are:
+- NEW (not in the brain above)
+- CONFIRMED (they stated it; not the agent speculating, not something being considered)
+- DURABLE (still true in a month)
+
+Say nothing about: what the agent said about itself, transaction logs, things
+someone must DO (those are tasks), one-off events that will have passed, and
+anything that expires within a month.
+
+Capture in particular, because these are the ones that get lost:
+- identifiers and reference numbers — passport, FIN/NRIC, booking refs, policy
+  and account numbers, confirmation codes — with whose they are and any expiry
+- who someone is and what they prefer, vendors, constraints, decisions made
+- amounts and terms actually agreed, including when payment is due
+
+One sentence per fact, max 160 chars. Attribute it: say whose passport, whose
+preference. Output ONLY a JSON array:
+[{{"domain": "baby|wedding|travel|money|life", "fact": "..."}}]
+Empty array if there is nothing durable."""
+
+        try:
+            resp = await self.client.messages.create(
+                model=SYNTHESIS_MODEL, max_tokens=1600,
+                messages=[{"role": "user", "content": extractor}],
+            )
+            raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+            proposed = _json.loads(_re.search(r"\[.*\]", raw, _re.DOTALL).group())
+        except Exception:
+            import logging as _lg
+            _lg.getLogger(__name__).exception("conversation_sweep: extraction failed")
+            return {"approved": {}, "rejected_count": 0, "turns": len(transcripts),
+                    "error": "extraction failed"}
+
+        cands = [(p.get("domain") or "life", (p.get("fact") or "").strip())
+                 for p in proposed if isinstance(p, dict) and (p.get("fact") or "").strip()]
+        if not cands:
+            if not dry_run:
+                for uid, mark in new_marks.items():
+                    await asyncio.to_thread(_save_ls, "conversation_sweep", uid, mark,
+                                            local_today().isoformat())
+            return {"approved": {}, "rejected_count": 0, "turns": len(transcripts), "docs": []}
+
+        verifier = f"""You gate facts before they enter permanent memory. Be strict; when in doubt, reject.
+
+EXISTING SHARED BRAIN:
+{existing or "(empty)"}
+
+PROPOSED:
+{chr(10).join(f"[{i}] ({d}) {f}" for i, (d, f) in enumerate(cands))}
+
+For each, one verdict:
+- NEW       genuinely new, accurate, durable
+- DUPLICATE already in the brain in substance
+- STALE     contradicted by something newer in the brain
+- WEAK      vague, obvious, a to-do, a transaction log, or untrue within a month
+
+Output ONLY: [{{"index": 0, "verdict": "NEW"}}, ...]"""
+
+        try:
+            v = await self.client.messages.create(
+                model=SYNTHESIS_MODEL, max_tokens=800,
+                messages=[{"role": "user", "content": verifier}],
+            )
+            v_raw = "".join(b.text for b in v.content if hasattr(b, "text"))
+            verdicts = _json.loads(_re.search(r"\[.*\]", v_raw, _re.DOTALL).group())
+        except Exception:
+            # Fail closed. Approving everything on a verifier error is how the
+            # July sweep polluted the vault.
+            import logging as _lg
+            _lg.getLogger(__name__).exception("conversation_sweep: verifier failed — writing nothing")
+            return {"approved": {}, "rejected_count": len(cands),
+                    "turns": len(transcripts), "error": "verifier failed"}
+
+        approved: dict = {}
+        rejected = 0
+        for verdict in verdicts if isinstance(verdicts, list) else []:
+            i = verdict.get("index")
+            if not isinstance(i, int) or not (0 <= i < len(cands)):
+                continue
+            if (verdict.get("verdict") or "").upper() != "NEW":
+                rejected += 1
+                continue
+            domain, fact = cands[i]
+            approved.setdefault(domain, []).append(fact)
+
+        docs_written = []
+        if not dry_run:
+            for domain, facts in approved.items():
+                # via _upsert_shared_batch, so the supersession guard applies
+                await self._upsert_shared_batch(facts, domain, source="conversation_sweep")
+            docs_written = await self._route_identifiers(
+                [f for facts in approved.values() for f in facts])
+            for uid, mark in new_marks.items():
+                await asyncio.to_thread(_save_ls, "conversation_sweep", uid, mark,
+                                        local_today().isoformat())
+
+        return {"approved": approved, "rejected_count": rejected,
+                "turns": len(transcripts), "docs": docs_written}
+
+    async def _route_identifiers(self, facts: list[str]) -> list[str]:
+        """Send document identifiers to travel_docs as well as the vault.
+
+        A passport number in a prose fact is findable only if recall happens to
+        score that sentence highly. The pre-trip reminder has to quote it every
+        time, so it needs the structured row too — that is the whole reason the
+        number Ansen had already shared was unquotable.
+        """
+        import re as _re
+        written = []
+        try:
+            from tools.travel_docs import get_docs, upsert_doc
+        except Exception:
+            return written
+
+        known = {(d.get("number") or "").strip() for d in get_docs(include_inactive=True)}
+        ID_RE = _re.compile(r"\b([A-Z]\d{7}[A-Z]|[A-Z]\d{8})\b")
+        for fact in facts:
+            if "passport" not in fact.lower() and "fin" not in fact.lower():
+                continue
+            for number in set(ID_RE.findall(fact)):
+                if number in known:
+                    continue
+                person = "jess" if "jess" in fact.lower() else (
+                    "ansen" if "ansen" in fact.lower() else None)
+                if not person:
+                    continue          # unattributed: leave it, do not guess whose
+                doc_type = "pass" if "fin" in fact.lower() or "ltvp" in fact.lower() else "passport"
+                exp = _re.search(r"expir\w*\s*(?:on\s*)?(\d{4}-\d{2}-\d{2})", fact, _re.I)
+                if upsert_doc(person=person, doc_type=doc_type, number=number,
+                              expires=exp.group(1) if exp else None,
+                              notes=f"captured from conversation: {fact[:120]}"):
+                    written.append(f"{person}/{doc_type} {number}")
+                    known.add(number)
+        return written
+
     async def knowledge_sweep(self, dry_run: bool = False) -> dict:
         """Three-phase maker-checker knowledge sweep.
 

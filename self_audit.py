@@ -67,7 +67,8 @@ LOOP_SILENT_DAYS = {
     "appointment_prebrief": 30,  # only fires the night before a medical event
     "babybumps_nuggets": 5,
     "knowledge_sweep_drops": 14,
-    "calendar_snapshot": 3,      # written every reconciliation; stale = sweep broken
+    "calendar_snapshot": 3,
+    "conversation_sweep": 3,     # daily; capped window, so a gap loses facts      # written every reconciliation; stale = sweep broken
 }
 
 _STOP = {"the", "and", "for", "with", "this", "that", "your", "you", "are", "was",

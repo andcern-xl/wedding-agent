@@ -108,6 +108,50 @@ Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding
 ## Loop state (delta briefs)
 `loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
+## Conversations are swept daily — the brain reads what was said
+
+Ansen: "when we feed the agent information, is it extracting key information to
+be stored in shared brain?" Partly, and there was a hole.
+
+Three capture paths existed. Tool calls at message time (`save_to_brain`,
+`log_episode`) reached the vault, but only when the agent noticed — about one
+fact a day. The weekly sweep reads `wedding_drops`, never chat. And per-user
+summary compression caught a lot but wrote **prose into `user_summaries`**, which
+`query_brain` cannot see. So **nothing ever re-read the conversations**: if the
+agent missed it in the moment, the only trace was unqueryable prose.
+
+Ansen's passport is the proof — he shared it, compression stored it, and the
+brief that must quote it could never find it. He was told it wasn't on file.
+
+`conversation_sweep()` runs **daily at 11:30pm** (not weekly:
+`conversation_history` is capped at 40 messages per chat, so a weekly pass would
+lose whatever rolled off between runs). Same maker-checker shape as
+`knowledge_sweep` — extract, verify, write — fail-closed, so a verifier error
+writes nothing. Approved facts go through `_upsert_shared_batch`, which means
+they get the supersession guard.
+
+Two specifics worth keeping:
+
+- **The watermark is a message FINGERPRINT, not a timestamp.** Messages carry
+  only `role` and `content`. If the mark is no longer in the window it re-reads
+  everything rather than skipping, because a re-proposed fact is rejected as
+  DUPLICATE while a skipped one is lost.
+- **`_route_identifiers` sends document numbers to `travel_docs` as well as the
+  vault.** A passport number inside a prose fact is only findable if recall
+  happens to score that sentence; the pre-trip reminder has to quote it every
+  time. An identifier it cannot attribute to a person is left alone rather than
+  guessed.
+
+### The bug that made this necessary to check first
+
+Conversation history stopped persisting after 27 Aug 2026 while the database
+accepted writes perfectly well when tested directly. Cause:
+`asyncio.create_task(...)` with nothing holding the returned task — **asyncio
+keeps only a weak reference, so a fire-and-forget task can be garbage-collected
+mid-flight** — and `save_history` swallowed every exception, so it failed
+invisibly either way. Use `_spawn()` in main.py for anything backgrounded; it
+holds the task until it finishes. `save_history` now logs its failures.
+
 ## Travel documents live in a store, not in prose
 
 Ansen: "for travel related reminder, always include our passport details in the

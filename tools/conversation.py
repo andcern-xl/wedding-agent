@@ -38,4 +38,7 @@ def save_history(chat_id: int, messages: list) -> None:
             on_conflict="chat_id",
         ).execute()
     except Exception:
-        pass
+        # A silent failure here loses the conversation permanently, and the
+        # window is only _MAX_MESSAGES deep — there is no second chance.
+        import logging
+        logging.getLogger(__name__).exception("save_history failed for chat_id=%s", chat_id)
