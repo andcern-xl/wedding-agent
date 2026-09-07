@@ -1901,6 +1901,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML")
         return
 
+    elif data.startswith("caldel:"):
+        # caldel:{index}:{clear|keep} — acting on copies an event left behind.
+        import json as _json
+        from tools.loop_state import COUPLE as _CPL, load_state as _lls
+        try:
+            _, idx, action = data.split(":", 2)
+            pending = _json.loads((await asyncio.to_thread(_lls, "calendar_pending", _CPL)).get("last_output") or "[]")
+            item = pending[int(idx)]
+        except Exception:
+            await query.edit_message_text("⚠️ That card has expired — the details are no longer on file.")
+            return
+        if action == "keep":
+            await query.edit_message_text(
+                f"📌 Kept. <b>{escape(item['event']['title'])}</b> stays on your list even though "
+                f"the calendar entry is gone.", parse_mode="HTML")
+            return
+        from tools.daily import settle_task
+        from tools.user_memory import supersede_entries
+        cleared = 0
+        for tid in item.get("task_ids", []):
+            if await asyncio.to_thread(settle_task, tid,
+                                       f"calendar event '{item['event']['title'][:60]}' was deleted"):
+                cleared += 1
+        if item.get("fact_ids"):
+            # Superseded, not deleted — recoverable like every other retirement.
+            await asyncio.to_thread(supersede_entries, item["fact_ids"], None)
+        await query.edit_message_text(
+            f"🧹 Cleared — {cleared} task(s) settled, {len(item.get('fact_ids', []))} memory "
+            f"entr{'y' if len(item.get('fact_ids', [])) == 1 else 'ies'} retired.\n"
+            f"<i>Nothing deleted — /settled brings tasks back.</i>", parse_mode="HTML")
+        return
+
     elif data.startswith("unsettle:"):
         from tools.daily import unsettle_task
         ok = await asyncio.to_thread(unsettle_task, data[9:])
@@ -2180,6 +2212,30 @@ async def send_daily_brief(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error sending combined daily brief")
 
 
+def _facts_mentioning(event: dict) -> list[dict]:
+    """Active vault facts that assert this event — the other place a deleted
+    appointment survives. Word overlap plus the date, so a fact about the same
+    person on a different day is not swept up with it."""
+    from tools.calendar_sync import _words
+    from tools.user_memory import get_active_entries
+
+    ev_words = _words(event.get("title") or "")
+    if not ev_words:
+        return []
+    day = (event.get("start") or "")[:10]
+    out = []
+    for domain in ("baby", "wedding", "travel", "money", "life"):
+        try:
+            rows = get_active_entries(domain)
+        except Exception:
+            continue
+        for r in rows:
+            text = r.get("fact") or ""
+            if len(_words(text) & ev_words) >= 2 and day[:7] in text.replace("/", "-"):
+                out.append(r)
+    return out
+
+
 async def send_calendar_reconciliation(context: ContextTypes.DEFAULT_TYPE):
     """Detect when calendar events move and sync open task due_dates. Runs before morning brief."""
     import asyncio
@@ -2205,6 +2261,57 @@ async def send_calendar_reconciliation(context: ContextTypes.DEFAULT_TYPE):
                     all_tasks.append(t)
         except Exception:
             pass
+
+    # ── Deleted events ──────────────────────────────────────────────────────
+    # Reads are live, but the copies an event leaves behind are not, and a
+    # deletion is invisible to the move-matching below. Diff against last run.
+    try:
+        import json as _json
+        from tools.calendar_sync import detect_deletions, find_stale_copies, snapshot_events
+        from tools.loop_state import COUPLE as _COUPLE, load_state as _load_ls, save_state as _save_ls
+        from tools.tz import local_today as _ltoday
+
+        today_iso = _ltoday().isoformat()
+        prev_raw = (await asyncio.to_thread(_load_ls, "calendar_snapshot", _COUPLE)).get("last_output")
+        previous = _json.loads(prev_raw) if prev_raw else {}
+        gone = detect_deletions(previous, events, today_iso)
+
+        pending = []
+        for g in gone:
+            copies = find_stale_copies(g, all_tasks)
+            facts = await asyncio.to_thread(_facts_mentioning, g)
+            if copies or facts:
+                pending.append({"event": g,
+                                "task_ids": [t["id"] for t in copies],
+                                "fact_ids": [f["id"] for f in facts],
+                                "task_labels": [(t.get("task") or "")[:70] for t in copies],
+                                "fact_labels": [(f.get("fact") or "")[:70] for f in facts]})
+
+        if pending:
+            await asyncio.to_thread(_save_ls, "calendar_pending", _COUPLE,
+                                    _json.dumps(pending), today_iso)
+            for i, p in enumerate(pending):
+                ev = p["event"]
+                lines = [f"🗓 <b>Removed from the calendar</b>",
+                         f"<b>{escape(ev['title'])}</b> — was {escape(ev['start'])}", ""]
+                if p["task_labels"]:
+                    lines.append("I still have it as a task:")
+                    lines += [f"• {escape(x)}" for x in p["task_labels"]]
+                if p["fact_labels"]:
+                    lines.append("And in memory:")
+                    lines += [f"• {escape(x)}" for x in p["fact_labels"]]
+                lines += ["", "<i>Clear these too, or was only the calendar entry wrong?</i>"]
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🧹 Clear them", callback_data=f"caldel:{i}:clear"),
+                    InlineKeyboardButton("📌 Keep them", callback_data=f"caldel:{i}:keep"),
+                ]])
+                await context.bot.send_message(chat_id=ANSEN_ID, text="\n".join(lines),
+                                               parse_mode="HTML", reply_markup=kb)
+
+        await asyncio.to_thread(_save_ls, "calendar_snapshot", _COUPLE,
+                                _json.dumps(snapshot_events(events)), today_iso)
+    except Exception:
+        logger.exception("calendar deletion sweep failed")
 
     changes = reconcile_task_dates(all_tasks, events)
     if not changes:

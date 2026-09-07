@@ -108,6 +108,41 @@ Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding
 ## Loop state (delta briefs)
 `loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
+## Calendar: reads are live, copies are reconciled daily
+
+Ansen: "when we update the shared calendar - delete an event, the agent still
+has information from previous time when we log it, it should do a sync no? is it
+real time now?"
+
+**Reads are real time.** `get_events` calls the Google API on every invocation
+and caches nothing, so nothing stale ever comes from reading the calendar.
+
+What goes stale are the **copies** an event leaves behind — a task whose
+`due_date` came off it, a vault fact asserting the appointment.
+`reconcile_task_dates` follows an event that MOVES, but a deleted event made
+`find_event_for_task` return None and the loop just continued, so the copies
+outlived the event in silence.
+
+Detecting a deletion requires knowing what was there before, so
+`send_calendar_reconciliation` (8:50am, before the morning brief) now snapshots
+the calendar into `loop_state["calendar_snapshot"]` and diffs against the
+previous run. Two things are deliberately NOT deletions:
+
+- **an event that has happened** — `get_events` passes `timeMin=now`, so past
+  events leave the window on their own.
+- **an event past the truncation point** — `get_events` takes `max_results`, so
+  a busy 90 days cuts the tail off the list and everything beyond the cut would
+  look deleted. The horizon is the LAST event actually returned.
+
+A deletion with copies raises one card: **Clear them** settles the tasks (reason
+recorded) and supersedes the facts, both recoverable; **Keep them** leaves it
+alone, because sometimes only the calendar entry was wrong. It never clears
+silently — deleting a task because an event vanished is a guess.
+
+This is daily, not real time. Truly live would need Google push notifications
+into a public webhook; 8:50am is ahead of the brief that would otherwise repeat
+the stale copy, which is where it actually showed.
+
 ## Ask when you don't know who it's for — centrally, not per tool
 
 Ansen has raised this three times: a check-in card with no option that fit, stale

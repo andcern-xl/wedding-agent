@@ -89,3 +89,87 @@ def reconcile_task_dates(tasks: list[dict], events: list[dict]) -> list[dict]:
         })
 
     return changes
+
+
+# ── Deletions ───────────────────────────────────────────────────────────────
+# Calendar READS are live — get_events hits the API every call, nothing is
+# cached. What goes stale are the copies: a task whose due_date came off an
+# event, a vault fact asserting an appointment. reconcile_task_dates above
+# follows an event that MOVES, but when an event is deleted
+# find_event_for_task simply returns None and the loop continues, so the copies
+# outlive the event silently.
+#
+# Detecting a deletion needs memory of what was there before, so each run
+# snapshots the calendar and the next run diffs against it.
+
+def snapshot_events(events: list[dict]) -> dict:
+    """The bit of each event worth remembering between runs."""
+    return {
+        e["id"]: {"title": e.get("title") or "", "start": (e.get("start") or "")[:10]}
+        for e in events if e.get("id")
+    }
+
+
+def detect_deletions(previous: dict, events: list[dict], today: str) -> list[dict]:
+    """Events that were on the calendar last run and are not there now.
+
+    Two things are NOT deletions and must not be reported as such:
+
+    - an event that has simply happened. get_events passes timeMin=now, so past
+      events drop out of the window on their own.
+    - an event beyond the truncation point. get_events takes max_results, so a
+      busy 90 days can cut the tail off the list, and everything past the cut
+      would look deleted. Only events inside the range actually returned count,
+      which is why the horizon below is the LAST event we got back.
+    """
+    if not previous or not events:
+        return []
+    current_ids = {e["id"] for e in events if e.get("id")}
+    starts = sorted((e.get("start") or "")[:10] for e in events if e.get("start"))
+    horizon = starts[-1] if starts else today
+
+    gone = []
+    for event_id, meta in previous.items():
+        if event_id in current_ids:
+            continue
+        start = (meta.get("start") or "")[:10]
+        if not start or start < today:
+            continue          # already happened
+        if start > horizon:
+            continue          # past where the fetch reached; unknowable
+        gone.append({"id": event_id, "title": meta.get("title") or "", "start": start})
+    return sorted(gone, key=lambda g: g["start"])
+
+
+def find_stale_copies(deleted: dict, tasks: list[dict]) -> list[dict]:
+    """Open tasks that look like they came from this now-deleted event.
+
+    Same title-overlap test the move path uses, but anchored to the deleted
+    event's own date rather than a 45-day window — a task due the day of the
+    event is evidence; a task sharing two words a month away is not.
+    """
+    from datetime import date as _date
+
+    event_words = _words(deleted.get("title") or "")
+    if not event_words:
+        return []
+    try:
+        event_date = _date.fromisoformat(deleted["start"])
+    except (ValueError, KeyError):
+        return []
+
+    out = []
+    for t in tasks:
+        if t.get("done") or t.get("category") in _SKIP_CATEGORIES:
+            continue
+        due = t.get("due_date")
+        if not due:
+            continue
+        try:
+            if abs((_date.fromisoformat(due) - event_date).days) > 2:
+                continue
+        except ValueError:
+            continue
+        if len(_words(t.get("task") or "") & event_words) >= 2:
+            out.append(t)
+    return out
