@@ -2233,24 +2233,37 @@ def _facts_mentioning(event: dict) -> list[dict]:
     """Active vault facts that assert this event — the other place a deleted
     appointment survives. Word overlap plus the date, so a fact about the same
     person on a different day is not swept up with it."""
-    from tools.calendar_sync import _words
+    from tools.calendar_sync import _words, mentions_date
     from tools.user_memory import get_active_entries
 
     ev_words = _words(event.get("title") or "")
     if not ev_words:
-        return []
+        return [], []
     day = (event.get("start") or "")[:10]
-    out = []
+    out: list = []
+    maybe: list = []
     for domain in ("baby", "wedding", "travel", "money", "life"):
         try:
+            # No kind filter, so EPISODES are included — they are where a
+            # booking actually lives ("Lucille vet appointment booked Tuesday
+            # 8 Sep 2026 at 11:30 AM"), and they are what kept reappearing in
+            # the brief after the calendar entry was deleted.
             rows = get_active_entries(domain)
         except Exception:
             continue
         for r in rows:
             text = r.get("fact") or ""
-            if len(_words(text) & ev_words) >= 2 and day[:7] in text.replace("/", "-"):
+            overlap = len(_words(text) & ev_words)
+            if overlap >= 2 and mentions_date(text, day):
                 out.append(r)
-    return out
+            elif overlap >= 3:
+                # Same subject, different date. Not swept up automatically — the
+                # Prada handover episode says "Monday 7 Sep at 6:30 PM" while
+                # the brief said 8 PM the next day, and which one is stale
+                # depends on the calendar. Shown for a decision instead of
+                # guessed at, because either could be the outdated copy.
+                maybe.append(r)
+    return out, maybe
 
 
 async def send_calendar_reconciliation(context: ContextTypes.DEFAULT_TYPE):
@@ -2296,13 +2309,14 @@ async def send_calendar_reconciliation(context: ContextTypes.DEFAULT_TYPE):
         pending = []
         for g in gone:
             copies = find_stale_copies(g, all_tasks)
-            facts = await asyncio.to_thread(_facts_mentioning, g)
-            if copies or facts:
+            facts, maybe_facts = await asyncio.to_thread(_facts_mentioning, g)
+            if copies or facts or maybe_facts:
                 pending.append({"event": g,
                                 "task_ids": [t["id"] for t in copies],
-                                "fact_ids": [f["id"] for f in facts],
+                                "fact_ids": [f["id"] for f in facts + maybe_facts],
                                 "task_labels": [(t.get("task") or "")[:70] for t in copies],
-                                "fact_labels": [(f.get("fact") or "")[:70] for f in facts]})
+                                "fact_labels": [(f.get("fact") or "")[:70] for f in facts],
+                                "maybe_labels": [(f.get("fact") or "")[:70] for f in maybe_facts]})
 
         if pending:
             await asyncio.to_thread(_save_ls, "calendar_pending", _COUPLE,
@@ -2317,6 +2331,9 @@ async def send_calendar_reconciliation(context: ContextTypes.DEFAULT_TYPE):
                 if p["fact_labels"]:
                     lines.append("And in memory:")
                     lines += [f"• {escape(x)}" for x in p["fact_labels"]]
+                if p.get("maybe_labels"):
+                    lines.append("Same subject but a different date — check which is stale:")
+                    lines += [f"• {escape(x)}" for x in p["maybe_labels"]]
                 lines += ["", "<i>Clear these too, or was only the calendar entry wrong?</i>"]
                 kb = InlineKeyboardMarkup([[
                     InlineKeyboardButton("🧹 Clear them", callback_data=f"caldel:{i}:clear"),

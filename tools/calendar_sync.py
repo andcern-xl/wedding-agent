@@ -13,7 +13,55 @@ _SKIP_CATEGORIES = {"baby", "baby_questions", "wedding"}
 
 
 def _words(text: str) -> set[str]:
-    return {w.lower().strip(",.!?()") for w in text.split() if len(w) >= 4 and w.lower().strip(",.!?()") not in _STOP}
+    """Comparable words from a title.
+
+    Two things this has to get right, both found by a real miss: a possessive
+    must collapse ("Lucille's" has to match "Lucille"), and the floor cannot be
+    four characters or "vet" — the only distinctive word in "Lucille's vet
+    appointment" — is thrown away, leaving nothing to match on."""
+    out = set()
+    for raw in (text or "").replace("/", " ").split():
+        w = raw.lower().strip(",.!?()[]:;\"")
+        for suffix in ("'s", "\u2019s"):
+            if w.endswith(suffix):
+                w = w[:-len(suffix)]
+        w = w.strip("'\u2019")
+        if len(w) >= 3 and w not in _STOP:
+            out.add(w)
+    return out
+
+
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_MONTH_FULL = ["January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December"]
+
+
+def date_needles(iso_date: str) -> list[str]:
+    """The ways this date might actually be written in stored text.
+
+    Episodes are written in prose — "8 Sep 2026", not "2026-09-08" — so looking
+    only for the ISO form finds nothing. This is why the first version of the
+    deletion sweep would have cleared the task and left the episodes behind.
+    """
+    from datetime import date as _d
+    try:
+        d = _d.fromisoformat(iso_date[:10])
+    except (TypeError, ValueError):
+        return []
+    ab, full = _MONTH_ABBR[d.month - 1], _MONTH_FULL[d.month - 1]
+    return [
+        iso_date[:10], iso_date[:7],
+        f"{d.day} {ab} {d.year}", f"{d.day} {full} {d.year}",
+        f"{ab} {d.day}, {d.year}", f"{full} {d.day}, {d.year}",
+        f"{d.day} {ab}", f"{d.day} {full}",
+        f"{ab} {d.year}", f"{full} {d.year}",
+    ]
+
+
+def mentions_date(text: str, iso_date: str) -> bool:
+    blob = (text or "").replace("/", "-").lower()
+    return any(n.lower() in blob for n in date_needles(iso_date))
 
 
 def find_event_for_task(task: dict, events: list[dict]) -> dict | None:
