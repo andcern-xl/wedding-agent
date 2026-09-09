@@ -6577,6 +6577,10 @@ Empty facts array is a fine answer. All listed episodes fade after this pass reg
         cands, seen = [], set()
         for uid in user_ids:
             for t in await asyncio.to_thread(get_tasks, uid):
+                if t.get("in_progress_since"):
+                    # Actively being worked. Settling it as done or moot would
+                    # delete work in flight; the follow-up card owns it.
+                    continue
                 # Deliberately NOT skipping already-offered tasks. The Elenna
                 # room-block follow-up was offered yesterday and has been done
                 # since 14 June; excluding offered items would settle it as "no

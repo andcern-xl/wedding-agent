@@ -151,12 +151,21 @@ def check_reachability(sample: int = 4) -> Result:
          lambda x: x.get("summary", "")),
         # Travel documents must be reachable, because the pre-trip reminder is
         # required to quote them and cannot fall back on prose in a summary.
+        # The needle is the NUMBER, not a prefix of the row: recall renders
+        # documents as "Jess — passport — United States — no. A06688257", which
+        # never contains the first 40 characters of the raw row. Testing the
+        # prefix reported all four as unreachable while every real query
+        # returned them — a false red, which is the failure mode that got the
+        # old sweep_recall ignored.
         ("travel_docs", lambda: c.table("travel_docs").select("*").limit(50).execute().data or [],
          lambda x: " ".join(str(x.get(k) or "") for k in
-                            ("person", "doc_type", "nationality", "number", "notes"))),
+                            ("person", "doc_type", "nationality", "number", "notes")),
+         lambda x: str(x.get("number") or "")),
     ]
 
-    for name, loader, textof in stores:
+    for spec in stores:
+        name, loader, textof = spec[0], spec[1], spec[2]
+        needle_of = spec[3] if len(spec) > 3 else (lambda x: None)
         try:
             rows = loader()
         except Exception as e:
@@ -170,8 +179,11 @@ def check_reachability(sample: int = 4) -> Result:
         for row in rows:
             idf.update(set(re.findall(r"[a-zA-Z]{4,}", textof(row).lower())))
 
-        step = max(1, len(rows) // sample)
-        tested = rows[::step][:sample]
+        # A very short row has no distinctive words to test with — sampling one
+        # produces a meaningless query ("what budget") and a false miss.
+        substantial = [r for r in rows if len(textof(r)) >= 40] or rows
+        step = max(1, len(substantial) // sample)
+        tested = substantial[::step][:sample]
         misses = []
         for row in tested:
             text = textof(row)
@@ -186,7 +198,12 @@ def check_reachability(sample: int = 4) -> Result:
             blob = _norm(" ".join(
                 str(v) for sec in res.values() if isinstance(sec, list)
                 for item in sec for v in item.values()))
-            if _norm(text)[:40] not in blob:
+            # Strip leading tags like "[screenshot] " — recall drops them when
+            # rendering, so a needle that keeps them never matches. Third
+            # variant of the same artifact; each one produced a false red, and
+            # a check that cries wolf is a check nobody reads.
+            needle = needle_of(row) or re.sub(r"^\s*(\[[^\]]{1,24}\]\s*)+", "", text)[:40]
+            if _norm(needle) not in blob:
                 misses.append(f"{kws} → {text[:50]}")
         if misses:
             r.fail(f"{name}: {len(misses)}/{len(tested)} sampled rows unreachable "

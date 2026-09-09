@@ -258,6 +258,38 @@ other.
 
 `test_clarify.py` locks all of this, including the False case.
 
+## "On it" — the state between untouched and done
+
+Ansen: "should there be an option for 'in progress/ working on it', then it'll
+check back to ask for follow ups"
+
+A task had untouched, deferred, done or settled. Deferring something already
+started is wrong twice: the follow-up re-asks the original question ("get a
+florist quote") when the real question is what came *back*, and the settle pass
+counts it as stale when it is the opposite.
+
+🔨 **On it** → `mark_in_progress()` stamps `in_progress_since` and sets
+`iceboxed_until` five days out, so nothing nags in between. It clears
+`icebox_offered_at`, because the ask-once rule must not settle it as ignored —
+they answered, and the answer was "working on it".
+
+When the check-back lands, the card asks about the outcome, not the task:
+**Sorted** / **Still waiting** (another five days) / **It stalled — drop it**.
+`extend_progress()` deliberately does NOT reset `in_progress_since`: the age of
+"I'm on it" is the useful signal, and it is what turns a polite follow-up into
+"that's 21 days now — worth chasing or letting go".
+
+Two guards, or the follow-up gets pre-empted: `get_stale_tasks` skips anything
+in progress (no second "Backlog this?"), and `settle_stale_items` skips it too
+(settling work in flight would delete it).
+
+Also fixed here: **the icebox "Drop it" button called `complete_task`**, so a
+dropped task was recorded as *done* — inflating the completed list and losing
+the reason. It settles now, with `/settled` to undo.
+
+Migration: `supabase_in_progress.sql`. Until it runs, `mark_in_progress` returns
+False and the button says so rather than claiming success.
+
 ## Stale items settle themselves — asked once, then concluded
 
 Ansen: "for information that is stale/outdated, but not closed, either ask me if

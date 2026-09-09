@@ -1770,7 +1770,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("ice:"):
         # Icebox card taps: ice:{task_id}:{done|week|w2|m1|drop}
-        from tools.daily import bump_task, get_task_by_id, icebox_task
+        from tools.daily import (bump_task, get_task_by_id, icebox_task,
+                                 mark_in_progress, settle_task)
         try:
             _, tid, act = data.split(":", 2)
             t = get_task_by_id(tid)
@@ -1787,9 +1788,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif act == "m1":
                 ok = icebox_task(tid, 30)
                 result = f"🧊 Iceboxed 1 month: {label}\nIt'll resurface on its own — no nagging until then."
+            elif act == "prog":
+                ok = mark_in_progress(tid, 5)
+                # Never claim it landed when the write failed — that is how a
+                # broken feature looks like a working one.
+                result = ((f"🔨 Noted — you're on it: {label}\n"
+                           f"I'll check back in 5 days and ask how it landed, "
+                           f"not ask you again.") if ok else
+                          ("⚠️ Couldn't record that — supabase_in_progress.sql "
+                           "hasn't been run yet, so the task is unchanged."))
             elif act == "drop":
-                ok = complete_task(tid, user_id)
-                result = f"🗑 Dropped: {label}"
+                # settle, not complete — "dropped" is not "done", and recording
+                # it as done inflates the completed list and loses the reason.
+                ok = await asyncio.to_thread(settle_task, tid, "dropped from an icebox offer")
+                result = (f"🗑 Dropped: {label}\n<i>/settled brings it back.</i>" if ok
+                          else "⚠️ Couldn't drop that one — the task is unchanged.")
             else:
                 result = "Unknown action."
             await query.answer()
@@ -1916,6 +1929,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=query.message.chat_id,
                 text=f"🔕 Cancelled — <b>{escape(body)}</b>\n<i>{escape(local_time_label(row['scheduled_at']))}</i>",
                 parse_mode="HTML")
+        return
+
+    elif data.startswith("prog:"):
+        # prog:{task_id}:{done|wait|stall}
+        from tools.daily import extend_progress, get_task_by_id, settle_task
+        try:
+            _, tid, act = data.split(":", 2)
+        except ValueError:
+            return
+        t = await asyncio.to_thread(get_task_by_id, tid)
+        label = (t.get("task") or "task")[:60] if t else "task"
+        if act == "done":
+            ok = complete_task(tid, query.from_user.id)
+            msg = f"✅ Sorted: {escape(label)}" if ok else "Couldn't mark that done."
+        elif act == "wait":
+            ok = await asyncio.to_thread(extend_progress, tid, 5)
+            msg = ((f"⏳ Still open: {escape(label)}\n"
+                    f"<i>Asking again in 5 days. The clock since you started keeps "
+                    f"running, so I'll say how long it's been.</i>") if ok else
+                   "⚠️ Couldn't push that back — nothing changed.")
+        else:
+            ok = await asyncio.to_thread(settle_task, tid, "started but stalled; dropped on follow-up")
+            msg = f"🗑 Dropped: {escape(label)}\n<i>/settled brings it back.</i>"
+        await query.answer()
+        await query.edit_message_text(msg, parse_mode="HTML")
         return
 
     elif data.startswith("caldel:"):
@@ -2170,6 +2208,37 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception("settle pass failed")
 
+    # 🔨 Follow up on what they said they were on. The question is what came
+    # BACK, not the original ask — re-asking "get a florist quote" of someone who
+    # already emailed the florist is the nagging this is meant to replace.
+    try:
+        from tools.daily import get_progress_followups
+        from tools.tz import local_today as _lt
+        for t in (await asyncio.to_thread(get_progress_followups))[:3]:
+            target = t.get("assigned_to") or t.get("user_id")
+            if target not in ALLOWED_IDS:
+                target = ALLOWED_IDS[0]
+            since = t.get("in_progress_since") or ""
+            try:
+                days = (_lt() - ddate.fromisoformat(since)).days
+            except ValueError:
+                days = 0
+            label = (t.get("task") or "").strip()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Sorted", callback_data=f"prog:{t['id']}:done"),
+                 InlineKeyboardButton("⏳ Still waiting", callback_data=f"prog:{t['id']}:wait")],
+                [InlineKeyboardButton("🗑 It stalled — drop it", callback_data=f"prog:{t['id']}:stall")],
+            ])
+            nudge = ("" if days < 14 else
+                     f"\n<i>That's {days} days now — worth chasing or letting go.</i>")
+            await context.bot.send_message(
+                chat_id=target,
+                text=(f"🔨 <b>How did this land?</b>\n{escape(label)}\n"
+                      f"<i>You said you were on it {days} day(s) ago.</i>{nudge}"),
+                parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        logger.exception("progress follow-up failed")
+
     # ❄️ Icebox offers — stale tasks get ONE parking decision, max 2 per morning
     try:
         from tools.daily import get_stale_tasks, mark_icebox_offered
@@ -2196,10 +2265,11 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
                 label = label[5:].strip()
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Done", callback_data=f"ice:{t['id']}:done"),
-                 InlineKeyboardButton("📅 This week", callback_data=f"ice:{t['id']}:week")],
-                [InlineKeyboardButton("❄️ 2 weeks", callback_data=f"ice:{t['id']}:w2"),
-                 InlineKeyboardButton("🧊 1 month", callback_data=f"ice:{t['id']}:m1")],
-                [InlineKeyboardButton("🗑 Drop it", callback_data=f"ice:{t['id']}:drop")],
+                 InlineKeyboardButton("🔨 On it", callback_data=f"ice:{t['id']}:prog")],
+                [InlineKeyboardButton("📅 This week", callback_data=f"ice:{t['id']}:week"),
+                 InlineKeyboardButton("❄️ 2 weeks", callback_data=f"ice:{t['id']}:w2")],
+                [InlineKeyboardButton("🧊 1 month", callback_data=f"ice:{t['id']}:m1"),
+                 InlineKeyboardButton("🗑 Drop it", callback_data=f"ice:{t['id']}:drop")],
             ])
             try:
                 await context.bot.send_message(

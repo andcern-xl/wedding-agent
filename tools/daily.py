@@ -263,6 +263,10 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
     reoffer_cutoff = (today - timedelta(days=reoffer_days)).isoformat()
     stale = []
     for t in get_tasks(user_id):
+        if t.get("in_progress_since"):
+            # They said they were on it. Once the check-back arrives it gets the
+            # follow-up card asking what came back — not another "Backlog this?"
+            continue
         offered = t.get("icebox_offered_at")
         if offered:
             # Asked once already. It is never asked a second time — silence is an
@@ -275,6 +279,63 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
             stale.append(t)
     stale.sort(key=lambda t: t.get("due_date") or (t.get("created_at") or "")[:10])
     return stale
+
+
+def mark_in_progress(task_id: str, check_back_days: int = 5) -> bool:
+    """They have started this. Record it and go quiet until the check-back.
+
+    Distinct from iceboxing on purpose. A deferred task comes back asking the
+    same question; one that is underway should come back asking what happened.
+    icebox_offered_at is cleared so the ask-once rule does not settle it as
+    ignored — they answered, and the answer was "working on it"."""
+    from datetime import timedelta
+    try:
+        res = (
+            get_client().table("daily_tasks")
+            .update({"in_progress_since": local_today().isoformat(),
+                     "iceboxed_until": (local_today() + timedelta(days=check_back_days)).isoformat(),
+                     "icebox_offered_at": None})
+            .eq("id", task_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def get_progress_followups() -> list[dict]:
+    """In-progress tasks whose check-back date has arrived."""
+    today = local_today().isoformat()
+    try:
+        return (
+            get_client().table("daily_tasks")
+            .select("*")
+            .eq("done", False)
+            .is_("settled_at", "null")
+            .not_.is_("in_progress_since", "null")
+            .lte("iceboxed_until", today)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return []
+
+
+def extend_progress(task_id: str, days: int = 5) -> bool:
+    """Still waiting on someone else. Push the check-back without resetting
+    in_progress_since — the age of "I'm on it" is the useful signal, and it is
+    what turns a polite follow-up into "this has been open three weeks"."""
+    from datetime import timedelta
+    try:
+        res = (
+            get_client().table("daily_tasks")
+            .update({"iceboxed_until": (local_today() + timedelta(days=days)).isoformat()})
+            .eq("id", task_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
 
 
 def settle_unanswered_tasks(answer_days: int = 7) -> list[dict]:
@@ -292,6 +353,7 @@ def settle_unanswered_tasks(answer_days: int = 7) -> list[dict]:
             .select("*")
             .eq("done", False)
             .is_("settled_at", "null")
+            .is_("in_progress_since", "null")
             .lte("icebox_offered_at", cutoff)
             .execute()
             .data or []
