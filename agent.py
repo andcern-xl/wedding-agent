@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import re
+import re as _re_mod
 from html import escape as _html_escape
 from datetime import datetime, date, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -82,8 +83,107 @@ def _date_reference(now: datetime | None = None, horizon: int = _DATE_HORIZON) -
 _DATE_RULE = """DATES — look them up, never compute them. You get date arithmetic wrong.
 - Writing a day name for a date (\"the 17th is a...\") → find the date in the CALENDAR table below and copy its day name. If the date is not in the table, write the date alone (\"17 Aug\") and NO day name.
 - Reading a day name the user said (\"Friday\", \"next Monday\") → take the ISO date from the table. A named weekday means its SOONEST upcoming occurrence.
-- Never say \"tomorrow\", \"this weekend\", or \"in N days\" unless the table confirms it.
+- Never say \"tomorrow\", \"tonight\", \"today\", \"this evening\", \"this morning\",
+  \"this afternoon\", \"later today\", \"this weekend\", or \"in N days\" unless the
+  table confirms it. \"Tonight\" and \"this evening\" are claims that the event is
+  TODAY — they are day claims, not time-of-day colour. An 8pm event on a date the
+  table does not mark today is NOT tonight; name the day instead (\"Tuesday, 8pm\").
 """
+
+
+# An explicit year is consumed when present, so "8 Sep 2027" resolves to 2027
+# rather than being cut at "8 Sep" and guessed at by the nearest-year rule.
+_PROSE_DATE_RE = _re_mod.compile(
+    r"\b(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?(?:\s*,?\s*(\d{4}))?\b"
+    r"|\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?\b"
+    r"|\b(\d{4}-\d{2}-\d{2})\b", _re_mod.I)
+
+_MONTH_NUM = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def annotate_dates(text: str, today=None) -> str:
+    """Stamp every date written in prose with what it actually is.
+
+    "Confirmed 10-min call Tuesday 15 Sep at 8pm" becomes
+    "...Tuesday 15 Sep [= TOMORROW, Tue 2026-09-15] at 8pm".
+
+    The Aug 2026 fix taught generators to LOOK UP day names instead of computing
+    them, and gave the calendar block explicit IMMINENT / THIS WEEK buckets.
+    Prose never got the same treatment: thread notes, check-in questions and
+    FYIs arrive as raw sentences, leaving the model to work out whether
+    "Tuesday 15 Sep" is today. On Mon 14 Sep it decided a Tuesday call was
+    "Tonight". Resolve it here and there is nothing left to get wrong.
+    """
+    if not text:
+        return text
+    today = today or _local_today()
+
+    def _label(d) -> str:
+        delta = (d - today).days
+        if delta == 0:
+            word = "TODAY"
+        elif delta == 1:
+            word = "TOMORROW"
+        elif delta == -1:
+            word = "YESTERDAY"
+        elif delta < 0:
+            word = f"{-delta} DAYS AGO"
+        else:
+            word = f"in {delta} days"
+        return f" [= {word}, {d.strftime('%a')} {d.isoformat()}]"
+
+    def _sub(m) -> str:
+        raw = m.group(0)
+        try:
+            if m.group(7):
+                d = date.fromisoformat(m.group(7))
+            else:
+                if m.group(1):
+                    day, mon = int(m.group(1)), _MONTH_NUM[m.group(2)[:3].lower()]
+                    year_txt = m.group(3)
+                else:
+                    day, mon = int(m.group(5)), _MONTH_NUM[m.group(4)[:3].lower()]
+                    year_txt = m.group(6)
+                if year_txt:
+                    d = date(int(year_txt), mon, day)
+                else:
+                    # No year written: take the nearest reading, so a December
+                    # date seen in January is next month, not eleven months ago.
+                    best = None
+                    for year in (today.year - 1, today.year, today.year + 1):
+                        try:
+                            cand = date(year, mon, day)
+                        except ValueError:
+                            continue
+                        if best is None or abs((cand - today).days) < abs((best - today).days):
+                            best = cand
+                    d = best
+            return raw + _label(d) if d else raw
+        except (ValueError, KeyError, TypeError):
+            return raw
+
+    return _PROSE_DATE_RE.sub(_sub, text)
+
+
+# Words that assert an event is TODAY. As a header ("Tonight: X") they are the
+# highest-signal form of the bug and the cheapest to catch.
+_TODAY_CLAIM_RE = _re_mod.compile(
+    r"(?:^|[\n\u2022\-*]\s*|<b>)\s*(tonight|today|this evening|this morning|this afternoon|later today)\b\s*[:,]",
+    _re_mod.I)
+
+
+def today_claim_violations(output: str, context_dates: set, today=None) -> list:
+    """A today-claim in the output when nothing in the context is dated today.
+
+    Deterministic, so it holds whatever the model does. Deliberately narrow:
+    fires only on the header form ("Tonight: ..."), never on ordinary prose like
+    "nothing due today", which is legitimate and common.
+    """
+    today = today or _local_today()
+    if today.isoformat() in (context_dates or set()):
+        return []
+    return [m.group(1) for m in _TODAY_CLAIM_RE.finditer(output or "")]
 
 
 def date_block(now: datetime | None = None) -> str:
@@ -224,9 +324,17 @@ _BRIEF_THREADS_TOOL = {
 
 
 def _read_threads_tool_sync(person: str | None = None, status: str | None = None) -> dict:
+    """Thread notes are free prose — "Confirmed 10-min call Tuesday 15 Sep at
+    8pm" — so every date in them is annotated before the model ever sees it.
+    Reading that raw on 14 Sep is what produced "Tonight: Sanwraps call at 8pm"."""
     from tools.threads import read_threads
     try:
-        return {"threads": read_threads(status=status, person=person)}
+        rows = read_threads(status=status, person=person) or []
+        for r in rows:
+            for field in ("last_note", "topic"):
+                if r.get(field):
+                    r[field] = annotate_dates(r[field])
+        return {"threads": rows}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -4417,7 +4525,9 @@ Rules:
             _open_cis = _get_open_cis(limit=10)
             if _open_cis:
                 _ci_lines = "\n".join(
-                    f"• [{c.get('category', 'life')}] asked {(c.get('created_at') or '')[:10]}: {c['question']}"
+                    annotate_dates(
+                        f"• [{c.get('category', 'life')}] asked {(c.get('created_at') or '')[:10]}: {c['question']}",
+                        today)
                     for c in _open_cis
                 )
                 open_ci_block = f"""OPEN CHECK-INS — questions already sent as button cards, still unanswered. NEVER re-ask these via ask_check_in or in prose. If one is now urgent (event within 3 days), you may mention it once as a nudge:
@@ -4556,6 +4666,17 @@ TRIPS — only surface a trip if it's within 28 days OR has a specific open gap 
 
 If nothing is worth flagging: respond with exactly: NOTHING"""
 
+        # Every date this run's context genuinely refers to. The validator uses it
+        # to decide whether a "Tonight:" claim can possibly be true.
+        _ctx_dates: set = set()
+        for _blob in (cal_block, open_ci_block, answered_ci_block, tasks_block,
+                      fyis_block, trips_block, shows_block):
+            _ctx_dates.update(_re.findall(r"\d{4}-\d{2}-\d{2}", _blob or ""))
+        for _e_list in (_within_48h, _within_7d):
+            if _e_list:
+                _ctx_dates.add(today_str)
+                break
+
         # --- Run agentic loop (max 4 tool calls) ---
         proactive_flags: dict = {}
         messages: list[dict] = [{"role": "user", "content": "Run your proactive intelligence check now. Do not add an intro header or greeting — jump straight into the findings."}]
@@ -4577,6 +4698,20 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
                 new_check_ins = proactive_flags.get("check_ins", [])
                 if (not result or result.upper().startswith("NOTHING")) and not new_check_ins:
                     return None
+                if result:
+                    _bad = today_claim_violations(result, _ctx_dates, today)
+                    if _bad:
+                        # Deterministic catch: it called something "Tonight" when
+                        # nothing in context is dated today. Neutralise the claim
+                        # rather than ship it — a wrong day is worse than a vague
+                        # one, and this is the exact Sanwraps failure.
+                        import logging as _dl
+                        _dl.getLogger(__name__).warning(
+                            "proactive_check: today-claim %s with no context date for %s — stripped",
+                            _bad, today_str)
+                        result = _TODAY_CLAIM_RE.sub(
+                            lambda m: m.group(0)[:m.start(1) - m.start(0)].rstrip(), result)
+                        result = _re.sub(r"(<b>)\s+", r"\1", result)
                 fixed = _fix_md(result) if result and not result.upper().startswith("NOTHING") else None
                 if fixed:
                     try:

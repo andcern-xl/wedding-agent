@@ -44,6 +44,40 @@ The wedding has 160+ drops going back to April 2026, but `brain_entries` only st
 
 Prompt section WEDDING RECALL forbids "no X yet" / "all TBD" about the wedding until a content search has come back empty. Categories mislead: the day-of plan is under `ceremony`, lunch timings under `budget`, the event schedule and DJ timeline under `venue`, and `timeline` holds only a question. Wedding day is **Sat 7 Nov 2026** at FYSH, The Singapore EDITION; **5–10 Nov is the guest room block**, not the wedding date.
 
+## "Tonight" is a day claim — prose dates are annotated, not computed
+
+Sep 2026: the proactive brief led with "Tonight: Sanwraps call at 8pm" on Monday
+14 Sep. The call was Tuesday the 15th.
+
+**Not a timezone bug**, though it looks like one. `date_block()` correctly said
+`today = 2026-09-14 (Monday)` and `2026-09-15 = Tuesday (tomorrow)`; the thread
+note said "Confirmed 10-min call Tuesday 15 Sep at 8pm"; the check-in said
+"Tuesday". Every source was right. And the brief fires at 9am SGT = 1am UTC the
+same date, so there is no skew to exploit — a UTC lag would have made it say
+"Tuesday", not "Tonight". The error ran the opposite way.
+
+Two real causes:
+
+1. **The rule guarded the wrong words.** It forbade "tomorrow", "this weekend"
+   and "in N days" without the table, and said nothing about "tonight", "today",
+   "this evening", "this morning" or "later today" — the words that assert an
+   event is TODAY were the unguarded ones. Now named explicitly, with the
+   reasoning: *"tonight" is a day claim, not time-of-day colour.*
+2. **Prose dates were never resolved.** The Aug fix taught generators to look up
+   day names and gave the calendar IMMINENT / THIS WEEK buckets, but thread
+   notes, check-in questions and FYIs still arrived as raw sentences, leaving
+   the model to work out whether "Tuesday 15 Sep" is today. `annotate_dates()`
+   now stamps every prose date before the model sees it:
+   `"call Tuesday 15 Sep [= TOMORROW, Tue 2026-09-15] at 8pm"`. It consumes an
+   explicit year when written, and falls back to the nearest reading otherwise,
+   so "2 Jan" seen in September is next January rather than last.
+
+`today_claim_violations()` is the deterministic backstop: a "Tonight:" /
+"Today:" header when no context item is dated today is stripped before sending,
+because a wrong day is worse than a vague one. It fires only on the header form,
+never on ordinary prose like "nothing due today". `test_date_claims.py` locks
+all of it, built from the real failure.
+
 ## Dates — looked up, never computed
 The model does not do date arithmetic; it looks dates up. `date_block()` in agent.py
 returns the rule plus a resolved table that runs both ways — weekday name → ISO date
