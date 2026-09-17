@@ -44,6 +44,43 @@ The wedding has 160+ drops going back to April 2026, but `brain_entries` only st
 
 Prompt section WEDDING RECALL forbids "no X yet" / "all TBD" about the wedding until a content search has come back empty. Categories mislead: the day-of plan is under `ceremony`, lunch timings under `budget`, the event schedule and DJ timeline under `venue`, and `timeline` holds only a question. Wedding day is **Sat 7 Nov 2026** at FYSH, The Singapore EDITION; **5–10 Nov is the guest room block**, not the wedding date.
 
+## Model JSON: parse to an object, never trust the shape
+
+Sep 2026 — a screenshot produced "[DEBUG] AttributeError: 'list' object has no
+attribute 'get'", no reply, and nothing retrievable afterwards.
+
+`_extract_payment` (live, reached from `UnifiedAgent.handle_image`) did
+`json.loads(text)` then `data.get("skip")`, with
+`except (json.JSONDecodeError, IndexError)`. A screenshot holding **two**
+payments makes the model answer with an **array**; `json.loads` returns a list,
+`.get()` raises `AttributeError`, and that clause did not cover it — so it
+escaped and took the whole turn down.
+
+Both symptoms come from that one bug. "Cannot answer" is the crash.
+**"Cannot dig back" is the same crash**: `save_history` runs *after*
+`handle_message` returns, so a turn that raises never reaches it — the message
+is absent from history, and the nightly conversation sweep never sees it either.
+
+`as_json_object()` is module-level on purpose: `WeddingAgent`, `DailyAgent` and
+`UnifiedAgent` all parse model JSON, and a helper on one class is unreachable
+from the others — putting it on `DailyAgent` and calling it from `WeddingAgent`
+was a bug I introduced and caught in the same pass. It unwraps a one-element
+array (the model wrapping a single object) rather than discarding the finding,
+and returns None for anything else that is not an object.
+
+Two things this exposed:
+
+- **`_parse_task` is dead code.** It sits on `DailyAgent`, whose `handle_message`
+  nothing calls; production runs `UnifiedAgent`. It carried the identical bug.
+  Worth remembering before "fixing" anything in `WeddingAgent`/`DailyAgent` —
+  check the call graph first.
+- **Crash reports gave no location.** Every `[DEBUG]` handler in main.py now
+  reports through `_err_detail()`, which walks to the deepest traceback frame
+  inside this project and appends `(file.py:line in func)`. Three crash reports
+  this month each cost a round of guessing; that ends here.
+
+`test_model_json.py` locks it — 16 cases across the helper and the live path.
+
 ## "Tonight" is a day claim — prose dates are annotated, not computed
 
 Sep 2026: the proactive brief led with "Tonight: Sanwraps call at 8pm" on Monday

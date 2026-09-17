@@ -186,6 +186,47 @@ def today_claim_violations(output: str, context_dates: set, today=None) -> list:
     return [m.group(1) for m in _TODAY_CLAIM_RE.finditer(output or "")]
 
 
+_BG: set = set()   # holds background tasks so they are not GC'd mid-flight
+
+
+def as_json_object(raw: str) -> dict | None:
+    """Parse a model reply that is supposed to be a JSON object.
+
+    json.loads happily returns a LIST when the model answers with an array, and
+    the callers here immediately call .get() on the result. A screenshot holding
+    two payments makes the extractor answer with an array, which produced
+    "AttributeError: 'list' object has no attribute 'get'" — and the except
+    clause only caught JSONDecodeError and IndexError, so it escaped and took
+    the whole turn down. From the user's side the agent simply failed to answer.
+
+    A one-element array is the model wrapping a single object, so unwrap rather
+    than discard what it found. Anything else that is not an object becomes
+    None, which every caller already handles.
+
+    Module-level on purpose: WeddingAgent, DailyAgent and UnifiedAgent all parse
+    model JSON, and a helper on one of them is unreachable from the others.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+    try:
+        data = json.loads(text.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
 def date_block(now: datetime | None = None) -> str:
     """The date rule + resolved table, ready to interpolate into any prompt.
 
@@ -675,18 +716,12 @@ If this image has no financial content, return: {"skip": true}"""
             return None
 
         try:
-            text = response.content[0].text.strip()
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            data = json.loads(text.strip())
-            if data.get("skip"):
-                return None
-            return data
-        except (json.JSONDecodeError, IndexError):
+            data = as_json_object(response.content[0].text)
+        except (IndexError, AttributeError):
             return None
+        if not data or data.get("skip"):
+            return None
+        return data
 
     async def handle_image(self, image_bytes: bytes, caption: str, history: list[dict] | None = None) -> dict:
         import asyncio
@@ -1144,13 +1179,8 @@ class DailyAgent:
             messages=[{"role": "user", "content": prompt}],
         )
         try:
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            return json.loads(raw.strip())
-        except (json.JSONDecodeError, IndexError):
+            return as_json_object(response.content[0].text)
+        except (IndexError, AttributeError):
             return None
 
     async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
@@ -1158,6 +1188,8 @@ class DailyAgent:
             history = []
 
         parsed = await self._parse_task(text)
+        if not isinstance(parsed, dict):
+            parsed = None
 
         if parsed and parsed.get("is_new_category"):
             # Extract name and optional emoji from the message using a quick parse
@@ -4239,7 +4271,12 @@ RULES: <b>bold</b> only (no **), bullets •, no URLs. NUMBERS ONLY IF THEY APPE
         if reply_text and text:
             try:
                 from tools.mem0_memory import add_exchange as _add
-                asyncio.create_task(asyncio.to_thread(_add, text, reply_text, user_id))
+                # Held, not fire-and-forget: asyncio keeps only a weak reference,
+                # so an unheld task can be collected before it runs — the same
+                # bug that stopped conversation history persisting for ten days.
+                _t = asyncio.create_task(asyncio.to_thread(_add, text, reply_text, user_id))
+                _BG.add(_t)
+                _t.add_done_callback(_BG.discard)
             except Exception:
                 pass
 

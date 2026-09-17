@@ -454,7 +454,7 @@ async def cmd_bringmeuptospeed(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_bringmeuptospeed failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_category_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -472,7 +472,7 @@ async def cmd_category_status(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_category_status failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -507,6 +507,29 @@ def _thread_into_history(chat_id: int, user_turn: str, assistant_turn: str) -> N
     ]
     conversations[chat_id] = history[-40:]
     _spawn(asyncio.to_thread(save_history, chat_id, conversations[chat_id]))
+
+
+def _err_detail(e: BaseException, limit: int = 220) -> str:
+    """Error text WITH the place it happened.
+
+    "[DEBUG] AttributeError: 'list' object has no attribute 'get'" says what
+    broke and gives no way to find it — three separate crash reports this month
+    each cost a round of guessing. The innermost frame inside this project is
+    the one that matters, so walk to the deepest frame whose file lives here.
+    """
+    import os
+    import traceback
+    here = os.path.dirname(os.path.abspath(__file__))
+    where = ""
+    try:
+        frames = [f for f in traceback.extract_tb(e.__traceback__)
+                  if os.path.abspath(f.filename).startswith(here)]
+        if frames:
+            f = frames[-1]
+            where = f" ({os.path.basename(f.filename)}:{f.lineno} in {f.name})"
+    except Exception:
+        pass
+    return f"{type(e).__name__}: {str(e)[:limit]}{where}"
 
 
 # asyncio keeps only a WEAK reference to a task, so a fire-and-forget
@@ -686,7 +709,7 @@ async def _process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         logger.exception(f"Error handling message: {e}")
         err_type = type(e).__name__
         err_msg = str(e)[:300]
-        await (update.effective_message or update.message).reply_text(f"[DEBUG] {err_type}: {err_msg}")
+        await (update.effective_message or update.message).reply_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def _send_or_alert(context, chat_id: int, text: str, job_name: str, **kwargs):
@@ -852,7 +875,7 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_me failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_shows(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -866,7 +889,7 @@ async def cmd_shows(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_shows failed")
-        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await update.message.reply_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def send_show_reminders(context: ContextTypes.DEFAULT_TYPE):
@@ -1082,7 +1105,7 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_plan failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1096,7 +1119,7 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_tasks failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1110,7 +1133,7 @@ async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_reminders failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 _NOTIF_USER_NAMES = {ANSEN_ID: "Ansen", JESS_ID: "Jess"}
@@ -1223,7 +1246,7 @@ async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_notifications failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1254,7 +1277,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_memory failed")
-        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+        await update.message.reply_text(f"[DEBUG] {_err_detail(e)}")
 
 
 _FACTS_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Exact facts", callback_data="shared_facts")]])
@@ -1284,7 +1307,7 @@ async def cmd_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_brain_story(context, update.effective_chat.id, msg)
     except Exception as e:
         logger.exception("cmd_shared failed")
-        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await update.message.reply_text(f"[DEBUG] {_err_detail(e)}")
 
 
 _CAT_EMOJI = {
@@ -1323,7 +1346,7 @@ async def cmd_groceries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_groceries failed")
-        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await update.message.reply_text(f"[DEBUG] {_err_detail(e)}")
 
 
 _FYI_FACTS_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Exact facts", callback_data="fyis_facts")]])
@@ -1398,7 +1421,7 @@ async def cmd_fyis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_fyi_story(context, update.effective_chat.id, msg)
     except Exception as e:
         logger.exception("cmd_fyis failed")
-        await update.message.reply_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await update.message.reply_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def _handle_shared_callback(query, context, action: str, user_id: int):
@@ -1409,7 +1432,7 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
         try:
             await _send_brain_story(context, chat_id, msg)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "facts":
         # Raw shared brain — the exact bullets behind the story
@@ -1422,14 +1445,14 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             for section in sections:
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif action == "fyis":
         msg = await context.bot.send_message(chat_id=chat_id, text="Reading the month's FYIs...")
         try:
             await _send_fyi_story(context, chat_id, msg)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "tasks":
         msg = await context.bot.send_message(chat_id=chat_id, text="Checking your tasks...")
@@ -1439,7 +1462,7 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             keyboard = _reminders_keyboard(tasks, user_id)
             await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "reminders":
         msg = await context.bot.send_message(chat_id=chat_id, text="Pulling reminders...")
@@ -1449,7 +1472,7 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             keyboard = _reminders_keyboard(tasks, user_id)
             await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "budget":
         try:
@@ -1491,7 +1514,7 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             for section in sections:
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif action == "travel":
         try:
@@ -1532,7 +1555,7 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             keyboard = InlineKeyboardMarkup(rows)
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif action == "finances":
         try:
@@ -1540,14 +1563,14 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             for section in _split_sections(text):
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif action == "groceries":
         try:
             text, keyboard = _format_groceries()
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
 
 async def _handle_wedding_callback(query, context, action: str, user_id: int):
@@ -1575,7 +1598,7 @@ async def _handle_wedding_callback(query, context, action: str, user_id: int):
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
             logger.exception("category_status callback failed")
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
         return
 
     if action == "bringmeuptospeed":
@@ -1587,7 +1610,7 @@ async def _handle_wedding_callback(query, context, action: str, user_id: int):
             for section in sections[1:]:
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "plan":
         msg = await context.bot.send_message(chat_id=chat_id, text="Analysing where things stand...")
@@ -1598,7 +1621,7 @@ async def _handle_wedding_callback(query, context, action: str, user_id: int):
             for section in sections[1:]:
                 await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def _handle_baby_callback(query, context, action: str):
@@ -1646,7 +1669,7 @@ async def _handle_baby_callback(query, context, action: str):
             keyboard = _reminders_keyboard(tasks, query.from_user.id)
             await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "questions":
         msg = await context.bot.send_message(chat_id=chat_id, text="Loading questions...")
@@ -1656,7 +1679,7 @@ async def _handle_baby_callback(query, context, action: str):
             keyboard = _reminders_keyboard(tasks, query.from_user.id)
             await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif action == "budget":
         msg = await context.bot.send_message(chat_id=chat_id, text="Loading baby budget...")
@@ -1664,7 +1687,7 @@ async def _handle_baby_callback(query, context, action: str):
             text = await agent.baby_budget_brief()
             await _safe_send(msg, text)
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1721,7 +1744,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for section in sections:
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=section, parse_mode="HTML")
         except Exception as e:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif data.startswith("shared_"):
         await query.answer()
@@ -1833,7 +1856,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, keyboard = _format_shows(shows)
             await context.bot.send_message(chat_id=query.message.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
-            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif data.startswith("goal_step:"):
         await query.answer()
@@ -1866,7 +1889,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=query.message.chat_id, text=msg, parse_mode="HTML")
         except Exception as e:
             logger.exception("goal_step callback failed")
-            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif data.startswith("skill_build:"):
         await query.answer()
@@ -1894,7 +1917,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=query.message.chat_id, text=_re.sub(r"<[^>]+>", "", section))
             await context.bot.send_message(chat_id=query.message.chat_id, text="💡 <i>This plan lives in chat only — paste it to Claude Code to actually deploy it.</i>", parse_mode="HTML")
         except Exception as e:
-            await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
     elif data.startswith("notif_ack:"):
         await query.answer("✅ Got it")
@@ -2076,7 +2099,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=query.message.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard
             )
         except Exception as e:
-            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
     elif data.startswith("grocery_done:"):
         await query.answer()
@@ -2989,7 +3012,7 @@ async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_goals failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3023,7 +3046,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Tap one to generate the implementation code:", reply_markup=keyboard)
     except Exception as e:
         logger.exception("cmd_skills failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3049,7 +3072,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(section, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_search failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_compress(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3064,7 +3087,7 @@ async def cmd_compress(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(result, parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_compress failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:200]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3091,7 +3114,7 @@ async def cmd_build(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💡 <i>This plan lives in chat only — paste it to Claude Code to actually deploy it.</i>", parse_mode="HTML")
     except Exception as e:
         logger.exception("cmd_build failed")
-        await msg.edit_text(f"[DEBUG] {type(e).__name__}: {str(e)[:300]}")
+        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def send_capability_gap_sweep(context: ContextTypes.DEFAULT_TYPE):
