@@ -476,6 +476,27 @@ failing for weeks and nobody ran it. **A check a human must remember during
 unrelated work is not a guarantee.** New invariants go here, as code, not as
 prose. When a complaint turns out to be a class of bug, add the assertion.
 
+## History must be plain JSON — and a caught crash is still a crash
+
+Sep 2026, found from Railway logs on the 29th, two silent failures at once:
+
+1. **History stopped saving** (Ansen from 18 Sep, Jess from 23 Sep). `_run_loop`
+   appended `last_response.content` — SDK `TextBlock`/`ToolUseBlock` objects —
+   into `messages`, which becomes the persisted history. `save_history` cannot
+   JSON-encode them, so once one tool-using turn sat in the 40-message window,
+   every save for that chat failed until it rolled out. This is the likelier
+   root cause of the Aug "history stopped persisting" too. Fix:
+   `content_to_dicts()` (module-level in agent.py) at the append, plus
+   `save_history` coercing stragglers rather than losing the whole window.
+2. **`proactive_check` crashed every morning from 14 Sep**:
+   `NameError: name '_re'` — the "Tonight" fix used `_re` in a function that
+   never imported it. The job's except clause logged and moved on; the only
+   symptom was silence.
+
+`test_history_persist.py` and `test_undefined_names.py` (pyflakes, any
+undefined name fails) lock these. The Railway CLI is linked (`railway logs
+--since 12h --filter ...`) — read the logs before guessing.
+
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)
 - Individual brain architecture: how Ansen's personal context interacts with shared brain

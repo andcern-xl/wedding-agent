@@ -189,6 +189,31 @@ def today_claim_violations(output: str, context_dates: set, today=None) -> list:
 _BG: set = set()   # holds background tasks so they are not GC'd mid-flight
 
 
+def content_to_dicts(content) -> list:
+    """SDK content blocks → plain dicts, for anything that goes into history.
+
+    The chat loop appended `response.content` straight into `messages`, which
+    becomes the persisted history. Those are TextBlock/ToolUseBlock objects, and
+    save_history cannot JSON-encode them — so the first tool-using turn in the
+    40-message window made every save for that chat fail until it rolled out.
+    Ansen's history stopped at 18 Sep 2026 and Jess's at 23 Sep this way, and the
+    nightly conversation sweep never saw anything said after.
+
+    Only the fields the API accepts back are kept: text and tool_use.
+    """
+    out = []
+    for b in content or []:
+        if isinstance(b, dict):
+            out.append(b)
+            continue
+        kind = getattr(b, "type", None)
+        if kind == "text":
+            out.append({"type": "text", "text": b.text})
+        elif kind == "tool_use":
+            out.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+    return out
+
+
 def as_json_object(raw: str) -> dict | None:
     """Parse a model reply that is supposed to be a JSON object.
 
@@ -3899,7 +3924,7 @@ For each new fact, decide what it replaces. Reply with ONLY a JSON array, one ob
                 if not tool_use_blocks:
                     _logging.getLogger(__name__).error("tool_use stop_reason but no tool_use blocks in response")
                     break
-                messages.append({"role": "assistant", "content": last_response.content})
+                messages.append({"role": "assistant", "content": content_to_dicts(last_response.content)})
                 tool_results = []
                 for block in tool_use_blocks:
                     try:
@@ -4708,7 +4733,7 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
         _ctx_dates: set = set()
         for _blob in (cal_block, open_ci_block, answered_ci_block, tasks_block,
                       fyis_block, trips_block, shows_block):
-            _ctx_dates.update(_re.findall(r"\d{4}-\d{2}-\d{2}", _blob or ""))
+            _ctx_dates.update(re.findall(r"\d{4}-\d{2}-\d{2}", _blob or ""))
         for _e_list in (_within_48h, _within_7d):
             if _e_list:
                 _ctx_dates.add(today_str)
@@ -4748,7 +4773,7 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
                             _bad, today_str)
                         result = _TODAY_CLAIM_RE.sub(
                             lambda m: m.group(0)[:m.start(1) - m.start(0)].rstrip(), result)
-                        result = _re.sub(r"(<b>)\s+", r"\1", result)
+                        result = re.sub(r"(<b>)\s+", r"\1", result)
                 fixed = _fix_md(result) if result and not result.upper().startswith("NOTHING") else None
                 if fixed:
                     try:

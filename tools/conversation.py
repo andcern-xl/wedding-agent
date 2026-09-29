@@ -26,9 +26,17 @@ def load_history(chat_id: int) -> list:
         return []
 
 
+def _jsonable(o):
+    # SDK content blocks (pydantic) reached history once and made every save for
+    # that chat fail for 11 days. One bad object must not cost the whole window.
+    if hasattr(o, "model_dump"):
+        return o.model_dump(exclude_none=True)
+    return str(o)
+
+
 def save_history(chat_id: int, messages: list) -> None:
     try:
-        trimmed = messages[-_MAX_MESSAGES:]
+        trimmed = json.loads(json.dumps(messages[-_MAX_MESSAGES:], default=_jsonable))
         get_client().table("conversation_history").upsert(
             {
                 "chat_id": chat_id,
