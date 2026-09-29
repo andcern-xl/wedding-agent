@@ -211,6 +211,17 @@ src = "Frederick +65 92719518. Total $3,200 (subtotal $3,750 less $550). DBS 120
 check("real phone, reformatted, is grounded", not AG.ungrounded_numbers("Fred +65 9271 9518", src))
 check("invented phone is caught", AG.ungrounded_numbers("Fred +65 8222 2287", src))
 check("computed amount not in doc is caught", AG.ungrounded_numbers("Balance $2,650 due", src))
+check("a bare year is not treated as an invented number (live sync, 29 Sep)",
+      not AG.ungrounded_numbers("Wedding date: 7 Nov 2026 at FYSH", "Wedding lunch 7 Nov at FYSH"))
+check("but an invented phone next to a year is still caught",
+      AG.ungrounded_numbers("Call +65 8222 2287 on 7 Nov 2026", "Wedding lunch 7 Nov"))
+check("letter-spaced PDF text is closed up",
+      G._unspace("S e l e c t  t h e  L a y o u t  f r o m  F r a m e") == "Select the Layout from Frame")
+check("normal text is left alone", G._unspace("FYSH lunch runs 12 to 3 pm") == "FYSH lunch runs 12 to 3 pm")
+dd = AG.dedupe_facts([("wedding", "Small easel to be set up with boy/girl colour paste for gender reveal."),
+                      ("wedding", "Small easel to be set up with boy/girl colour paste for the gender reveal."),
+                      ("wedding", "Photobooth confirmed 1:00-3:00 PM.")])
+check("near-duplicate facts from one doc collapse to one", len(dd) == 2)
 check("scanned letterhead is not readable text",
       not AG.has_readable_text("38 CUSCADEN ROAD SINGAPORE TEL 65 6329 5000 WWW.EDITIONHOTELS.COM " * 10))
 

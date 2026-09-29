@@ -349,10 +349,23 @@ def _xlsx_text(data: bytes) -> str:
     return "\n".join(out)
 
 
+def _unspace(line: str) -> str:
+    """Designed PDFs often extract letter-spaced — "S e l e c t  t h e  L a y o u t":
+    one space between letters, two between words. Close it up, or the doc reads
+    as having no words at all (the photobooth frame spec was skipped as
+    unreadable on the first live sync, 29 Sep 2026)."""
+    toks = line.split(" ")
+    single = sum(1 for t in toks if len(t) == 1)
+    if len(toks) < 6 or single / len(toks) < 0.6:
+        return line
+    return re.sub(r" {2,}", " ", re.sub(r"(?<=\S) (?=\S)", "", line)).strip()
+
+
 def _pdf_text(data: bytes) -> str:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
-    return "\n".join((p.extract_text() or "") for p in reader.pages)
+    text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    return "\n".join(_unspace(l) for l in text.split("\n"))
 
 
 def effective_mime(f: dict) -> str:
