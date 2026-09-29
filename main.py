@@ -3555,6 +3555,7 @@ def main():
             BotCommand("notifications", "🔔 Scheduled reminders — view & turn off"),
             BotCommand("nuggets", "🌰 Nightly reading — switch your feed on/off"),
             BotCommand("settled", "🧹 Things I closed for you — undo any"),
+            BotCommand("drive", "📁 Google Drive docs I learn from — sync now"),
         ]
         await application.bot.set_my_commands(commands)
 
