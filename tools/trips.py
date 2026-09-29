@@ -203,7 +203,8 @@ def get_upcoming_trips() -> list[dict]:
     today = local_today().isoformat()
     return (
         get_client().table("trips").select("*")
-        .gte("end_date", today)
+        # A trip with no end date yet is still upcoming — .gte alone dropped it.
+        .or_(f"end_date.gte.{today},end_date.is.null")
         .neq("status", "cancelled")
         .neq("status", "merged")
         .neq("status", "split")
@@ -221,10 +222,61 @@ def get_trip_by_id(trip_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+# A merged row keeps a forward pointer in its notes. The pointer, not the status,
+# is the source of truth: Seoul's retired row had its "merged" status
+# overwritten by a cancel, and the pointer was the only trace left.
+_MERGED_INTO_RE = re.compile(r"\[merged into ([0-9a-f-]{36})")
+_RETIRED = ("merged", "split")
+_LIVE = ("planning", "booked")
+
+
+def canonical_trip(trip: dict | None, _hops: int = 3) -> dict | None:
+    """Follow merge pointers to the row that actually holds the trip."""
+    while trip and _hops:
+        m = _MERGED_INTO_RE.search(trip.get("notes") or "")
+        if not m or m.group(1) == str(trip.get("id")):
+            break
+        nxt = get_trip_by_id(m.group(1))
+        if not nxt:
+            break
+        trip, _hops = nxt, _hops - 1
+    return trip
+
+
 def find_trips_by_destination(destination: str) -> list[dict]:
+    """Trips matching a destination, best target for a change first.
+
+    24 Sep 2026: "cancel Seoul" matched two rows with the same start date — the
+    live one and the row merged into it on 5 Aug — and update_trip took
+    matches[0], which was the retired row. The cancel landed there, overwrote
+    its "merged" status, and the live row stayed "booked", so the 27 Sep brief
+    still sent Ansen to the airport for SQ611.
+
+    Retired rows resolve to the row they were merged into, duplicates collapse,
+    and live trips (planning/booked) sort ahead of cancelled or completed ones,
+    nearest upcoming first — so a past Seoul trip can't outrank this one either.
+    """
     all_trips = get_client().table("trips").select("*").order("start_date").execute().data or []
     dest_lower = destination.lower()
-    return [t for t in all_trips if dest_lower in (t.get("destination") or "").lower()]
+    out, seen = [], set()
+    for t in all_trips:
+        if dest_lower not in (t.get("destination") or "").lower():
+            continue
+        t = canonical_trip(t)
+        if not t or t.get("id") in seen or t.get("status") in _RETIRED:
+            continue
+        seen.add(t.get("id"))
+        out.append(t)
+    today = local_today().isoformat()
+
+    def rank(t):
+        live = t.get("status") in _LIVE
+        upcoming = (t.get("end_date") or t.get("start_date") or "") >= today
+        start = t.get("start_date") or "9999"
+        return (not live, not upcoming, start if upcoming else "", start)
+
+    out.sort(key=rank)
+    return out
 
 
 def update_trip(trip_id: str, **kwargs) -> bool:
@@ -232,17 +284,19 @@ def update_trip(trip_id: str, **kwargs) -> bool:
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
         return False
-    result = get_client().table("trips").update(updates).eq("id", trip_id).execute()
+    # Never write onto a retired row — the change belongs to the live one.
+    target = canonical_trip(get_trip_by_id(trip_id)) or {"id": trip_id}
+    result = get_client().table("trips").update(updates).eq("id", target["id"]).execute()
     return bool(result.data)
 
 
 def append_trip_note(trip_id: str, note: str) -> bool:
-    trip = get_trip_by_id(trip_id)
+    trip = canonical_trip(get_trip_by_id(trip_id))
     if not trip:
         return False
     existing = trip.get("notes") or ""
     updated = (existing + "\n" + note).strip()
-    result = get_client().table("trips").update({"notes": updated}).eq("id", trip_id).execute()
+    result = get_client().table("trips").update({"notes": updated}).eq("id", trip["id"]).execute()
     return bool(result.data)
 
 

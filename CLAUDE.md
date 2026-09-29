@@ -497,6 +497,37 @@ Sep 2026, found from Railway logs on the 29th, two silent failures at once:
 undefined name fails) lock these. The Railway CLI is linked (`railway logs
 --since 12h --filter ...`) — read the logs before guessing.
 
+## Read where it is written NOW — views froze on stores that stopped moving
+
+29 Sep 2026. Ansen: "the baby knowledge is super obsolete — instagram links,
+baby products not captured". They were captured — into `brain_entries`
+(domain `baby`). The 📚 view read only `baby_knowledge` (last write 26 Aug) and
+had no date, so it said "Week 7" at week 19. An audit of every output found the
+same shape a dozen times. Fixed at chokepoints, not call sites:
+
+- **Baby:** `tools/baby_knowledge.get_entries()`/`search_entries()` union the
+  vault's baby domain (symptom logs collapsed to 3). `include_brain=False` for
+  anything that edits by id (`correct_knowledge`) and for `_query_brain_sync`,
+  which already searches the vault.
+- **FYIs → episodes:** nothing writes `fyis`. Read-only views use
+  `tools.fyis.recent_updates()` (FYIs + episodes, FYI-shaped). Ack/keep/archive
+  still need `get_fyis()`.
+- **Wedding views** (Catch Up, Plan, category briefs) get `wedding_facts_block()`
+  — all active wedding facts — and `_all_drops()` instead of 100/150 windows
+  (180 drops exist; the window was why a category read "untouched").
+- **Trips:** `canonical_trip()` follows `[merged into …]` pointers; lookups,
+  writes and the ✈️ card all go through it. `update_trip` never writes a
+  retired row. The Seoul cancel landed on the merged-away row and the live one
+  stayed booked.
+- **Dates:** `date_block()` added to every generator that lacked it; stored
+  text is annotated, and the current pregnancy week always comes from
+  `pregnancy_summary()`, never a saved "week N".
+- `strip_preamble()` removes the model narrating its lookups ("Writing now.").
+
+`test_live_sources.py` fails on a new legacy-only FYI read or a listed generator
+losing `date_block()`; `test_baby_knowledge.py` and `test_brief_and_trips.py`
+lock the rest.
+
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)
 - Individual brain architecture: how Ansen's personal context interacts with shared brain

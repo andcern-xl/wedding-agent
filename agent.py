@@ -11,7 +11,7 @@ from anthropic import AsyncAnthropic
 from categories import CATEGORIES, detect_category
 from tools.memory import get_all_memory, get_category_memory
 from tools.google_docs import fetch_docs_for_category, extract_doc_id
-from tools.log import get_drops, get_recent_drops, drop
+from tools.log import get_drops, get_recent_drops, drop, search_drops, total_drops
 from tools.db import as_num as _as_num
 from tools.payments import add_payment, summary as payment_summary
 from tools.daily import add_task, get_all_tasks_for_brief, get_tasks, get_completed_today, complete_task, get_task_by_id
@@ -324,7 +324,7 @@ def _query_brain_sync(query: str = "", domain: str | None = None) -> dict:
         try:
             from tools.baby_knowledge import get_entries as _bk_get
             bk_scored = []
-            for e in _bk_get(limit=100):
+            for e in _bk_get(limit=500, include_brain=False):  # vault already searched above
                 text = ((e.get("summary") or "") + " " + (e.get("raw_text") or "")).lower()
                 sc = sum(1 for w in q_words if w in text)
                 if sc:
@@ -464,6 +464,80 @@ def _log_cache(resp, where: str) -> None:
         pass
 
 
+def baby_knowledge_items(query: str = "", limit: int = 80) -> tuple[list[dict], int]:
+    """Baby knowledge for the 📚 view, newest first, as (items, dropped).
+    Both stores come through tools.baby_knowledge — see _brain_entries there."""
+    from tools.baby_knowledge import get_entries as _bk_all, search_entries as _bk_search
+    rows = _bk_search(query) if query else _bk_all(limit=1000)
+    items = [{"date": (e.get("created_at") or "")[:10], "text": e.get("summary") or "",
+              "store": e.get("_store", "baby_knowledge")} for e in rows]
+    dropped = max(0, len(items) - limit)
+    return items[:limit], dropped
+
+
+def wedding_facts_block() -> str:
+    """Every active wedding fact in the vault, dated — for the /wedding views.
+
+    Catch Up, Plan and the category briefs read only wedding_drops count
+    windows and the frozen wedding_memory decisions, so the vault — where the
+    day-of plan, DJ, food stations and the 36 facts backfilled from the April
+    archive live — was invisible to them (audit, 29 Sep 2026). 27 rows, ~4K
+    chars: small enough to pass whole, which beats any relevance cut.
+    """
+    try:
+        from tools.user_memory import get_active_entries
+        rows = get_active_entries("wedding", "fact")
+    except Exception:
+        __import__("logging").getLogger(__name__).exception("wedding_facts_block: read failed")
+        return ""
+    if not rows:
+        return ""
+    rows = sorted(rows, key=lambda r: r.get("fact_date") or "", reverse=True)
+    return ("CONFIRMED WEDDING FACTS (vault — newest first; these are authoritative "
+            "and override older drops on the same subject):\n"
+            + "\n".join(f"• ({r.get('fact_date') or '?'}) {r['fact']}" for r in rows))
+
+
+def _all_drops(cap: int = 1000) -> list[dict]:
+    """All wedding drops oldest→newest. A 100/150 window silently lost the oldest
+    30–80 of 180 — which is how a category reads as "untouched" when its
+    planning just happened early. Truncation beyond `cap` is logged."""
+    drops = get_recent_drops(limit=cap)
+    try:
+        total = total_drops()
+        if total > len(drops):
+            __import__("logging").getLogger(__name__).warning(
+                "_all_drops: %d of %d drops beyond cap=%d not read", total - len(drops), total, cap)
+    except Exception:
+        pass
+    return drops
+
+
+# The model talking to itself before the brief: "Nothing critical in threads or
+# the brain for today's brief. Writing now." shipped as the first line of a 9am
+# brief on 27 Sep 2026, although the OUTPUT CONTRACT below forbids exactly that.
+# A prompt line lost, so this is code. Only a SHORT LEADING paragraph that talks
+# about the lookup or the act of writing is removed — never the only paragraph.
+_PREAMBLE_RE = re.compile(
+    r"\b(writing (it |this |the brief |the wrap )?now|let me|i'?ll (now )?(write|draft|put)"
+    r"|i have (enough|what i need)|now i have|drafting|here'?s (the|your|today'?s) (morning |daily |evening )?(brief|wrap|update|summary|rundown)"
+    r"|(threads?|brain|vault|look-?ups?|search(es)?|recall) (came back|returned|turned up|show(s|ed)?|ha(s|ve) nothing)"
+    r"|(nothing|no\w*) (critical|relevant|new|flagged|urgent)? ?(came up |turned up )?in (the )?(threads?|brain|vault))",
+    re.I,
+)
+
+
+def strip_preamble(text: str) -> str:
+    paras = re.split(r"\n\s*\n", (text or "").strip())
+    dropped = []
+    while len(paras) > 1 and len(paras[0]) <= 220 and _PREAMBLE_RE.search(paras[0]):
+        dropped.append(paras.pop(0))
+    if dropped:
+        import logging as _pl
+        _pl.getLogger(__name__).warning("brief: stripped narration preamble %r", dropped)
+    return "\n\n".join(paras)
+
+
 async def _brief_with_brain(client, model: str, prompt: str, system: str | None = None,
                             max_tokens: int = 800, max_turns: int = 4) -> str:
     """Generate a brief with query_brain available — the generator pulls what it
@@ -488,8 +562,8 @@ OUTPUT CONTRACT — your final text IS the message they receive, verbatim:
         if turn_text:
             last_text = turn_text
         if resp.stop_reason != "tool_use":
-            return turn_text or last_text
-        messages.append({"role": "assistant", "content": resp.content})
+            return strip_preamble(turn_text or last_text)
+        messages.append({"role": "assistant", "content": content_to_dicts(resp.content)})
         results = []
         for b in resp.content:
             if b.type == "tool_use":
@@ -504,7 +578,7 @@ OUTPUT CONTRACT — your final text IS the message they receive, verbatim:
         if turn == max_turns - 2:
             results.append({"type": "text", "text": "Write the final brief now — no more lookups."})
         messages.append({"role": "user", "content": results})
-    return last_text
+    return strip_preamble(last_text)
 
 
 def _relevant_bullets(query: str, shared_brain: str, max_bullets: int = 18) -> str:
@@ -845,6 +919,18 @@ If this image has no financial content, return: {"skip": true}"""
                     lines.append(f"Still owing: SGD {fin['total_owing']:,.2f}")
                 parts.append("\n".join(lines))
 
+        # Categories mislead (the day-of plan is under ceremony, DJ timeline under
+        # venue), so a thin category also gets a content search by its name.
+        if len(drops) < 5:
+            try:
+                seen_ids = {d.get("id") for d in drops}
+                drops = drops + [d for d in search_drops(cat["name"], limit=10)
+                                 if d.get("id") not in seen_ids]
+            except Exception:
+                pass
+        _facts = wedding_facts_block()
+        if _facts:
+            parts.append(_facts)
         if drops:
             parts.append(self._drops_block(drops, "DROPS:"))
         if decisions:
@@ -892,7 +978,7 @@ One concrete thing to do next.
         return f"{header}\n\n{_fix_md(response.content[0].text)}"
 
     async def bring_me_up_to_speed(self) -> str:
-        all_drops = get_recent_drops(limit=100)
+        all_drops = _all_drops()
         all_decisions = get_all_memory()
 
         parts = []
@@ -903,8 +989,11 @@ One concrete thing to do next.
                 ts = d["ts"][:10]
                 icon = "📸" if d["kind"] == "image" else "💬"
                 cat_tag = f"[{d.get('category', 'general')}] "
-                lines.append(f"{icon} {ts} {cat_tag}{d['content']}")
+                lines.append(f"{icon} {ts} {cat_tag}{d['content'][:400]}")
             parts.append("ALL DROPS:\n" + "\n".join(lines))
+        _facts = wedding_facts_block()
+        if _facts:
+            parts.insert(0, _facts)
 
         locked = []
         for cat_key, data in all_decisions.items():
@@ -953,7 +1042,7 @@ The single most useful next action right now.
         return _fix_md(response.content[0].text)
 
     async def priority_brief(self, already_sent: str = "") -> str:
-        all_drops = get_recent_drops(limit=150)
+        all_drops = _all_drops()
         all_decisions = get_all_memory()
         fin = payment_summary()
 
@@ -1004,6 +1093,9 @@ The single most useful next action right now.
                 locked.append(f"[{cat_name}] {dec}")
         if locked:
             context_parts.append("CONFIRMED DECISIONS:\n" + "\n".join(locked))
+        _facts = wedding_facts_block()
+        if _facts:
+            context_parts.insert(0, _facts)
 
         if fin["payments"]:
             context_parts.append(
@@ -1432,6 +1524,8 @@ Use • for bullets. <b> tags for headers only. Emojis welcome. NEVER use **aste
         context = "\n\n".join(parts)
         person_list = " and ".join(names.values()) if names else "both of you"
         prompt = f"""{context}
+
+{date_block()}
 
 Write a morning brief for {person_list}. Be a smart friend, not a secretary — synthesise, don't dump.
 
@@ -3340,7 +3434,7 @@ class UnifiedAgent:
 
             # --- baby_knowledge ---
             if "baby_knowledge" in stores:
-                all_entries = _bk_get(limit=200)
+                all_entries = _bk_get(limit=200, include_brain=False)
                 wrong_words = [w for w in wrong.split() if len(w) > 3]
                 stale = []
                 for e in all_entries:
@@ -4258,7 +4352,7 @@ RULES: <b>bold</b> only (no **), bullets •, no URLs. NUMBERS ONLY IF THEY APPE
                 from tools.baby_knowledge import get_entries as _gb
                 _baby = _gb(limit=10)
                 entries = "\n".join(
-                    f"[{', '.join(e.get('tags') or [])}] {e['summary']}"
+                    f"({(e.get('created_at') or '?')[:10]}) [{', '.join(e.get('tags') or [])}] {e['summary']}"
                     for e in _baby
                 )
             except Exception:
@@ -4435,8 +4529,8 @@ Rules:
         # Recent FYIs
         fyi_lines = []
         try:
-            from tools.fyis import get_fyis as _get_fyis
-            for f in _get_fyis(limit=20):
+            from tools.fyis import recent_updates as _recent
+            for f in _recent(limit=25):
                 when = (f.get("created_at") or "")[:10]
                 cat = f.get("category") or "misc"
                 fyi_lines.append(f"  [{cat}] {when}: {f['content']}")
@@ -4522,7 +4616,7 @@ Rules:
             from tools.baby_knowledge import get_entries as _get_baby_proactive
             _baby_entries = _get_baby_proactive(limit=20)
             if _baby_entries:
-                baby_brain_lines = "\n".join(f"  [{','.join(e.get('tags') or [])}] {e['summary']}" for e in _baby_entries)
+                baby_brain_lines = "\n".join(f"  ({(e.get('created_at') or '?')[:10]}) [{','.join(e.get('tags') or [])}] {e['summary']}" for e in _baby_entries)
                 baby_block += f"\nBABY BRAIN:\n{baby_brain_lines}"
         except Exception:
             pass
@@ -4907,45 +5001,78 @@ Confirm what you filed and where in one line."""
 
     # Command methods — delegate to existing agents
     async def baby_knowledge_brief(self, query: str = "") -> str:
-        """Synthesise baby knowledge base — grouped by topic or answering a specific question."""
-        entries = search_baby_entries(query) if query else get_baby_entries(limit=50)
-        if not entries:
+        """Synthesise baby knowledge — grouped by topic or answering a question.
+
+        29 Sep 2026 (Ansen: "the baby knowledge is super obsolete"): this read
+        ONLY the baby_knowledge table, whose last write was 26 Aug — baby facts
+        since then land in brain_entries (domain 'baby'), so Instagram links,
+        products and the maternity shoot never appeared. And with no date in
+        the prompt it replayed a June row as "You are currently in Week 7" at
+        week 19, and listed August appointments as upcoming.
+
+        Now: both stores via baby_knowledge_items(), today + the computed week
+        up front, every stored date annotated relative to today.
+        """
+        from tools.baby import pregnancy_summary as _ps
+        items, dropped = await asyncio.to_thread(baby_knowledge_items, query)
+        if not items:
             msg = "No baby knowledge saved yet." if not query else f"Nothing saved matching <b>{_html_escape(query)}</b>."
             return f"📚 {msg}\n\n<i>Send any tip, advice, or screenshot — I'll save it automatically.</i>"
 
+        today = _local_today()
         knowledge_text = "\n\n".join(
-            f"[{i+1}] {e['summary']}" + (f"\nTags: {', '.join(e.get('tags') or [])}" if e.get('tags') else "")
-            for i, e in enumerate(entries)
+            f"[{i+1}] (saved {it['date'] or '?'}) {annotate_dates(it['text'], today)}"
+            for i, it in enumerate(items)
         )
-
+        ps = _ps()
+        now_block = (
+            f"{date_block()}\n\n"
+            f"NOW: Jess is {ps['week']}w{ps['day']}d (trimester {ps.get('trimester', '?')}), "
+            f"due {ps.get('due_date', '2027-02-20')}. This is computed today and is the ONLY "
+            "source for the current week — any 'week N' or 'currently' inside a saved entry "
+            "is what was true on the date it was saved, never now.\n\n"
+            "DATED ITEMS: an appointment, scan, deadline or visit whose date is before today "
+            "has HAPPENED — never present it as upcoming or as something to prepare for. Keep "
+            "only its lasting outcome (a decision, a result, a doctor chosen) or leave it out. "
+            "Newer saved entries override older ones on the same subject."
+        )
         if query:
-            prompt = f"""You are a pregnancy knowledge assistant. The couple has saved {len(entries)} pieces of knowledge.
+            prompt = f"""You are a pregnancy knowledge assistant. The couple has saved {len(items)} pieces of knowledge.
 
-SAVED KNOWLEDGE:
+{now_block}
+
+SAVED KNOWLEDGE (newest first):
 {knowledge_text}
 
 QUESTION: {query}
 
-Answer the question directly using what they've saved. Synthesise — don't just quote back the entries. If the saved knowledge doesn't fully answer the question, say so clearly.
-Write in a warm, practical tone. Use Telegram HTML: <b>headers</b>, bullet points with blank lines between each. Emoji headers encouraged."""
+Answer the question directly using what they've saved. Synthesise — don't just quote back the entries. Keep links (Instagram, product pages) when relevant. If the saved knowledge doesn't fully answer the question, say so clearly.
+Write in a warm, practical tone. Use Telegram HTML: <b>headers</b>, bullet points with blank lines between each. Emoji headers encouraged.
+{FORMAT_RULES}"""
         else:
-            prompt = f"""You are a pregnancy knowledge assistant. The couple has saved {len(entries)} pieces of knowledge across various topics.
+            prompt = f"""You are a pregnancy knowledge assistant. The couple has saved {len(items)} pieces of knowledge across various topics.
 
-SAVED KNOWLEDGE:
+{now_block}
+
+SAVED KNOWLEDGE (newest first):
 {knowledge_text}
 
-Synthesise this into a clear, organised summary. Group by topic (e.g. 🍎 Nutrition, 💊 Supplements, 🏥 Hospital & Birth, 😴 Sleep & Symptoms, 🤱 Feeding, 🧠 Mental Health, etc. — only include topics that have content).
+Open with one line: where they are now (week, trimester, days to due date) and the next genuinely upcoming dated item, if any.
 
-For each topic, write 2-4 sentences of coherent advice drawn from the entries — not a raw list of what was saved. Make it feel like a personal knowledge base they built together.
+Then synthesise into an organised summary grouped by topic (e.g. 🏥 Hospital & Birth, 🛒 Products & Gear, 📸 Photos & Inspiration, 💰 Finances & Insurance, 🍎 Nutrition, 😴 Symptoms — only topics that have content). 2-4 sentences each of coherent, CURRENT advice — not a raw list. Product names and links they saved are the point of a gear section: keep them.
 
-Format: Telegram HTML only. <b>headers</b>. Blank line between every bullet. Emoji section headers."""
+Format: Telegram HTML only. <b>headers</b>. Blank line between every bullet. Emoji section headers.
+{FORMAT_RULES}"""
 
         resp = await self.client.messages.create(
             model=SYNTHESIS_MODEL,
-            max_tokens=1500,
+            max_tokens=1800,
             messages=[{"role": "user", "content": prompt}],
         )
-        return resp.content[0].text.strip()
+        out = strip_preamble(resp.content[0].text.strip())
+        if dropped:
+            out += f"\n\n<i>{dropped} older entries not shown — ask about a topic to search all of them.</i>"
+        return out
 
     async def baby_brief(self, already_sent: str = "") -> str:
         """Weekly pregnancy update — current week, what's developing, upcoming milestones."""
@@ -5084,13 +5211,18 @@ Rules:
         if baby_hits:
             baby_section = "\n\nBaby knowledge base:\n" + "\n".join(f"• {e['summary']}" for e in baby_hits[:10])
 
-        fyis = _get_fyis(limit=30) or []
+        from tools.fyis import recent_updates as _recent
+        fyis = _recent(limit=60, days=60) or []
         fyi_hits = [f for f in fyis if any(w in (f.get("content") or "").lower() for w in query.lower().split() if len(w) > 3)]
         fyi_section = ""
         if fyi_hits:
-            fyi_section = "\n\nRecent FYIs:\n" + "\n".join(f"• {f['content'][:120]}" for f in fyi_hits[:5])
+            fyi_section = "\n\nRecent updates:\n" + "\n".join(f"• ({(f.get('created_at') or '')[:10]}) {f['content'][:160]}" for f in fyi_hits[:8])
 
         prompt = f"""Search query: "{query}"
+
+{date_block()}
+
+Dates in what follows are when things were saved or happened; anything dated before today is past — say so rather than presenting it as upcoming.
 
 Shared brain (confirmed facts about us):
 {relevant_shared or "Nothing in shared brain yet."}
@@ -5127,6 +5259,10 @@ Format in Telegram HTML. Short and specific — don't pad."""
 
             rendered = "\n".join(f"• {e['fact_date']}: {e['fact']}" for e in entries)
             prompt = f"""Compress this {domain} section of a shared fact brain for a couple (Ansen and Jess).
+
+{date_block()}
+
+"Past" and "future" below are judged against TODAY in that table — never against the dates of the other entries. A dated item on or after today is future.
 
 {rendered}
 
@@ -5197,7 +5333,8 @@ Rules:
         # FYIs mentioning this destination or travel
         fyi_lines = []
         try:
-            for f in _get_fyis(limit=25):
+            from tools.fyis import recent_updates as _recent
+            for f in _recent(limit=80, days=120):
                 content = f.get("content", "")
                 if dest.lower() in content.lower() or "travel" in (f.get("category") or "").lower():
                     fyi_lines.append(f"  [{(f.get('created_at') or '')[:10]}] {content}")
@@ -5277,6 +5414,9 @@ Rules:
         need_visa_search = any("visa" in g.lower() for g in _open_gaps)
 
         system = f"""You are a proactive travel intelligence agent for Ansen and Jess.
+
+{date_block()}
+
 
 TRIP: {dest}
 DATES: {start} → {end}
@@ -5383,19 +5523,28 @@ RULES:
         from tools.user_memory import get_active_entries
         info = pregnancy_summary()
         try:
+            # Last 14 days only, dated — a count window let a month-old symptom
+            # read as "recent" whenever she hadn't logged much since.
+            _cut = (_local_today() - timedelta(days=14)).isoformat()
             recent = [e for e in await asyncio.to_thread(get_active_entries, "baby", "episode")
-                      if e.get("source") == "symptom"][-8:]
+                      if e.get("source") == "symptom" and (e.get("fact_date") or "") >= _cut][-8:]
         except Exception:
             recent = []
-        recent_block = "\n".join(f"- {e['fact']}" for e in recent) or "None logged yet."
+        recent_block = "\n".join(f"- ({e.get('fact_date') or '?'}) {e['fact']}" for e in recent) or "None logged in the last 14 days."
         try:
             from tools.baby_knowledge import get_entries as _bk
-            knowledge = "\n".join(f"- {e['summary']}" for e in _bk(limit=12)) or "None."
+            knowledge = "\n".join(f"- (saved {(e.get('created_at') or '?')[:10]}) {e['summary']}"
+                                  for e in _bk(limit=12)
+                                  if not (e.get("summary") or "").lower().startswith("symptom (")) or "None."
         except Exception:
             knowledge = "None."
 
         _tri = {1: "first", 2: "second", 3: "third"}.get(info["trimester"], "first")
         prompt = f"""Write Jess's daily pregnancy check-in. She is {info['week']} weeks (day {info['day']}), {_tri} trimester, due {info['due_date']} ({info['days_until_due']} days). Address HER directly as "you" — warm, like a friend who's been through it, never clinical or alarming.
+
+{date_block()}
+
+Her week above is computed today and is the only current one — a "week N" inside saved knowledge is from the date it was saved.
 
 WHAT WE KNOW (recent symptoms she's logged, and saved knowledge):
 Recent symptoms:
@@ -5494,14 +5643,15 @@ Never alarmist. You're a friend who knows, not a doctor. No numbered lists — j
             except Exception:
                 pass
         baby_knowledge_text = "\n".join(
-            f"  [{', '.join(e.get('tags') or [])}] {e['summary']}" for e in baby_entries
+            f"  ({(e.get('created_at') or '?')[:10]}) [{', '.join(e.get('tags') or [])}] {e['summary']}" for e in baby_entries
         ) if baby_entries else "  none"
 
         # Recent health/baby FYIs
         fyi_lines = []
         try:
             health_kw = {"doctor", "scan", "blood", "results", "appointment", "test", "hospital", "clinic"}
-            for f in _get_fyis(limit=20):
+            from tools.fyis import recent_updates as _recent
+            for f in _recent(limit=40, days=45):
                 cat = f.get("category") or ""
                 content = (f.get("content") or "").lower()
                 if cat in ("health", "baby") or any(kw in content for kw in health_kw):
@@ -5538,6 +5688,10 @@ Never alarmist. You're a friend who knows, not a doctor. No numbered lists — j
         )
 
         prompt = f"""You are a practical medical prep assistant for Ansen and Jess (first-time parents, {baby_block}).
+
+{date_block()}
+
+Knowledge and updates below are dated; anything before today is history, not a plan.
 
 TOMORROW'S APPOINTMENT(S):
 {event_summaries}
@@ -6228,7 +6382,14 @@ Be strict. When in doubt, reject."""
                 "Nothing saved yet. Drop notes, FYIs, and decisions and I'll build this up over time."
             )
 
+        from tools.baby import pregnancy_summary as _ps_fn
+        _ps_now = _ps_fn()
+        _wd_days = (date(2026, 11, 7) - _local_today()).days
         prompt = f"""You are building a shared knowledge base for Ansen and Jess — a couple planning a wedding and expecting their first baby.
+
+{date_block()}
+
+NOW: Jess is {_ps_now['week']}w{_ps_now['day']}d pregnant; the wedding is {_wd_days} days away (Sat 7 Nov 2026). Any "week N", "N months out" or "currently" in a saved memory is what was true on its date — the story states where things stand NOW using these numbers, and treats dated items before today as done.
 
 PERMANENT MEMORIES:
 {shared or "Nothing yet."}
@@ -6251,7 +6412,7 @@ STRUCTURE:
 - 💰 Money may close with 2-3 snapshot bullets after its prose.
 
 NON-NEGOTIABLE — EXACT FACTS SURVIVE THE STORY:
-Every concrete fact must appear VERBATIM in the prose: dates, dollar amounts, names, counts, statuses, week numbers. Write "wedding bands came to SGD 2,800", never "a few thousand on bands". Never round, drop, or vague-ify a number or date. If a detail won't flow naturally, tuck it in parentheses rather than lose it. It must be possible to reconstruct every key fact from the story alone.
+Every concrete fact must appear VERBATIM in the prose: dates, dollar amounts, names, counts, statuses (but the CURRENT pregnancy week and wedding countdown come from NOW above, never from a saved memory). Write "wedding bands came to SGD 2,800", never "a few thousand on bands". Never round, drop, or vague-ify a number or date. If a detail won't flow naturally, tuck it in parentheses rather than lose it. It must be possible to reconstruct every key fact from the story alone.
 
 Do not invent details, feelings, or filler. If the data is thin in a theme, keep that section short rather than padding it.
 
@@ -6385,9 +6546,15 @@ Format: Telegram HTML only. <b>bold</b> for headers and key facts. Blank line be
             cutoff = (_local_today() - _td(days=7)).isoformat()
             fyis = [f for f in _get_fyis_unacked(user_id, limit=20)
                     if (f.get("created_at") or "")[:10] >= cutoff]
+            # Episodes replaced FYIs; without them this block was permanently
+            # empty and the brief only saw recent events if it thought to ask.
+            from tools.user_memory import get_episodes as _eps_mb
+            fyis += [{"category": e.get("domain") or "life", "content": e.get("fact") or "",
+                      "created_at": e.get("fact_date") or ""} for e in _eps_mb(3)]
+            fyis.sort(key=lambda f: (f.get("created_at") or "")[:10], reverse=True)
             if fyis:
-                fyi_lines = "\n".join(f"  [{f.get('category','misc')}] {f['content']}" for f in fyis[:8])
-                parts.append("UNREAD FYIs (last 7 days only):\n" + fyi_lines)
+                fyi_lines = "\n".join(f"  [{f.get('category','misc')}] ({(f.get('created_at') or '')[:10]}) {f['content']}" for f in fyis[:10])
+                parts.append("RECENT UPDATES (FYIs unread + episodes, last few days):\n" + fyi_lines)
         except Exception:
             pass
 

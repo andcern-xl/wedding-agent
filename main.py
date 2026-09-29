@@ -1736,9 +1736,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "fyis_facts":
         # Raw FYI list — the exact notes behind the story
         try:
-            fyis = get_fyis(limit=30)
+            from tools.fyis import recent_updates
+            fyis = recent_updates(limit=40)
             if not fyis:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text="No FYIs in the last 30 days.")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="Nothing logged in the last 30 days.")
             else:
                 sections = _split_sections(_format_fyis(fyis))
                 for section in sections:
@@ -2085,10 +2086,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         trip_id = data[12:]
         try:
-            from tools.trips import get_trip_by_id
-            t = get_trip_by_id(trip_id)
+            from tools.trips import get_trip_by_id, canonical_trip
+            # An old button can point at a row since merged away — show the
+            # live trip it became, and say plainly when it was cancelled.
+            t = canonical_trip(get_trip_by_id(trip_id))
             if not t:
                 await context.bot.send_message(chat_id=query.message.chat_id, text="Trip not found.")
+                return
+            trip_id = str(t["id"])
+            if t.get("status") == "cancelled":
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"✈️ <b>{escape(t.get('destination') or 'Trip')}</b> was cancelled.",
+                    parse_mode="HTML")
                 return
             await context.bot.send_message(chat_id=query.message.chat_id, text="⏳ Building trip card…", parse_mode="HTML")
             text = await agent.trip_card(t)

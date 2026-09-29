@@ -152,3 +152,31 @@ def keep_fyi(fyi_id: str) -> bool:
         return bool(result.data)
     except Exception:
         return False
+
+
+def recent_updates(limit: int = 30, days: int = 30) -> list[dict]:
+    """Read-only: what happened recently, from BOTH places it has lived.
+
+    Brain episodes (brain_entries kind='episode') replaced FYIs, and log_fyi has
+    no callers — so a reader of get_fyis() alone sees a table that stopped
+    growing. The 29 Sep 2026 audit found six: the proactive check, /search, trip
+    milestones ("accommodation — nothing confirmed in FYIs" while an episode
+    said it was booked), the appointment pre-brief, the morning brief's UNREAD
+    block, and the 🧾 exact-facts button ("No FYIs in the last 30 days").
+
+    Returns FYI-shaped dicts (content, category, created_at) newest first;
+    episodes carry `_store='episode'`. NOT for ack/keep/archive — those need a
+    real fyis row, so use get_fyis() there.
+    """
+    rows = [dict(f, _store="fyi") for f in get_fyis(limit=limit)]
+    try:
+        from tools.user_memory import get_episodes
+        for e in get_episodes(days):
+            rows.append({"id": e.get("id"), "content": e.get("fact") or "",
+                         "category": e.get("domain") or "life",
+                         "created_at": e.get("fact_date") or "", "_store": "episode"})
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("recent_updates: episode read failed")
+    rows.sort(key=lambda r: (r.get("created_at") or "")[:10], reverse=True)
+    return rows[:limit]
