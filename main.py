@@ -116,6 +116,11 @@ APPOINTMENT_KEYWORDS = {
 TRIP_MILESTONES = {56, 28, 14, 7, 2}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# httpx logs every request URL at INFO, and Telegram's URLs carry the bot token
+# (api.telegram.org/bot<TOKEN>/getUpdates) — so Railway's logs held the token
+# in full, every 10 seconds. Anyone with log access could take over the bot.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 ALLOWED_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()]
