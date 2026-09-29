@@ -68,6 +68,7 @@ LOOP_SILENT_DAYS = {
     "babybumps_nuggets": 5,
     "knowledge_sweep_drops": 14,
     "calendar_snapshot": 3,
+    "drive_sync": 3,             # daily 8:40am; only checked once a folder is included
     "conversation_sweep": 3,     # daily; capped window, so a gap loses facts      # written every reconciliation; stale = sweep broken
 }
 
@@ -414,7 +415,14 @@ def check_freshness() -> Result:
     for row in loops:
         by_name[row.get("loop_name") or ""].append(row)
 
+    try:
+        from tools.gdrive import included_folders as _drive_folders
+        _drive_on = bool(_drive_folders())
+    except Exception:
+        _drive_on = False
     for name, limit_days in LOOP_SILENT_DAYS.items():
+        if name == "drive_sync" and not _drive_on:
+            continue
         rows = by_name.get(name) or []
         if not rows:
             # No row has ever been written. Either it is newly added, or every

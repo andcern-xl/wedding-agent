@@ -11,6 +11,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
+    # Drive read-only, for the master-docs sync. The scope covers the whole
+    # Drive; tools/gdrive.py confines every call to the included folders.
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 
 client_id = os.environ["GOOGLE_CLIENT_ID"]
@@ -27,7 +30,8 @@ client_config = {
 }
 
 flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-creds = flow.run_local_server(port=0)
+# prompt=consent forces Google to issue a NEW refresh token carrying the added scope
+creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
 
 print("\n✅ New refresh token:")
 print(creds.refresh_token)

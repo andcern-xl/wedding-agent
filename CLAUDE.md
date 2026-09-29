@@ -528,6 +528,39 @@ same shape a dozen times. Fixed at chokepoints, not call sites:
 losing `date_block()`; `test_baby_knowledge.py` and `test_brief_and_trips.py`
 lock the rest.
 
+## Google Drive — master docs, inclusion list, untrusted by default
+
+Ansen, 29 Sep 2026: the wedding master information lives in Drive
+(folder `Wedding_JxA_07 Nov 2026`). `tools/gdrive.py` + `UnifiedAgent.drive_sync`
+(daily 8:40am, before the calendar sync and brief) + `read_drive` tool + `/drive`.
+
+- **Inclusion list, enforced in code.** drive.readonly covers the whole Drive,
+  so `_call` refuses any files.list not scoped to a folder reached from an
+  included root; pasted links are checked by walking parents. Roots:
+  `DRIVE_FOLDER_IDS` env + `/drive add` (loop_state `drive_folders`).
+- **Ownership (`may_give`).** The bot reads through Ansen's Google account
+  (ansengoh@gmail.com). Only an item's owner may hand it over: Ansen — his own
+  or a third party's, never Jess's; Jess — only hers (`GOOGLE_EMAIL_JESS`,
+  fail-closed until set). Shared Drive items have no owner → either may. The
+  other person is messaged whenever a folder is added/removed (tripwire).
+- **Documents are data.** Text is fenced with a nonce (`wrap_untrusted`); after
+  a `read_drive` in a turn, only `_READ_ONLY_TOOLS` run (no messaging,
+  reminders, calendar, memory writes, or search_web — a query can exfiltrate);
+  fenced text is scrubbed from persisted history (`scrub_untrusted`). The sync
+  screens facts deterministically (`looks_like_instruction` → 🚩 report),
+  drops any fact whose 4+-digit numbers aren't literally in the doc
+  (`ungrounded_numbers`), caps 40 facts/doc/run, and tags `source=drive:<id>`
+  so 🗑 Forget / ↩️ Undo pulls a whole doc out.
+- **Guest lists become counts, never per-guest facts** — the first trial wrote
+  a guest's medication allergies and table seat into the vault. Seating and
+  RSVPs are read live. Brochure options they didn't book are rejected.
+- Scanned PDFs (the signed FYSH agreement) have no text layer — reported as
+  "no readable text", judged by distinct words (`has_readable_text`), not length.
+- Drive uses its own Credentials with only the Drive scope; adding it to
+  gcal/gmail SCOPES would break their refresh with invalid_scope.
+
+`test_drive_scope.py` (50+ checks) locks scope, ownership, injection, taint and grounding.
+
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)
 - Individual brain architecture: how Ansen's personal context interacts with shared brain

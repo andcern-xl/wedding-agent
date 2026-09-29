@@ -100,6 +100,7 @@ JESS_CHECKIN_TIME  = dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE)  # 10am 
 APPOINTMENT_TIME   = dtime(hour=21, minute=0, tzinfo=REMINDER_TIMEZONE)  # 9pm — appointment pre-brief for tomorrow
 CAL_SYNC_TIME      = dtime(hour=8, minute=50, tzinfo=REMINDER_TIMEZONE)  # 8:50am — calendar reconciliation before morning brief
 SELF_AUDIT_TIME    = dtime(hour=8, minute=20, tzinfo=REMINDER_TIMEZONE)  # 8:20am Mon — memory self-audit, before any brief is built on it
+DRIVE_SYNC_TIME    = dtime(hour=8, minute=40, tzinfo=REMINDER_TIMEZONE)  # 8:40am — learn from the Drive master docs before the brief
 CONVO_SWEEP_TIME   = dtime(hour=23, minute=30, tzinfo=REMINDER_TIMEZONE)  # 11:30pm — sweep the day's conversations before the window rolls
 
 # Medical/appointment keywords for event title detection
@@ -435,6 +436,7 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/bringmeuptospeed — full wedding overview",
         "/plan /tasks /reminders /shared",
         "🔔 /notifications — timed reminders, with a ❌ on each to switch it off",
+        "📁 /drive — the Google Drive folders I learn from (/drive add <folder link>)",
         "🌰 /nuggets — nightly reading, on/off per person",
     ]
     for key, cat in CATEGORIES.items():
@@ -2082,6 +2084,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"Couldn't remove: {str(e)[:100]}")
 
+    elif data == "drive_sync":
+        await query.answer("Syncing…")
+        await _drive_sync_and_report(context, query.message.chat_id, force=False)
+
+    elif data.startswith("drive_rm:"):
+        from tools import gdrive
+        ok, what = await asyncio.to_thread(gdrive.remove_folder, data[9:], user_id)
+        await query.answer("Removed" if ok else what[:190], show_alert=not ok)
+        if ok:
+            await query.edit_message_text(**(await _drive_view()))
+            await _drive_tell_partner(context, user_id, f"📁 {_NOTIF_USER_NAMES.get(user_id, 'Someone')} stopped me "
+                                                        f"reading the Drive folder <b>{escape(what)}</b>.")
+
+    elif data.startswith("drive_forget:"):
+        from tools import gdrive
+        fid = data[13:]
+        n = await asyncio.to_thread(gdrive.forget_doc, fid)
+        await query.answer(f"Forgot {n} facts")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"🗑 Retired {n} facts learned from that doc. Nothing deleted.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Undo", callback_data=f"drive_unforget:{fid}")]]))
+
+    elif data.startswith("drive_unforget:"):
+        from tools import gdrive
+        n = await asyncio.to_thread(gdrive.undo_forget, data[15:])
+        await query.answer(f"Restored {n}")
+        await query.edit_message_text(f"↩️ Restored {n} facts.")
+
     elif data.startswith("trip_expand:"):
         await query.answer()
         trip_id = data[12:]
@@ -2541,6 +2572,144 @@ async def cmd_settled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "\n".join(lines), parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons[:8]))
+
+
+async def cmd_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The Drive inclusion list and what the daily sync learned from it.
+
+    /drive                  — included folders, synced docs, 🔄 Sync now
+    /drive add <folder link> — include a folder (and everything under it)
+    Nothing outside an included folder is ever listed or opened."""
+    if not allowed(update):
+        return
+    from tools import gdrive
+    args = context.args or []
+    if args and args[0].lower() == "add":
+        if len(args) < 2:
+            await update.effective_message.reply_text("Send: /drive add <Google Drive folder link>")
+            return
+        uid = update.effective_user.id
+        res = await asyncio.to_thread(gdrive.add_folder, args[1], uid)
+        if not res.get("ok"):
+            await update.effective_message.reply_text(f"⚠️ {res.get('error')}")
+            return
+        await update.effective_message.reply_text(
+            f"📁 Included <b>{escape(res.get('name') or '')}</b> — shared with you both. Syncing it now…",
+            parse_mode="HTML")
+        await _drive_tell_partner(context, uid, f"📁 {_NOTIF_USER_NAMES.get(uid, 'Someone')} added the Drive folder "
+                                                f"<b>{escape(res.get('name') or '')}</b> to what I read.")
+        await _drive_sync_and_report(context, update.effective_chat.id)
+        return
+    await update.effective_message.reply_text(**(await _drive_view()))
+
+
+async def _drive_view() -> dict:
+    import json as _json
+    from tools import gdrive
+    from tools.loop_state import load_state, COUPLE
+    folders = gdrive.included_folders()
+    if not folders:
+        return {"text": "📁 <b>Drive</b>\n\nNo folders included yet.\n"
+                        "Send <code>/drive add &lt;folder link&gt;</code> — I'll only ever read inside it.",
+                "parse_mode": "HTML"}
+    st = load_state("drive_sync", COUPLE) or {}
+    try:
+        synced = _json.loads(st.get("last_output") or "{}")
+    except Exception:
+        synced = {}
+    names = {}
+    try:
+        _, info = await asyncio.to_thread(gdrive.list_files)
+        names = info.get("folders", {})
+    except Exception as e:
+        names = {}
+        err = str(e)[:120]
+    else:
+        err = ""
+    lines = ["📁 <b>Drive — what I read</b>", ""]
+    for rec in gdrive.folder_records():
+        who = _NOTIF_USER_NAMES.get(rec.get("added_by"), "config")
+        lines.append(f"• 📂 {escape(names.get(rec['id']) or rec.get('name') or rec['id'])} — added by {who}")
+    lines += ["", "<i>Shared with you both. I only read inside these, only what its owner gave me, "
+                  "and I treat what's in a doc as information — never as instructions.</i>"]
+    if err:
+        lines += ["", f"⚠️ Can't reach Drive: {escape(err)}"]
+    lines += ["", f"<b>Synced docs</b> ({len(synced)}) — last run {st.get('last_run_date') or 'never'}"]
+    for v in sorted(synced.values(), key=lambda x: x.get("synced") or "", reverse=True)[:15]:
+        lines.append(f"• {escape((v.get('name') or '')[:50])} — {v.get('facts', 0)} facts, {v.get('synced')}")
+    if len(synced) > 15:
+        lines.append(f"<i>…and {len(synced) - 15} more</i>")
+    buttons = [[InlineKeyboardButton("🔄 Sync now", callback_data="drive_sync")]]
+    for fid in folders:
+        buttons.append([InlineKeyboardButton(f"➖ Stop reading {(names.get(fid) or fid)[:28]}",
+                                             callback_data=f"drive_rm:{fid}")])
+    return {"text": "\n".join(lines), "parse_mode": "HTML", "reply_markup": InlineKeyboardMarkup(buttons)}
+
+
+async def _drive_sync_and_report(context, chat_id: int, force: bool = False, quiet: bool = False):
+    try:
+        result = await agent.drive_sync(force=force)
+    except Exception as e:
+        logger.exception("drive_sync failed")
+        await _send_or_alert(context, ANSEN_ID, f"⚠️ <b>Drive sync</b> crashed — {escape(_err_detail(e))}", "drive_sync")
+        return
+    if result.get("error"):
+        if result["error"] != "no folders included" or not quiet:
+            await _send_or_alert(context, chat_id if not quiet else ANSEN_ID,
+                                 f"⚠️ <b>Drive sync</b> — {escape(result['error'])}. Nothing was written.",
+                                 "drive_sync")
+        return
+    learned = [r for r in result.get("files", []) if r.get("facts")]
+    failed = [r for r in result.get("files", []) if r.get("error")]
+    flagged = [r for r in result.get("files", []) if r.get("suspicious")]
+    if quiet and not learned and not failed and not flagged:
+        return
+    lines = ["📁 <b>Learned from Drive</b>" if learned else "📁 <b>Drive sync</b>", ""]
+    buttons = []
+    for r in learned:
+        lines.append(f"📄 <b>{escape(r['name'] or '')}</b> — {r['facts']} facts")
+        for facts in (r.get("approved") or {}).values():
+            lines += [f"  • {escape(f_[:150])}" for f_ in facts[:4]]
+        if r.get("capped"):
+            lines.append(f"  <i>{r['capped']} more facts over the per-doc cap were not written.</i>")
+        if r.get("id"):
+            buttons.append([InlineKeyboardButton(f"🗑 Forget {(r['name'] or '')[:30]}",
+                                                 callback_data=f"drive_forget:{r['id']}")])
+    for r in flagged:
+        # Surfaced, never silently dropped: text in a doc addressed to an AI
+        # is either an injection attempt or a sign the doc was tampered with.
+        lines.append(f"🚩 <b>{escape(r['name'] or '')}</b> contains text aimed at an AI — I ignored it:")
+        lines += [f"  <code>{escape(x[:160])}</code>" for x in r["suspicious"][:3]]
+    if not learned:
+        lines.append(f"Checked {result.get('listed', 0)} files — nothing new since the last sync.")
+    for r in failed:
+        lines.append(f"⚠️ {escape(r.get('name') or '')}: {escape(r['error'])} — will retry next run")
+    if result.get("pending"):
+        lines.append(f"<i>{result['pending']} more changed docs queued for the next run.</i>")
+    if result.get("truncated"):
+        lines.append(f"<i>{result['truncated']} files beyond the 500-file limit weren't read.</i>")
+    await _send_or_alert(context, chat_id, "\n".join(lines), "drive_sync",
+                         reply_markup=InlineKeyboardMarkup(buttons[:6]) if buttons else None)
+
+
+async def _drive_tell_partner(context, actor_id: int, text: str):
+    """Tripwire: a change to what the bot reads is always visible to the other
+    person — if one account is compromised, the other finds out."""
+    for uid in ALLOWED_IDS:
+        if uid != actor_id:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+            except Exception:
+                logger.exception("drive: partner notice failed")
+
+
+async def send_drive_sync(context: ContextTypes.DEFAULT_TYPE):
+    """Daily 8:40am — before the calendar reconciliation and the 9am brief, so
+    the brief is built on this morning's docs. Messages Ansen only when it
+    learned something or failed."""
+    if not ALLOWED_IDS:
+        return
+    await _drive_sync_and_report(context, ANSEN_ID, quiet=True)
 
 
 async def send_evening_nuggets(context: ContextTypes.DEFAULT_TYPE):
@@ -3417,6 +3586,7 @@ def main():
     app.add_handler(CommandHandler("compress", cmd_compress))
     app.add_handler(CommandHandler("nuggets", cmd_nuggets))
     app.add_handler(CommandHandler("settled", cmd_settled))
+    app.add_handler(CommandHandler("drive", cmd_drive))
 
     for key in CATEGORIES:
         app.add_handler(CommandHandler(key, cmd_category_status))
@@ -3460,6 +3630,9 @@ def main():
         # Conversations are swept DAILY — conversation_history is a capped
         # window, so a weekly pass would lose whatever rolled off in between.
         app.job_queue.run_daily(send_conversation_sweep, time=CONVO_SWEEP_TIME)
+
+        # Drive master docs — 8:40am, ahead of the calendar sync and 9am brief
+        app.job_queue.run_daily(send_drive_sync, time=DRIVE_SYNC_TIME)
 
         # Memory invariants, Monday 8:20am — before the 9am brief reads the vault
         app.job_queue.run_daily(send_self_audit, time=SELF_AUDIT_TIME, days=(0,))

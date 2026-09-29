@@ -12,3 +12,7 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 openai
 python-dateutil
+
+# Google Drive sync — PDF + spreadsheet text
+pypdf==5.1.0
+openpyxl==3.1.5
