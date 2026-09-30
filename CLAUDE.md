@@ -22,7 +22,7 @@ Deployed on Railway (auto-deploys on push to `main`).
 - `tools/notifications.py` — scheduled notifications (search, bulk cancel, series stop, duplicate guard)
 
 ## Database (Supabase)
-Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`, `threads`, `trade_signals`
+Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`, `threads`, `trade_signals`, `registry_events`
 
 ## Episodic vs semantic memory (replaces FYIs)
 `brain_entries.kind` (`supabase_brain_kind.sql`): `fact` = timeless knowledge ("Jess likes kaya waffles from Rice Bakehouse"), `episode` = dated life event ("paid condo fee $837, 2 Jul") logged via `log_episode` (partner still pushed instantly at capture). Episodes sit dormant as context, surface via RECALL discipline (all briefs + chat query the brain for every person/occasion in scope — the "it's Jess's birthday, she likes X" behavior), and consolidate Sundays: 45-day-old episodes → pattern facts or fade (`consolidate_episodes`). `log_fyi` aliases to `log_episode`; `read_fyis` reads episodes + draining legacy FYIs. One-off migration: `migrate_fyis.py` (dry-run default).
@@ -585,8 +585,16 @@ Growth Research POSTs signals to `webhook.py` (aiohttp, same process as the bot,
 started in post_init): `POST /webhooks/signals` with `Authorization: Bearer
 $SIGNALS_WEBHOOK_SECRET`, `GET /health`. No secret set = no listener. Signals
 land in `trade_signals` (`supabase_trade_signals.sql`); same signal id from the
-same source is ignored for 24h; 60 requests/hour per IP. The brief reads the
+same source is ignored for 24h (reference for both inbound routes: docs/webhooks.md); 60 requests/hour per IP. The brief reads the
 last 36h. A new long/short signal at strength >= `SIGNALS_ALERT_MIN` (default
 0.9) pings Ansen at once (`_alert_strong_signals`, fire-and-forget so the
 sender never waits on Telegram); switch is loop_state `feed_enabled:signal_alerts`,
 button under each alert and on /stocks.
+
+## Baby registry webhook (Oct 2026)
+
+`POST /webhooks/registry` (baby-registry bot) sits beside the signals route in
+`webhook.py`, with its own secret (`REGISTRY_WEBHOOK_SECRET`), table
+(`registry_events`, `supabase_registry_events.sql`), validator and rate-limit
+bucket (`tools/registry.py`). Events are stored only; nothing reads them yet.
+`test_webhooks.py` proves the two secrets never open each other's route.
