@@ -1,10 +1,12 @@
-"""Inbound HTTP for the bot: the Growth Research agent POSTs trade + X signals.
+"""Inbound HTTP for the bot: other agents POST into it.
 
 Runs inside the bot's own event loop (started from post_init in main.py) — the
-bot stays a single Railway service. It only starts when SIGNALS_WEBHOOK_SECRET
-is set, so a missing secret means no endpoint at all, never an open one.
+bot stays a single Railway service. It only starts when at least one secret is
+set. Each route checks its own secret, so a route whose secret is unset
+answers 401 to everyone, never open. Full reference: docs/webhooks.md.
 
-  POST /webhooks/signals   Authorization: Bearer <SIGNALS_WEBHOOK_SECRET>
+  POST /webhooks/signals    Authorization: Bearer <SIGNALS_WEBHOOK_SECRET>   Growth Research
+  POST /webhooks/registry   Authorization: Bearer <REGISTRY_WEBHOOK_SECRET>  baby-registry bot
   GET  /health
 """
 import asyncio
@@ -16,6 +18,7 @@ from collections import defaultdict, deque
 
 from aiohttp import web
 
+from tools import registry
 from tools.signals import validate, save_batch
 
 logger = logging.getLogger("webhook")
@@ -25,7 +28,9 @@ RATE_LIMIT = 60          # requests per hour, per client IP
 RATE_WINDOW = 3600
 MAX_BODY = 512 * 1024
 
-_hits: dict[str, deque] = defaultdict(deque)
+SECRET_ENVS = ("SIGNALS_WEBHOOK_SECRET", "REGISTRY_WEBHOOK_SECRET")
+
+_hits: dict[str, deque] = defaultdict(deque)   # keyed by (route, ip)
 
 
 def _client_ip(request: web.Request) -> str:
@@ -34,9 +39,9 @@ def _client_ip(request: web.Request) -> str:
     return fwd.split(",")[0].strip() or (request.remote or "?")
 
 
-def _rate_limited(ip: str) -> bool:
+def _rate_limited(key) -> bool:
     now = time.monotonic()
-    q = _hits[ip]
+    q = _hits[key]
     while q and now - q[0] > RATE_WINDOW:
         q.popleft()
     if len(q) >= RATE_LIMIT:
@@ -45,8 +50,8 @@ def _rate_limited(ip: str) -> bool:
     return False
 
 
-def _authorized(request: web.Request) -> bool:
-    secret = os.environ.get("SIGNALS_WEBHOOK_SECRET", "")
+def _authorized(request: web.Request, env_name: str) -> bool:
+    secret = os.environ.get(env_name, "")
     header = request.headers.get("Authorization", "")
     if not secret or not header.startswith("Bearer "):
         return False
@@ -58,9 +63,9 @@ def _err(status: int, message: str) -> web.Response:
 
 
 async def post_signals(request: web.Request) -> web.Response:
-    if _rate_limited(_client_ip(request)):
+    if _rate_limited(("signals", _client_ip(request))):
         return _err(429, "rate limit: 60 requests per hour")
-    if not _authorized(request):
+    if not _authorized(request, "SIGNALS_WEBHOOK_SECRET"):
         return _err(401, "missing or invalid bearer token")
     try:
         payload = await request.json()
@@ -86,6 +91,27 @@ async def post_signals(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "accepted": len(stored)})
 
 
+async def post_registry(request: web.Request) -> web.Response:
+    if _rate_limited(("registry", _client_ip(request))):
+        return _err(429, "rate limit: 60 requests per hour")
+    if not _authorized(request, "REGISTRY_WEBHOOK_SECRET"):
+        return _err(401, "missing or invalid bearer token")
+    try:
+        payload = await request.json()
+    except Exception:
+        return _err(400, "body must be valid JSON")
+    batch, error = registry.validate(payload)
+    if error:
+        return _err(400, error)
+    try:
+        stored = await asyncio.to_thread(registry.save_batch, batch)
+    except Exception:
+        logger.exception("registry: save failed")
+        return _err(500, "could not store events")
+    logger.info(f"registry: {batch['source']} sent {len(batch['events'])}, accepted {len(stored)}")
+    return web.json_response({"ok": True, "accepted": len(stored)})
+
+
 async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -95,14 +121,15 @@ def build_app(on_strong=None) -> web.Application:
     app["on_strong"] = on_strong
     app["alert_tasks"] = set()   # keep refs so pending alerts aren't GC'd
     app.router.add_post("/webhooks/signals", post_signals)
+    app.router.add_post("/webhooks/registry", post_registry)
     app.router.add_get("/health", health)
     return app
 
 
 async def start(on_strong=None) -> web.AppRunner | None:
     """on_strong: async callable(list of stored signal rows) for instant alerts."""
-    if not os.environ.get("SIGNALS_WEBHOOK_SECRET"):
-        logger.info("webhook: SIGNALS_WEBHOOK_SECRET not set — not listening")
+    if not any(os.environ.get(n) for n in SECRET_ENVS):
+        logger.info("webhook: no webhook secret set — not listening")
         return None
     runner = web.AppRunner(build_app(on_strong), access_log=None)
     await runner.setup()
