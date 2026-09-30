@@ -22,7 +22,7 @@ Deployed on Railway (auto-deploys on push to `main`).
 - `tools/notifications.py` — scheduled notifications (search, bulk cancel, series stop, duplicate guard)
 
 ## Database (Supabase)
-Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`, `threads`
+Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notifications`, `fyis`, `check_ins`, `brain_entries`, `loop_state`, `threads`, `trade_signals`
 
 ## Episodic vs semantic memory (replaces FYIs)
 `brain_entries.kind` (`supabase_brain_kind.sql`): `fact` = timeless knowledge ("Jess likes kaya waffles from Rice Bakehouse"), `episode` = dated life event ("paid condo fee $837, 2 Jul") logged via `log_episode` (partner still pushed instantly at capture). Episodes sit dormant as context, surface via RECALL discipline (all briefs + chat query the brain for every person/occasion in scope — the "it's Jess's birthday, she likes X" behavior), and consolidate Sundays: 45-day-old episodes → pattern facts or fade (`consolidate_episodes`). `log_fyi` aliases to `log_episode`; `read_fyis` reads episodes + draining legacy FYIs. One-off migration: `migrate_fyis.py` (dry-run default).
@@ -567,3 +567,23 @@ Ansen, 29 Sep 2026: the wedding master information lives in Drive
 - `/budget` command
 - Vendor directory
 - Guest list management
+
+## Stocks & crypto flags (Oct 2026)
+
+The 8pm job (`send_stocks_brief` → `agent.stocks_flags()`) goes to Ansen only and
+flags a coin or stock only when at least `STOCKS_CONVERGE_MIN` (default 3)
+independent sources lean buy. A source is one newsletter publisher (Gmail
+inclusion list `_NEWSLETTER_DOMAINS` in tools/gmail.py) or one (source, type)
+pair from the Growth Research agent's signals; a signal counts only at strength
+>= 0.5. Assets are merged by ticker first, because the model lists the same
+asset once per newsletter and that would split its votes. Quiet nights still
+send one line ("Nothing converged tonight. Closest: ..."), so silence means the
+job broke. `/stocks` on demand still gives the full brief. On/off from chat via
+loop_state `feed_enabled:stocks_brief` (button under the brief, and on /stocks).
+
+Growth Research POSTs signals to `webhook.py` (aiohttp, same process as the bot,
+started in post_init): `POST /webhooks/signals` with `Authorization: Bearer
+$SIGNALS_WEBHOOK_SECRET`, `GET /health`. No secret set = no listener. Signals
+land in `trade_signals` (`supabase_trade_signals.sql`); same signal id from the
+same source is ignored for 24h; 60 requests/hour per IP. The brief reads the
+last 36h.

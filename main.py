@@ -52,7 +52,7 @@ _NUGGET_FEEDS = [
 # Nuggets are optional wind-down reading, so they are switchable per person from
 # chat. Ansen turned his daddit feed off on 26 Aug 2026 ("i do not read it, so it
 # becomes less meaningful"). Deliberately a data switch in loop_state rather than
-# a commented-out job the way the stocks brief was paused — anything the bot
+# a commented-out job the way the stocks brief once was — anything the bot
 # turns on has to be turnable back on without a deploy.
 _FEED_SWITCH = "feed_enabled"
 
@@ -786,17 +786,45 @@ async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("cmd_stocks failed")
         await msg.edit_text(f"⚠️ {escape(str(e)[:300])}", parse_mode="HTML")
+    # The nightly push is Ansen's, so only he gets its switch here.
+    if update.effective_user.id == ANSEN_ID:
+        on = await asyncio.to_thread(_feed_on, _STOCKS_FEED, ANSEN_ID)
+        await update.message.reply_text(
+            f"{'🟢' if on else '⚪️'} Nightly 8pm brief is {'on' if on else 'off'}.",
+            reply_markup=_stocks_feed_button(on))
+
+
+# The nightly stocks & crypto push. Paused 20 Jul 2026 by commenting out the
+# job, brought back 1 Oct 2026 as a data switch so it can be turned off and on
+# from chat (/stocks, or the button under each brief) without a deploy.
+_STOCKS_FEED = "stocks_brief"
+
+
+def _stocks_feed_button(on: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Turn off nightly brief" if on else "Turn nightly brief back on",
+        callback_data=f"stocksfeed:{'off' if on else 'on'}")]])
 
 
 async def send_stocks_brief(context: ContextTypes.DEFAULT_TYPE):
     # Stocks/crypto is Ansen's thing — Jess doesn't get the nightly push.
     # (She can still pull it herself with /stocks if she ever wants it.)
     try:
-        brief = await agent.stocks_brief()
-        sections = _split_sections(brief)
-        await _send_or_alert(context, ANSEN_ID, "📊 <b>Daily Stocks & Crypto Brief</b>", "stocks_brief")
-        for section in sections:
-            await _send_or_alert(context, ANSEN_ID, section, "stocks_brief")
+        if not await asyncio.to_thread(_feed_on, _STOCKS_FEED, ANSEN_ID):
+            return
+        # Flags only: a coin or stock shows up when enough sources lean buy.
+        # A quiet night is still one line, so silence always means "broken".
+        result = await agent.stocks_flags()
+        if result["quiet"]:
+            await _send_or_alert(context, ANSEN_ID, result["text"], "stocks_brief",
+                                 reply_markup=_stocks_feed_button(True))
+            return
+        sections = _split_sections(result["text"])
+        await _send_or_alert(context, ANSEN_ID, "🚩 <b>Stocks & Crypto: buy signals lined up</b>", "stocks_brief")
+        for i, section in enumerate(sections):
+            last = i == len(sections) - 1
+            await _send_or_alert(context, ANSEN_ID, section, "stocks_brief",
+                                 **({"reply_markup": _stocks_feed_button(True)} if last else {}))
     except Exception:
         logger.exception("Error sending stocks brief")
 
@@ -2025,6 +2053,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "↩️ Back on your list — and it won't be settled again without asking."
             if ok else "⚠️ Couldn't bring that one back.")
+        return
+
+    elif data.startswith("stocksfeed:"):
+        if query.from_user.id != ANSEN_ID:
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+        on = data.split(":", 1)[1] == "on"
+        await asyncio.to_thread(_set_feed, _STOCKS_FEED, ANSEN_ID, on)
+        await query.edit_message_reply_markup(reply_markup=_stocks_feed_button(on))
+        await query.message.reply_text(
+            "🟢 Nightly stocks & crypto brief is back on — 8pm." if on else
+            "⚪️ Nightly stocks & crypto brief is off. /stocks still works any time, and turns it back on.")
         return
 
     elif data.startswith("feed:"):
@@ -3558,8 +3598,21 @@ def main():
             BotCommand("drive", "📁 Google Drive docs I learn from — sync now"),
         ]
         await application.bot.set_my_commands(commands)
+        # Inbound signals from the Growth Research agent (webhook.py). Same
+        # process and loop as the bot; a failed bind must never stop the bot.
+        try:
+            import webhook
+            application.bot_data["webhook_runner"] = await webhook.start()
+        except Exception:
+            logger.exception("webhook: failed to start")
 
-    app = Application.builder().token(token).post_init(post_init).build()
+    async def post_shutdown(application: Application) -> None:
+        runner = application.bot_data.get("webhook_runner")
+        if runner:
+            await runner.cleanup()
+
+    app = (Application.builder().token(token)
+           .post_init(post_init).post_shutdown(post_shutdown).build())
 
     # Fire missed jobs within 1 hour — survives Railway restarts mid-schedule
     if app.job_queue:
@@ -3623,9 +3676,8 @@ def main():
         # Appointment pre-brief — nightly check for tomorrow's medical events
         app.job_queue.run_daily(send_appointment_prebrief, time=APPOINTMENT_TIME)
         # ── EVENING 8pm ──────────────────────────────────────────────
-        # Stocks & crypto brief — PAUSED at Ansen's request (Jul 2026). The
-        # /stocks command still works on demand; re-enable by uncommenting.
-        # app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
+        # Stocks & crypto brief — Ansen only; switchable from chat (_STOCKS_FEED)
+        app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
         # ── NIGHT 9pm ────────────────────────────────────────────────
         # Evening nuggets — optional learning only (his r/daddit, hers
         # r/BabyBumps+pregnant). The action-driven brief moved to 9am.

@@ -4244,10 +4244,26 @@ For each new fact, decide what it replaces. Reply with ONLY a JSON array, one ob
         return {"text": f"[DEBUG] loop exhausted — last stop_reason: {last_reason}", "history": self._sanitize_history(self._strip_image_data(scrub_untrusted(messages[-40:]))), "notify_partner": flags["wedding_drop"] or flags["fyi"] or flags["baby_drop"], "fyi": flags["fyi"], "completed_tasks": flags["completed_tasks"], "grocery_update": flags["grocery_update"], "partner_messages": flags["partner_messages"], "check_ins": flags.get("check_ins", []), "category_asks": flags.get("category_asks", [])}
 
     async def stocks_brief(self) -> str:
-        """Investment brief: read newsletters → extract assets → web research → analyst brief."""
+        """On-demand /stocks: everything the newsletters and signals raised."""
+        return (await self._stocks_run(flagged_only=False))["text"]
+
+    async def stocks_flags(self) -> dict:
+        """Nightly push: only assets where enough independent sources lean buy.
+        Returns {"quiet": True, "text": one line} when nothing clears the bar,
+        so a quiet market still reads differently from a job that never ran."""
+        return await self._stocks_run(flagged_only=True)
+
+    async def _stocks_run(self, flagged_only: bool) -> dict:
+        """Investment brief: read newsletters + Growth Research signals →
+        extract assets → count buy sources → web research → analyst brief."""
         import logging as _log
         log = _log.getLogger("stocks_brief")
         today = _local_today()
+        # The flag bar Ansen asked for (1 Oct 2026): "flag only when a lot of
+        # signals say to buy". A source is one newsletter publisher or one
+        # (Growth Research source, signal type) pair; each counts once.
+        converge_min = int(os.getenv("STOCKS_CONVERGE_MIN", "3"))
+        signal_min_strength = 0.5
 
         def _source_label(from_addr: str) -> str:
             lower = from_addr.lower()
@@ -4261,13 +4277,22 @@ For each new fact, decide what it replaces. Reply with ONLY a JSON array, one ob
             return from_addr.split("@")[-1].split(".")[0].title()
 
         # ── STEP 1: fetch emails ───────────────────────────────────────────
+        email_error = ""
         try:
             emails = await asyncio.to_thread(get_emails, None, 7, 14)
         except Exception as e:
-            return f"⚠️ Could not read newsletters: {_html_escape(str(e))}"
-        if not emails:
-            return "📭 No newsletter emails in the last 14 days."
-        log.info(f"stocks_brief: fetched {len(emails)} emails")
+            emails, email_error = [], str(e)
+        try:
+            from tools.signals import recent_signals
+            signals = await asyncio.to_thread(recent_signals, 36)
+        except Exception:
+            log.exception("stocks_brief: could not read trade_signals")
+            signals = []
+        if not emails and not signals:
+            text = (f"⚠️ Could not read newsletters: {_html_escape(email_error)}" if email_error
+                    else "📭 No newsletter emails in the last 14 days, and no Growth Research signals.")
+            return {"quiet": True, "text": text}
+        log.info(f"stocks_brief: fetched {len(emails)} emails, {len(signals)} signals")
 
         # ── STEP 2: build subject + body digest (NO enrichment — too slow) ─
         unique_sources: set = set()
@@ -4289,7 +4314,7 @@ For each new fact, decide what it replaces. Reply with ONLY a JSON array, one ob
         log.info(f"stocks_brief: {total_sources} sources, subjects: {all_subjects}")
 
         # ── STEP 3: extract asset names — plain text list, no JSON ─────────
-        extract_resp = await self.client.messages.create(
+        extract_resp = None if not emails else await self.client.messages.create(
             model=CHAT_MODEL,
             max_tokens=600,
             messages=[{"role": "user", "content": f"""Today is {today}. Read these newsletter subjects and bodies.
@@ -4300,16 +4325,18 @@ NEWSLETTERS:
 {digest[:15000]}
 
 List each asset on its own line in this format (nothing else):
-Name | ticker or blank | stock/crypto/etf/other | bullish/bearish/neutral | one-line newsletter context
+Name | ticker or blank | stock/crypto/etf/other | bullish/bearish/neutral | newsletters that mention it | one-line newsletter context
+
+"newsletters that mention it" = the [Label] tags of every newsletter above that mentions the asset, comma-separated, without brackets.
 
 Example:
-Bitcoin | BTC | crypto | bullish | newsletter says BTC hitting new highs
-SpaceX | | stock | bearish | newsletter says not buying at current valuation
-Coinbase | COIN | stock | bullish | AI trading bot launched on Coinbase
+Bitcoin | BTC | crypto | bullish | Milkroad, Weekly Wizdom | newsletter says BTC hitting new highs
+SpaceX | | stock | bearish | TLDR | newsletter says not buying at current valuation
+Coinbase | COIN | stock | bullish | Coinbase | AI trading bot launched on Coinbase
 
 Output the list only — no headers, no explanation."""}],
         )
-        raw_list = extract_resp.content[0].text.strip()
+        raw_list = extract_resp.content[0].text.strip() if extract_resp else ""
         log.info(f"stocks_brief: raw extract:\n{raw_list[:500]}")
 
         assets = []
@@ -4320,20 +4347,87 @@ Output the list only — no headers, no explanation."""}],
             parts = [p.strip() for p in line.split("|")]
             if len(parts) < 4:
                 continue
+            # 6 columns = with sources; 5 = the model dropped the sources column
+            srcs = parts[4] if len(parts) > 5 else ""
             assets.append({
                 "name": parts[0],
                 "ticker": parts[1] if len(parts) > 1 else "",
                 "type": parts[2] if len(parts) > 2 else "other",
                 "sentiment": parts[3] if len(parts) > 3 else "neutral",
-                "thesis": parts[4] if len(parts) > 4 else "",
-                "sources": [_source_label(em["from"]) for em in emails[:1]],
+                "thesis": parts[5] if len(parts) > 5 else (parts[4] if len(parts) > 4 else ""),
+                "sources": sorted({x.strip(" []") for x in srcs.split(",")
+                                   if x.strip(" []") in unique_sources}),
             })
+
+        # ── STEP 3b: layer Growth Research signals, count buy sources ─────
+        for a in assets:
+            sent = (a.get("sentiment") or "").lower()
+            a["buy_sources"] = set(a["sources"]) if sent == "bullish" else set()
+            a["sell_sources"] = set(a["sources"]) if sent == "bearish" else set()
+            a["signal_notes"] = []
+
+        # One row per asset: the model lists the same asset once per newsletter
+        # ("Micron" from one, "Micron Technology" from another, both MU), which
+        # would split its sources across rows and hide a convergence.
+        merged: dict[str, dict] = {}
+        for a in assets:
+            k = ((a.get("ticker") or "").upper().strip()
+                 or (a.get("name") or "").upper().strip())
+            if k in merged:
+                m = merged[k]
+                m["buy_sources"] |= a["buy_sources"]
+                m["sell_sources"] |= a["sell_sources"]
+                m["sources"] = sorted(set(m["sources"]) | set(a["sources"]))
+            else:
+                merged[k] = a
+        assets = list(merged.values())
+
+        def _match(symbol: str) -> dict | None:
+            sym = symbol.upper()
+            return next((a for a in assets if (a.get("ticker") or "").upper() == sym), None) \
+                or next((a for a in assets if (a.get("name") or "").upper() == sym), None)
+
+        for sg in signals:
+            a = _match(sg["symbol"])
+            if a is None:
+                a = {"name": sg["symbol"], "ticker": sg["symbol"],
+                     "type": sg["type"] if sg["type"] in ("crypto", "stock") else "other",
+                     "sentiment": "none", "thesis": "", "sources": [],
+                     "buy_sources": set(), "sell_sources": set(), "signal_notes": []}
+                assets.append(a)
+            label = f"{sg['source']} ({sg['type']})"
+            strong = (sg.get("strength") or 0) >= signal_min_strength
+            if sg["direction"] == "long" and strong:
+                a["buy_sources"].add(label)
+            elif sg["direction"] == "short" and strong:
+                a["sell_sources"].add(label)
+            if sg.get("summary") and len(a["signal_notes"]) < 4:
+                a["signal_notes"].append(
+                    f"{label}, {sg['direction']} {float(sg.get('strength') or 0):.1f}: {sg['summary']}")
+
+        for a in assets:
+            a["converged"] = (len(a["buy_sources"]) >= converge_min
+                              and len(a["buy_sources"]) > len(a["sell_sources"]))
+        converged = [a for a in assets if a["converged"]]
+        log.info(f"stocks_brief: converged {[a['name'] for a in converged]}")
+
+        if flagged_only and not converged:
+            closest = max(assets, key=lambda a: len(a["buy_sources"]), default=None)
+            if closest and closest["buy_sources"]:
+                n = len(closest["buy_sources"])
+                line = (f"🔕 Nothing converged tonight. Closest: <b>{_html_escape(closest['name'])}</b>, "
+                        f"{n} of {converge_min} buy signals ({_html_escape(', '.join(sorted(closest['buy_sources'])))}).")
+            else:
+                line = "🔕 Nothing converged tonight. No asset had a buy signal from any source."
+            if email_error:
+                line += f"\n\n⚠️ Couldn't read newsletters tonight: {_html_escape(email_error[:200])}"
+            return {"quiet": True, "text": line}
 
         log.info(f"stocks_brief: extracted {len(assets)} assets: {[a['name'] for a in assets]}")
 
         if not assets:
             subj_list = "\n".join(f"• {_source_label(em['from'])}: {em['subject']}" for em in emails)
-            return f"<b>📰 Newsletters this week</b>\n\n{subj_list}\n\n<i>No investment topics identified.</i>"
+            return {"quiet": True, "text": f"<b>📰 Newsletters this week</b>\n\n{subj_list}\n\n<i>No investment topics identified.</i>"}
 
         # ── STEP 4: web-research top 5 assets (3 searches each, concurrent) ─
         # Held assets always make the research cut — their positions come first.
@@ -4358,7 +4452,11 @@ Output the list only — no headers, no explanation."""}],
 
         for a in assets:
             a["held"] = _held(a)
-        top = sorted(assets, key=lambda a: a["held"] is None)[:5]
+        # Converged assets first, then what they hold, then by buy-source count.
+        # The nightly push researches converged assets only.
+        ranked = sorted(assets, key=lambda a: (not a["converged"], a["held"] is None,
+                                                -len(a["buy_sources"])))
+        top = [a for a in ranked if a["converged"]][:5] if flagged_only else ranked[:5]
 
         async def _research(asset: dict) -> dict:
             name = asset["name"]
@@ -4408,7 +4506,9 @@ Output the list only — no headers, no explanation."""}],
             ground_flag = "" if a["grounded"] else "  [⚠️ NO LIVE DATA — newsletter mention only]"
             research_block += f"""
 ━━━ {a['name']} ({a.get('ticker','')}) | {a.get('type','')} | newsletter: {a.get('sentiment','')}{ground_flag}{held_line}
-Newsletter context: {a.get('thesis','(subject line mention only)')}
+Newsletter context: {a.get('thesis') or '(no newsletter mention)'}
+Buy signals: {len(a['buy_sources'])} ({', '.join(sorted(a['buy_sources'])) or 'none'}) | Sell signals: {len(a['sell_sources'])} ({', '.join(sorted(a['sell_sources'])) or 'none'}){' | CONVERGED' if a['converged'] else ''}
+Growth Research notes: {' / '.join(a['signal_notes']) or '(none)'}
 Price/momentum: {a['d_price'] or '(NO DATA RETRIEVED)'}
 Fundamentals: {a['d_fund'] or '(NO DATA RETRIEVED)'}
 Analyst/news: {a['d_news'] or '(NO DATA RETRIEVED)'}
@@ -4430,7 +4530,8 @@ Analyst/news: {a['d_news'] or '(NO DATA RETRIEVED)'}
         brief_resp = await self.client.messages.create(
             model=CHAT_MODEL,
             max_tokens=3500,
-            messages=[{"role": "user", "content": f"""You brief Ansen and Jess on what this week's newsletters flagged. Today is {today}. {data_state}
+            messages=[{"role": "user", "content": f"""You brief Ansen on what this week's newsletters and Growth Research signals flagged. Today is {today}. {data_state}
+{f"This is the nightly flag: every asset below cleared the bar of at least {converge_min} independent sources leaning buy. Say that up top in one line, then cover each asset." if flagged_only else f"Assets marked CONVERGED have at least {converge_min} independent sources leaning buy; cover those first."}
 {portfolio_block}
 {research_block}
 
@@ -4440,6 +4541,7 @@ THIS IS NOT INVESTMENT ADVICE AND YOU ARE NOT AN ANALYST WITH A LIVE TERMINAL. A
 2. An asset tagged [⚠️ NO LIVE DATA] gets NO price, NO momentum call, NO verdict. You may only report what the newsletter SAID about it, explicitly framed as an unverified newsletter claim ("Milkroad flagged X bullish — no current data to verify").
 3. Do NOT emit BUY/HOLD/SKIP as if it's your recommendation. Report the NEWSLETTER's stance (bullish/bearish/neutral) as theirs, and separately what the live data shows IF grounded. The reader decides.
 4. When grounded data exists, quote it with its implied source ("search: BTC ~$X"). When it doesn't, say "no current data" plainly.
+5. Growth Research notes are claims too. Frame them as the source's ("growth-research (x_social) sees X chatter picking up"), never as fact.
 
 {FORMAT_RULES}
 
@@ -4453,6 +4555,8 @@ FORMAT:
 <b>[emoji] Name (TICKER)</b>
 
 <i>Newsletter stance: [bullish/bearish/neutral] — [which newsletter]</i>
+
+🚩 <b>Buy signals:</b> [count], [sources exactly as listed in the data]
 
 📰 <b>What they said:</b> the newsletter's claim, framed as theirs. 1-2 sentences.
 
@@ -4505,7 +4609,7 @@ RULES: <b>bold</b> only (no **), bullets •, no URLs. NUMBERS ONLY IF THEY APPE
         except Exception:
             pass
 
-        return brief_text
+        return {"quiet": False, "text": brief_text}
 
     async def handle_message(self, text: str, user_id: int, history: list[dict] | None = None) -> dict:
         if history is None:
