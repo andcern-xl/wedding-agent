@@ -586,4 +586,7 @@ started in post_init): `POST /webhooks/signals` with `Authorization: Bearer
 $SIGNALS_WEBHOOK_SECRET`, `GET /health`. No secret set = no listener. Signals
 land in `trade_signals` (`supabase_trade_signals.sql`); same signal id from the
 same source is ignored for 24h; 60 requests/hour per IP. The brief reads the
-last 36h.
+last 36h. A new long/short signal at strength >= `SIGNALS_ALERT_MIN` (default
+0.9) pings Ansen at once (`_alert_strong_signals`, fire-and-forget so the
+sender never waits on Telegram); switch is loop_state `feed_enabled:signal_alerts`,
+button under each alert and on /stocks.

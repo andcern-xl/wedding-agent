@@ -67,9 +67,10 @@ def validate(payload) -> tuple[dict | None, str | None]:
     return {"source": source, "as_of": as_of, "signals": clean}, None
 
 
-def save_batch(batch: dict) -> int:
+def save_batch(batch: dict) -> list[dict]:
     """Insert the batch, skipping any signal_id this source already sent in the
-    last 24h (and repeats within the batch). Returns how many were stored."""
+    last 24h (and repeats within the batch). Returns the rows stored, so the
+    caller alerts only on signals that are actually new."""
     db = get_client()
     since = (datetime.now(timezone.utc) - timedelta(hours=DEDUPE_HOURS)).isoformat()
     ids = list({s["signal_id"] for s in batch["signals"]})
@@ -85,7 +86,7 @@ def save_batch(batch: dict) -> int:
         rows.append({**s, "source": batch["source"], "as_of": batch["as_of"]})
     if rows:
         db.table("trade_signals").insert(rows).execute()
-    return len(rows)
+    return rows
 
 
 def recent_signals(hours: int = 36) -> list[dict]:

@@ -792,12 +792,51 @@ async def cmd_stocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{'🟢' if on else '⚪️'} Nightly 8pm brief is {'on' if on else 'off'}.",
             reply_markup=_stocks_feed_button(on))
+        alerts = await asyncio.to_thread(_feed_on, _SIGNAL_ALERTS, ANSEN_ID)
+        await update.message.reply_text(
+            f"{'🟢' if alerts else '⚪️'} Instant alerts for strong signals are {'on' if alerts else 'off'}.",
+            reply_markup=_signal_alerts_button(alerts))
 
 
 # The nightly stocks & crypto push. Paused 20 Jul 2026 by commenting out the
 # job, brought back 1 Oct 2026 as a data switch so it can be turned off and on
 # from chat (/stocks, or the button under each brief) without a deploy.
 _STOCKS_FEED = "stocks_brief"
+
+
+# Instant pings for strong Growth Research signals (webhook.ALERT_MIN, default
+# 0.9), separate from the nightly brief so either can be off on its own.
+_SIGNAL_ALERTS = "signal_alerts"
+
+
+def _signal_alerts_button(on: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Turn off instant alerts" if on else "Turn instant alerts back on",
+        callback_data=f"sigalert:{'off' if on else 'on'}")]])
+
+
+async def _alert_strong_signals(bot, signals: list[dict]) -> None:
+    try:
+        if not await asyncio.to_thread(_feed_on, _SIGNAL_ALERTS, ANSEN_ID):
+            return
+        lines = ["⚡️ <b>Strong signal</b>", ""]
+        for s in signals[:5]:
+            arrow = "🟢 long" if s["direction"] == "long" else "🔴 short"
+            lines.append(f"<b>{escape(s['symbol'])}</b> · {arrow} · {s['strength']:.2f} · "
+                         f"{escape(s['source'])} ({escape(s['type'])})")
+            if s.get("summary"):
+                lines.append(escape(s["summary"]))
+            if s.get("proof_urls"):
+                lines.append(f'<a href="{escape(s["proof_urls"][0], quote=True)}">source</a>')
+            lines.append("")
+        if len(signals) > 5:
+            lines.append(f"<i>+{len(signals) - 5} more in tonight's brief.</i>")
+        lines.append("<i>One source's claim, not a flag. Tonight's 8pm brief checks it against the rest.</i>")
+        await bot.send_message(chat_id=ANSEN_ID, text="\n".join(lines), parse_mode="HTML",
+                               disable_web_page_preview=True,
+                               reply_markup=_signal_alerts_button(True))
+    except Exception:
+        logger.exception("signal alert failed")
 
 
 def _stocks_feed_button(on: bool) -> InlineKeyboardMarkup:
@@ -2053,6 +2092,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "↩️ Back on your list — and it won't be settled again without asking."
             if ok else "⚠️ Couldn't bring that one back.")
+        return
+
+    elif data.startswith("sigalert:"):
+        if query.from_user.id != ANSEN_ID:
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+        on = data.split(":", 1)[1] == "on"
+        await asyncio.to_thread(_set_feed, _SIGNAL_ALERTS, ANSEN_ID, on)
+        await query.edit_message_reply_markup(reply_markup=_signal_alerts_button(on))
+        await query.message.reply_text(
+            "🟢 Instant alerts for strong signals are back on." if on else
+            "⚪️ Instant alerts are off. Strong signals still count in the 8pm brief. /stocks turns them back on.")
         return
 
     elif data.startswith("stocksfeed:"):
@@ -3602,7 +3653,8 @@ def main():
         # process and loop as the bot; a failed bind must never stop the bot.
         try:
             import webhook
-            application.bot_data["webhook_runner"] = await webhook.start()
+            application.bot_data["webhook_runner"] = await webhook.start(
+                on_strong=lambda sigs: _alert_strong_signals(application.bot, sigs))
         except Exception:
             logger.exception("webhook: failed to start")
 
