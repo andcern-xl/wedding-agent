@@ -109,6 +109,13 @@ async def post_registry(request: web.Request) -> web.Response:
         logger.exception("registry: save failed")
         return _err(500, "could not store events")
     logger.info(f"registry: {batch['source']} sent {len(batch['events'])}, accepted {len(stored)}")
+    # P0 pings Ansen and Jess now; the rest waits for the Monday baby brief.
+    urgent = [e for e in stored if e["priority"] == "P0"]
+    on_urgent = request.app.get("on_registry_urgent")
+    if urgent and on_urgent:
+        task = asyncio.create_task(on_urgent(urgent))
+        request.app["alert_tasks"].add(task)
+        task.add_done_callback(request.app["alert_tasks"].discard)
     return web.json_response({"ok": True, "accepted": len(stored)})
 
 
@@ -116,9 +123,10 @@ async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def build_app(on_strong=None) -> web.Application:
+def build_app(on_strong=None, on_registry_urgent=None) -> web.Application:
     app = web.Application(client_max_size=MAX_BODY)
     app["on_strong"] = on_strong
+    app["on_registry_urgent"] = on_registry_urgent
     app["alert_tasks"] = set()   # keep refs so pending alerts aren't GC'd
     app.router.add_post("/webhooks/signals", post_signals)
     app.router.add_post("/webhooks/registry", post_registry)
@@ -126,12 +134,13 @@ def build_app(on_strong=None) -> web.Application:
     return app
 
 
-async def start(on_strong=None) -> web.AppRunner | None:
-    """on_strong: async callable(list of stored signal rows) for instant alerts."""
+async def start(on_strong=None, on_registry_urgent=None) -> web.AppRunner | None:
+    """on_strong: async callable(stored signal rows) — strong signals, Ansen only.
+    on_registry_urgent: async callable(stored P0 registry rows) — both of them."""
     if not any(os.environ.get(n) for n in SECRET_ENVS):
         logger.info("webhook: no webhook secret set — not listening")
         return None
-    runner = web.AppRunner(build_app(on_strong), access_log=None)
+    runner = web.AppRunner(build_app(on_strong, on_registry_urgent), access_log=None)
     await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
     await web.TCPSite(runner, "0.0.0.0", port).start()

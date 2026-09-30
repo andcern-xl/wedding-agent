@@ -2,6 +2,7 @@ import logging
 import re
 
 from tools.db import get_client
+from tools.tz import local_date_of
 
 
 def save_entry(summary: str, tags: list[str], raw_text: str = "", user_id: int = 0, source: str = "screenshot") -> dict:
@@ -81,7 +82,7 @@ def get_entries(limit: int = 30, include_brain: bool = True) -> list[dict]:
     if not include_brain:
         return legacy
     merged = sorted(legacy + _brain_entries(limit),
-                    key=lambda e: (e.get("created_at") or "")[:10], reverse=True)
+                    key=lambda e: local_date_of(e.get("created_at")), reverse=True)
     if len(merged) > limit:
         logging.getLogger(__name__).info(
             "baby_knowledge.get_entries: %d of %d entries beyond limit=%d not returned",

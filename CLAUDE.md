@@ -5,6 +5,25 @@ A Telegram bot for Ansen and Jess. Two purposes:
 1. **Wedding brain** — drop notes/screenshots, bot categorises and tracks wedding planning
 2. **Daily brain** — shared and personal task/reminder management with inline Done buttons
 
+## Time zone: everything is SGT
+
+Ansen and Jess live in Singapore. Every time or date the bot shows, stores as a
+calendar date, compares, or schedules is SGT (Asia/Singapore, UTC+8). So is
+every time reported to Ansen while working on this repo: convert Railway logs
+and Supabase timestamps (both UTC) to SGT before quoting them.
+
+- Railway's clock is UTC. Never use `date.today()`, `datetime.now()` or
+  `datetime.utcnow()` for anything a person sees. Use `tools/tz.py`:
+  `local_today()`, `local_now()`, `local_date_of(ts)`.
+- Never slice a timestamp for its date (`created_at[:10]`). That is the UTC
+  date, a day early for anything between 00:00 and 08:00 SGT. Use
+  `local_date_of(ts)`.
+- Instants stored in the database stay UTC `timestamptz`. Only convert when
+  reading one out.
+- Scheduled jobs use `REMINDER_TIMEZONE` (SGT), so `time=` values in main.py
+  are SGT wall-clock times.
+- `test_local_dates.py` fails if a UTC date slice or server-clock date comes back.
+
 ## How to run
 ```bash
 source venv/bin/activate
@@ -596,5 +615,8 @@ button under each alert and on /stocks.
 `POST /webhooks/registry` (baby-registry bot) sits beside the signals route in
 `webhook.py`, with its own secret (`REGISTRY_WEBHOOK_SECRET`), table
 (`registry_events`, `supabase_registry_events.sql`), validator and rate-limit
-bucket (`tools/registry.py`). Events are stored only; nothing reads them yet.
+bucket (`tools/registry.py`). The registry is for both of them (stocks is Ansen only): a new P0 pings
+Ansen and Jess, each with their own switch (loop_state `feed_enabled:registry_alerts` per user);
+the Monday baby brief gets a Registry section from the last 7 days, with each event's received
+date so "ends tonight" is never restated as a made-up weekday; `/registry` lists the week.
 `test_webhooks.py` proves the two secrets never open each other's route.

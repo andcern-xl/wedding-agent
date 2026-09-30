@@ -61,7 +61,16 @@ curl -X POST "https://worker-production-2a03.up.railway.app/webhooks/registry" \
   -d '{"source":"test","as_of":"2026-10-01T00:00:00Z","events":[{"id":"test-1","type":"note","summary":"ping","priority":"info","payload":{},"links":[]}]}'
 ```
 
-The bot stores these events. It does not act on them yet: no alert, no brief.
+What the bot does with an event (for both Ansen and Jess):
+
+- A new `P0` pings both of them right away. Each person has their own on/off
+  switch (button under the alert, and in `/registry`).
+- Every event from the last 7 days goes into the Monday 9am baby brief, in a
+  "Registry updates" section.
+- `/registry` in Telegram lists the last 7 days by priority.
+
+Relative deadlines ("ends tonight") are read against the date the event
+arrived, so put the real deadline in `summary` when there is one.
 
 ## POST /webhooks/signals
 
