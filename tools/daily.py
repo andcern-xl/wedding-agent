@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from tools.db import get_client
+from tools.tz import local_date_of
 from tools.tz import local_today
 
 # Canonical task domains. baby_questions is kept distinct because the
@@ -274,10 +275,10 @@ def get_stale_tasks(user_id: int, overdue_days: int = 7, undated_days: int = 14,
             # window has passed. Re-offering is what made the backlog immortal.
             continue
         due = t.get("due_date")
-        created = (t.get("created_at") or "")[:10]
+        created = local_date_of(t.get("created_at"))
         if (due and due <= overdue_cutoff) or (not due and created and created <= created_cutoff):
             stale.append(t)
-    stale.sort(key=lambda t: t.get("due_date") or (t.get("created_at") or "")[:10])
+    stale.sort(key=lambda t: t.get("due_date") or local_date_of(t.get("created_at")))
     return stale
 
 

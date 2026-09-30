@@ -17,6 +17,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from agent import UnifiedAgent
 from categories import CATEGORIES
+from tools.tz import local_date_of, local_today as local_date_of_today
 from tools.notifications import (
     get_pending_notifications, mark_notification_sent, list_notifications as list_scheduled,
     cancel_notification as cancel_scheduled, get_notification as get_scheduled,
@@ -839,6 +840,75 @@ async def _alert_strong_signals(bot, signals: list[dict]) -> None:
         logger.exception("signal alert failed")
 
 
+# Baby registry: for both of them (Ansen, 1 Oct 2026: "the baby registry can
+# be for both jess and i, the crypto/stocks one only me"). P0 events ping each
+# of them now, each with their own switch; everything lands in the Monday brief.
+_REGISTRY_ALERTS = "registry_alerts"
+_REGISTRY_ICON = {"research_update": "🔎", "list_update": "📝", "price_update": "💸",
+                  "timeline_update": "🗓", "question": "❓", "note": "🗒"}
+
+
+def _registry_alerts_button(on: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Turn off my registry alerts" if on else "Turn my registry alerts back on",
+        callback_data=f"regalert:{'off' if on else 'on'}")]])
+
+
+def _registry_line(e: dict) -> str:
+    line = f"{_REGISTRY_ICON.get(e['type'], '•')} {escape(e.get('summary') or e['type'])}"
+    if e.get("links"):
+        line += f' · <a href="{escape(e["links"][0], quote=True)}">link</a>'
+    return line
+
+
+async def _alert_registry_urgent(bot, events: list[dict]) -> None:
+    lines = ["🚨 <b>Baby registry: needs a look</b>", ""]
+    lines += [_registry_line(e) for e in events[:5]]
+    if len(events) > 5:
+        lines.append(f"<i>+{len(events) - 5} more in /registry.</i>")
+    text = "\n".join(lines)
+    for uid in ALLOWED_IDS:
+        try:
+            if not await asyncio.to_thread(_feed_on, _REGISTRY_ALERTS, uid):
+                continue
+            await bot.send_message(chat_id=uid, text=text, parse_mode="HTML",
+                                   disable_web_page_preview=True,
+                                   reply_markup=_registry_alerts_button(True))
+        except Exception:
+            logger.exception(f"registry alert failed for {uid}")
+
+
+async def cmd_registry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Last 7 days of registry events, and your own alert switch."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    try:
+        from tools.registry import recent_events
+        events = await asyncio.to_thread(recent_events, 7 * 24)
+    except Exception:
+        logger.exception("cmd_registry failed")
+        events = None
+    lines = ["🛒 <b>Baby registry · last 7 days</b>", ""]
+    if events is None:
+        lines.append("⚠️ Couldn't load registry updates right now.")
+    elif not events:
+        lines.append("Nothing new from the registry bot this week.")
+    else:
+        for pri in ("P0", "P1", "P2", "info"):
+            group = [e for e in events if e["priority"] == pri]
+            if group:
+                lines.append(f"<b>{pri}</b>")
+                lines += [_registry_line(e) for e in group[:10]]
+                lines.append("")
+    on = await asyncio.to_thread(_feed_on, _REGISTRY_ALERTS, uid)
+    lines.append(f"{'🟢' if on else '⚪️'} Your instant P0 alerts are {'on' if on else 'off'}. "
+                 "This only switches yours.")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML",
+                                              disable_web_page_preview=True,
+                                              reply_markup=_registry_alerts_button(on))
+
+
 def _stocks_feed_button(on: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(
         "Turn off nightly brief" if on else "Turn nightly brief back on",
@@ -1230,7 +1300,7 @@ def _notif_day_header(ts: str) -> str:
     alert doesn't read like next Tuesday."""
     dt = _notif_dt(ts)
     stamp = dt.strftime("%a %-d %b")
-    return stamp if dt.year == ddate.today().year else f"{stamp} {dt.year}"
+    return stamp if dt.year == local_date_of_today().year else f"{stamp} {dt.year}"
 
 
 def _notif_dt(ts: str):
@@ -1452,7 +1522,7 @@ def _format_fyis(fyis: list) -> str:
         emoji = _CAT_EMOJI.get(cat, "📌")
         blocks.append(f"\n{emoji} <b>{cat.title()}</b>")
         for f in items:
-            when = (f.get("created_at") or "")[:10]
+            when = local_date_of(f.get("created_at"))
             blocks.append(f"• <i>{when}</i> — {escape(f['content'])}")
     return "\n".join(blocks)
 
@@ -2094,6 +2164,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ok else "⚠️ Couldn't bring that one back.")
         return
 
+    elif data.startswith("regalert:"):
+        # Each person switches only their own registry alerts.
+        on = data.split(":", 1)[1] == "on"
+        await asyncio.to_thread(_set_feed, _REGISTRY_ALERTS, query.from_user.id, on)
+        await query.edit_message_reply_markup(reply_markup=_registry_alerts_button(on))
+        await query.message.reply_text(
+            "🟢 Your registry alerts are back on." if on else
+            "⚪️ Your registry alerts are off. Updates still show in the Monday brief. /registry turns them back on.")
+        return
+
     elif data.startswith("sigalert:"):
         if query.from_user.id != ANSEN_ID:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -2419,7 +2499,7 @@ async def send_morning_brief(context: ContextTypes.DEFAULT_TYPE):
             # local_today(), not date.today() — the server runs UTC and would
             # report yesterday for anything before 8am SGT.
             age = f"day {(_d_today() - ddate.fromisoformat(due)).days} overdue" if due \
-                else f"sitting untouched since {(t.get('created_at') or '')[:10]}"
+                else f"sitting untouched since {local_date_of(t.get("created_at"))}"
             label = (t.get("task") or "").strip()
             if label.upper().startswith("TASK:"):
                 label = label[5:].strip()
@@ -2888,7 +2968,7 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
             try:
                 from tools.user_memory import add_brain_entry as _add_ep, normalize_domain as _nd
                 _add_ep(f["content"], _nd(f.get("category")), "fyi_graduation",
-                        (f.get("created_at") or "")[:10] or None, "episode")
+                        local_date_of(f.get("created_at")) or None, "episode")
                 archive_fyi(f["id"])
                 episoded += 1
             except Exception:
@@ -2914,7 +2994,7 @@ async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
                     logger.exception(f"graduation summary send failed for {uid}")
 
         for f in triage["ask"][:3]:
-            when = (f.get("created_at") or "")[:10]
+            when = local_date_of(f.get("created_at"))
             cat = f.get("category") or "misc"
             fyi_id = f["id"]
             text = (
@@ -2955,7 +3035,7 @@ async def _handle_fyi_callback(query, context, data: str):
             await query.answer("FYI not found.")
             return
         await query.answer()
-        when = (fyi.get("created_at") or "")[:10]
+        when = local_date_of(fyi.get("created_at"))
         cat = (fyi.get("category") or "misc").lower()
         cat_emoji = _CAT_EMOJI.get(cat, "📌")
         text = (
@@ -3640,6 +3720,7 @@ def main():
             BotCommand("wedding", "💒 Wedding planning"),
             BotCommand("shared", "🧠 Shared brain, tasks & reminders"),
             BotCommand("baby", "👶 Baby & pregnancy"),
+            BotCommand("registry", "🛒 Baby registry updates"),
             BotCommand("stocks", "📊 Stocks & crypto brief"),
             BotCommand("finances", "💼 Portfolio & money picture"),
             BotCommand("me", "👤 My personal tasks"),
@@ -3654,7 +3735,8 @@ def main():
         try:
             import webhook
             application.bot_data["webhook_runner"] = await webhook.start(
-                on_strong=lambda sigs: _alert_strong_signals(application.bot, sigs))
+                on_strong=lambda sigs: _alert_strong_signals(application.bot, sigs),
+                on_registry_urgent=lambda evs: _alert_registry_urgent(application.bot, evs))
         except Exception:
             logger.exception("webhook: failed to start")
 
@@ -3687,6 +3769,7 @@ def main():
     app.add_handler(CommandHandler("stocks", cmd_stocks))
     app.add_handler(CommandHandler("finances", cmd_finances))
     app.add_handler(CommandHandler("baby", cmd_baby))
+    app.add_handler(CommandHandler("registry", cmd_registry))
     app.add_handler(CommandHandler("babyknowledge", cmd_babyknowledge))
     app.add_handler(CommandHandler("shows", cmd_shows))
     app.add_handler(CommandHandler("groceries", cmd_groceries))

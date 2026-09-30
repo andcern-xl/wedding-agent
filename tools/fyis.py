@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone, timedelta
 from tools.db import get_client
+from tools.tz import local_date_of
 from tools.tz import local_today
 
 
@@ -178,5 +179,5 @@ def recent_updates(limit: int = 30, days: int = 30) -> list[dict]:
     except Exception:
         import logging
         logging.getLogger(__name__).exception("recent_updates: episode read failed")
-    rows.sort(key=lambda r: (r.get("created_at") or "")[:10], reverse=True)
+    rows.sort(key=lambda r: local_date_of(r.get("created_at")), reverse=True)
     return rows[:limit]

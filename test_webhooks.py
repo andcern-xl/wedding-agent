@@ -52,8 +52,15 @@ REG = {"source": "baby-registry-bot", "as_of": "2026-10-01T09:00:00+08:00",
                    "priority": "P1", "payload": {"item": "stroller"}, "links": ["https://example.com"]}]}
 
 
+urgent_calls = []
+
+
+async def on_urgent(events):
+    urgent_calls.append([e["event_id"] for e in events])
+
+
 async def main():
-    async with TestClient(TestServer(webhook.build_app())) as c:
+    async with TestClient(TestServer(webhook.build_app(on_registry_urgent=on_urgent))) as c:
         async def post(path, body, secret=None):
             h = {"Authorization": f"Bearer {secret}"} if secret else {}
             r = await c.post(path, json=body, headers=h)
@@ -77,6 +84,15 @@ async def main():
               (await post("/webhooks/registry", bad, "reg-secret"))[0], 400)
         check("registry, signals-shaped body -> 400",
               (await post("/webhooks/registry", SIG, "reg-secret"))[0], 400)
+
+        mixed = {**REG, "events": [{**REG["events"][0], "id": "p0", "priority": "P0"},
+                                   {**REG["events"][0], "id": "p1", "priority": "P1"}]}
+        await post("/webhooks/registry", mixed, "reg-secret")
+        await asyncio.sleep(0.05)
+        check("P0 alerts fire for the P0 event only", urgent_calls, [["p0"]])
+        await post("/webhooks/registry", mixed, "reg-secret")
+        await asyncio.sleep(0.05)
+        check("a repeated P0 does not alert again", urgent_calls, [["p0"]])
 
         check("signals still works with its token",
               await post("/webhooks/signals", SIG, "sig-secret"), (200, {"ok": True, "accepted": 1}))

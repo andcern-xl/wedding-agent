@@ -37,3 +37,27 @@ def local_today_iso() -> str:
 def days_from_today(n: int) -> str:
     """ISO date n days from the local today (negative for the past)."""
     return (local_today() + timedelta(days=n)).isoformat()
+
+
+def local_date_of(ts) -> str:
+    """The SGT calendar date (YYYY-MM-DD) of a stored timestamp.
+
+    `ts[:10]` on a timestamptz string is its UTC date, which is YESTERDAY for
+    anything between 00:00 and 08:00 SGT. That slice was all over the bot
+    (created_at, ts, modifiedTime), so late-night logs were dated a day early.
+    A bare date passes through; a naive timestamp is read as UTC (what the
+    server writes); anything unparseable falls back to the old slice.
+    """
+    if not ts:
+        return ""
+    s = str(ts).strip()
+    if len(s) <= 10:
+        return s
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return s[:10]
+    if dt.tzinfo is None:
+        from datetime import timezone
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(LOCAL_TZ).date().isoformat()
