@@ -1195,6 +1195,65 @@ async def send_jess_checkin(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error sending Jess check-in")
 
 
+async def send_finance_checkin(context: ContextTypes.DEFAULT_TYPE):
+    """1st of the month, both of you: last month's recap from Split, then the ask
+    for the joint bank balance. The reply goes through the agent's
+    log_joint_balance tool into Split, so either of you answering is enough.
+    No model call: every figure is copied from Split (/recap), nothing is
+    computed here. One message, so the 1st is not two pings."""
+    if not ALLOWED_IDS:
+        return
+    try:
+        from tools.split_expenses import format_recap, get_joint_accounts, get_recap, human_day
+        recap = await asyncio.to_thread(get_recap)
+        data = await asyncio.to_thread(get_joint_accounts)
+        banks = [a for a in data["accounts"] if a["kind"] == "bank"]
+        cards = [a for a in data["accounts"] if a["kind"] == "card"]
+        recap_text = format_recap(recap)
+        checkin_text = ""
+        if banks:
+            cur = data["currency"]
+            lines = ["💰 <b>Monthly money check-in</b>", ""]
+            for b in banks:
+                if b["last_balance"] is None:
+                    lines.append(f"I don't have a balance for {b['name']} yet.")
+                else:
+                    lines.append(
+                        f"{b['name']}: {cur} {b['last_balance']:,.2f} on {human_day(b['last_checked'])}, "
+                        f"about {cur} {b['estimated_now']:,.2f} now from what's logged."
+                    )
+            for c in cards:
+                if c["last_owed"] is None:
+                    lines.append(f"I don't have an amount owed for {c['name']} yet.")
+                else:
+                    lines.append(
+                        f"{c['name']}: owed {cur} {c['last_owed']:,.2f} on {human_day(c['last_checked'])}, "
+                        f"about {cur} {c['owed_now']:,.2f} now from what's logged."
+                    )
+            asks = " and ".join(
+                [f"the {b['name']} balance" for b in banks] + [f"how much {c['name']} says you owe" for c in cards]
+            )
+            lines += ["", f"Check the apps and reply with {asks}. I'll record them. Either of you is fine."]
+            checkin_text = "\n".join(lines)
+        text = recap_text + ("\n\n" + checkin_text if checkin_text else "")
+        marker = (
+            f"[Monthly money recap for {recap.get('label')} sent to you both"
+            + (" — waiting for the joint bank balance]" if checkin_text else "]")
+        )
+        for uid in ALLOWED_IDS:
+            await _send_or_alert(context, uid, text, "finance_checkin")
+            _thread_into_history(uid, marker, text)
+    except Exception as e:
+        logger.exception("Error sending finance check-in")
+        # A recap that quietly never arrives looks like a quiet month
+        try:
+            await context.bot.send_message(
+                chat_id=ANSEN_ID, text=f"⚠️ Monthly money recap failed: {_err_detail(e)}"
+            )
+        except Exception:
+            pass
+
+
 async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
@@ -3831,6 +3890,8 @@ def main():
         app.job_queue.run_daily(send_self_audit, time=SELF_AUDIT_TIME, days=(0,))
         # Capability gap sweep — 1st of each month, Ansen only
         app.job_queue.run_monthly(send_capability_gap_sweep, when=dtime(hour=10, minute=0, tzinfo=REMINDER_TIMEZONE), day=1)
+        # Monthly money check-in — 1st, 10:30am, both of you
+        app.job_queue.run_monthly(send_finance_checkin, when=dtime(hour=10, minute=30, tzinfo=REMINDER_TIMEZONE), day=1)
         # Shared brain compression — 15th of each month (merge/dedupe accumulated entries)
         app.job_queue.run_monthly(send_brain_compress, when=dtime(hour=3, minute=0, tzinfo=REMINDER_TIMEZONE), day=15)
         # ── ALWAYS ───────────────────────────────────────────────────

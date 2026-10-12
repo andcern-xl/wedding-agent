@@ -2131,7 +2131,7 @@ BUDGET ROUTING — three buckets, mutually exclusive:
 
 When someone mentions money/costs: classify which bucket first, then log to the right one. Never put life expenses in wedding budget. Never put wedding costs in shared budget.
 
-INVESTMENTS ARE NOT EXPENSES: buying/selling/holding an asset, portfolio values, "StashAway is at X" → log_holding (NEVER a budget table, NEVER the brain — values live in holdings). Questions about what they own or net worth → read_holdings. Questions about day-to-day spending ("how much on the pet this month") → read_split_expenses (their Split app).
+INVESTMENTS ARE NOT EXPENSES: buying/selling/holding an asset, portfolio values, "StashAway is at X" → log_holding (NEVER a budget table, NEVER the brain — values live in holdings). Questions about what they own or net worth → read_holdings. Questions about day-to-day spending ("how much on the pet this month") → read_split_expenses (their Split app); a whole month ("how did we do in September", "what did we spend last month", "how much have we saved") → read_split_recap, which matches what the Split app shows. The joint bank balance and joint card live in Split too: 'what's in the joint account / on the card' → read_joint_accounts; when either of them tells you the bank app's balance (e.g. answering the monthly money check-in) → log_joint_balance. Never log a bank balance as a holding or an expense.
 
 ⚠️ Ambiguous signals → ASK WITH BUTTONS, then the tap files it:
 If content could fit more than one domain, or the signal is weak, do NOT guess and do NOT just describe it back. Call ask_check_in with the plausible domains as options, each carrying the extracted summary so one tap files it correctly:
@@ -2717,6 +2717,34 @@ TOOLS = [
         },
     },
     {
+        "name": "read_split_recap",
+        "description": "A month of the couple's Split in the app's own numbers: total spent and change on the month before, spending by category, who paid, the biggest expenses, cash / invested / gain / card owed, and who owes whom. Use for 'how did we do in September?', 'what did we spend last month', 'how much do we have saved' and for any month-level money question. Prefer this over read_split_expenses for whole months: it matches what the Split app shows. Balances in it are as of today, whichever month you ask for. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "month": {"type": "string", "description": "YYYY-MM. Default is last month (SGT)."},
+            },
+        },
+    },
+    {
+        "name": "read_joint_accounts",
+        "description": "Read the couple's joint bank and joint credit card from Split: the bank's last balance check-in and estimated balance now, the card's last check-in and how much is owed on it now, and the investment accounts (kind \"investment\", e.g. IBKR, Stashaway) with their latest value. Use for 'what's in the joint account' or 'how much is on the card'. Read-only.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "log_joint_balance",
+        "description": "Record a joint account balance, when Ansen or Jess tells you the number (usually answering the monthly money check-in). For the bank, the amount is what the bank app shows; for the joint card, the amount is how much the card app says they OWE (a positive number, it is shown as a minus). This is a snapshot, not a transaction: it replaces nothing and moves no money. Do NOT use it for investments (log_holding) or expenses.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number", "description": "The balance the bank app shows, in SGD."},
+                "account": {"type": "string", "description": "Account name, e.g. 'Joint DBS' or the card's name. Omit if there is only one joint bank. Required for the card."},
+                "note": {"type": "string", "description": "Optional note."},
+            },
+            "required": ["amount"],
+        },
+    },
+    {
         "name": "save_behavior_feedback",
         "description": "Save a standing rule about HOW you should behave, whenever the user gives style/conduct feedback: 'too long', 'stop repeating this', 'don't ask me about that again', 'fewer emojis', 'just answer directly'. This is correct_knowledge for behavior instead of facts — call it immediately, don't just acknowledge verbally. The rule is injected into every future conversation and brief.",
         "input_schema": {
@@ -3157,7 +3185,7 @@ class UnifiedAgent:
     _READ_ONLY_TOOLS = frozenset({
         "query_brain", "read_drive", "read_baby_budget", "read_calendar", "read_daily_tasks",
         "read_fyis", "read_holdings", "read_memory", "read_payments", "read_shared_budget",
-        "read_split_expenses", "read_stocks_history", "read_threads", "read_wedding_drops",
+        "read_split_expenses", "read_split_recap", "read_joint_accounts", "read_stocks_history", "read_threads", "read_wedding_drops",
         "search_baby_knowledge", "get_goals", "get_grocery_lists", "get_trips",
         "list_notifications", "find_notifications",
     })
@@ -3526,6 +3554,25 @@ class UnifiedAgent:
             from tools.split_expenses import get_expenses
             return await asyncio.to_thread(
                 get_expenses, inputs.get("days", 30), inputs.get("category")
+            )
+
+        if name == "read_split_recap":
+            from tools.split_expenses import get_recap
+            month = inputs.get("month")
+            if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+                return {"error": "month must be YYYY-MM, e.g. 2026-09"}
+            return await asyncio.to_thread(get_recap, month)
+
+        if name == "read_joint_accounts":
+            from tools.split_expenses import get_joint_accounts
+            return await asyncio.to_thread(get_joint_accounts)
+
+        if name == "log_joint_balance":
+            from tools.split_expenses import record_balance
+            who = {63756531: "Ansen", 6927468999: "Jess"}.get(user_id)
+            return await asyncio.to_thread(
+                record_balance, float(inputs["amount"]), inputs.get("account"),
+                inputs.get("note"), who,
             )
 
         if name == "save_behavior_feedback":

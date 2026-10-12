@@ -580,6 +580,29 @@ Ansen, 29 Sep 2026: the wedding master information lives in Drive
 
 `test_drive_scope.py` (50+ checks) locks scope, ownership, injection, taint and grounding.
 
+## Split: monthly recap, joint accounts (Oct 2026)
+
+`tools/split_expenses.py` reads the couple's Split group (code `56GC22`, env `SPLIT_GROUP_CODE`).
+**Money is computed by Split, never here.** An earlier Python copy of its balance math drifted
+within days of Split gaining investments and `happenedOn` (IBKR and Stashaway read as banks;
+"30 days" counted by the UTC day of `createdAt`). Now `get_recap()` calls Split's
+`GET /api/groups/:code/recap?month=YYYY-MM` (default: last month, SGT) and `get_joint_accounts()`
+is a mapping of that response. `format_recap()` turns it into the Telegram message with no model call.
+
+- **1st of the month, 10:30 SGT** (`send_finance_checkin`, main.py): one message to both of you,
+  last month's recap (spending vs the month before, categories, who paid, biggest 3, cash / invested /
+  gain / card owed, who owes whom), then the ask for the joint bank balance and the card. Investments
+  are in the recap but are never asked about here. If Split fails, only Ansen is told, with the reason.
+- **Chat:** `read_split_recap(month)` for whole months ("how did we do in September"),
+  `read_split_expenses` for rolling windows and one category, `read_joint_accounts`,
+  `log_joint_balance` (bank and card only).
+- `money` in the recap is as of today (`asOf`), whichever month was asked for.
+- **Deploy order:** Split first (push + Republish, so `/recap` exists), then this. Until then the 1st's
+  job fails and DMs Ansen.
+- **Known overlap:** IBKR and Stashaway values live in Split's investment accounts and in the agent's
+  `holdings` (`log_holding`). The recap reads Split's; `read_holdings` reads holdings. They can disagree.
+- `test_split_recap.py` locks the message, the account mapping, the SGT dates and the job.
+
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)
 - Individual brain architecture: how Ansen's personal context interacts with shared brain
@@ -620,3 +643,87 @@ Ansen and Jess, each with their own switch (loop_state `feed_enabled:registry_al
 the Monday baby brief gets a Registry section from the last 7 days, with each event's received
 date so "ends tonight" is never restated as a made-up weekday; `/registry` lists the week.
 `test_webhooks.py` proves the two secrets never open each other's route.
+
+## Hosting it for friends (research only, Oct 2026, nothing built)
+
+Ansen is considering running this for other households. Not decided, not
+started. Don't build any of it unless he asks. Researched 7 Oct 2026.
+
+**The idea.** Pull out the engine, host it on Ansen's infra, friends pay a
+monthly fee for hosting and fixes, AI runs on their own Anthropic key. Start
+with 3 friends set up by hand.
+
+**Three layers.**
+- Core (everyone): Telegram + tool loop, persisted history, brain_entries
+  (facts/episodes, supersession, Sunday consolidation), loop_state deltas,
+  thread ledger, check-ins that close loops, notifications with Stop,
+  behavior_rules, FORMAT_RULES/VOICE_RULES, SGT and "today" guards,
+  `_send_or_alert`.
+- Packs (opt-in per household): wedding, baby, trips, stocks, registry, Split,
+  shows, nuggets. Each pack declares its tables, tools, scheduled jobs and its
+  recall store. Registering the store wires it into `_query_brain_sync` and
+  `sweep_recall.py` automatically, so the "DJ plans are gone" silo bug can't
+  come back.
+- Household config: members (name, Telegram numeric ID, role), timezone,
+  packs on, brief times, voice. "Partner" is a role, so solo households work.
+
+**What's hardcoded today (runtime code, ~18k lines).** "Jess" 192 hits / 11
+files, "Ansen" 222 / 13, Telegram IDs in 6 files, "Singapore" 29, vendors
+(Hyatt, Elenna) in 5 files, `GOOGLE_EMAIL_JESS` env var. Moving these into
+household config plus a `household_id` on every table is most of the work.
+
+**Infra for 3 friends.**
+- Railway: same project, one service per household from the same repo, own
+  env vars (bot token, their Anthropic key, household ID). ~US$3-5/bot/month,
+  check real usage. No new account.
+- Supabase: existing project, `household_id` on every table. Free tier likely
+  fine for 3. Pro is US$25/mo.
+- Telegram: friend makes their own bot in BotFather.
+- Google: needs a Google Cloud OAuth app friends sign in through (today it's
+  Ansen's own refresh token). Unverified is fine under 100 users (they click
+  past a warning). Never leave it in Testing mode: refresh tokens expire after
+  7 days. Gmail is a restricted scope, keep it optional.
+- Tavily: share Ansen's key or skip. mem0/OpenAI: drop.
+- Keep it all on personal accounts, not Xavalabs.
+
+**Must exist before friend #1.** The refactor, a data-separation check in the
+QA checklist (one household can never read another's rows), and a Google
+sign-in a friend can do (on a call is fine for 3).
+
+**Incidents: two kinds of fix.**
+- Taste or facts (too long, wrong name, no messages before 10am) = their
+  household only. Bot fixes it in chat as a household rule or brain
+  correction, with undo. `/rules` lists and removes them.
+- Broke a promise (wrong timezone, invented date, crash, dropped message) =
+  platform bug. Bot asks consent, then sends Ansen the report (message,
+  context, error). Fix in code + a test, ship to Ansen's household first,
+  then everyone.
+- Pecking order: platform rules (in code, can't be overridden by a household)
+  > household rules > pack defaults.
+- Later: a rule showing up in 3+ households is a suggestion to Ansen to change
+  the default. Never auto-promoted.
+- Entry points: a thumbs-down button under every message, plus `/report`.
+
+**Setup wizard (later, not for the first 3).** Ansen shared screenshots of a
+Hermes deploy wizard (Describe, Platform, Credentials, Behaviors, Deploy).
+Keep: step bar, describe-first AI pre-fill, QR Telegram setup, manual
+approvals. Drop: repo/service names, model picker, instance class, cron
+fields, the 40-skill chip wall, YAML review. Fix: blank allow-list must mean
+owner only, lock to numeric Telegram IDs (partner joins via invite link).
+Our version: You, Telegram, AI key (with test button), Google, packs
+(pre-ticked), partner invite, done (plain summary + pay + first message).
+
+**Pricing idea for 3 friends.** S$20/month from day one (first month free as
+setup), PayNow to start, Stripe around friend #5. Plus their own Anthropic
+bill: measure from Ansen's own console usage and tell them the number up
+front. The point is learning whether anyone pays, not revenue.
+
+**Order if it goes ahead.** Refactor (Ansen's bot behaves the same) ->
+data-separation check -> Google Cloud app -> friend #1 by hand -> friends
+#2 and #3 a week later -> wizard only after 3 manual setups.
+
+**Compared to Hermes Agent (Nous Research, MIT).** Hermes is a general
+framework: 6 channels, any model, natural-language cron, self-written skills,
+runs shell commands. It has none of our domain logic, typed stores or
+code-level guards. Don't rebuild this bot on Hermes. Hermes fits client
+agents that start from nothing (looked at for the property agent, 23 Sep).
