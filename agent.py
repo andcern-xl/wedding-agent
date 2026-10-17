@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import re as _re_mod
+import sys
 from html import escape as _html_escape
 from datetime import datetime, date, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -796,6 +798,33 @@ def _trip_gap_check(trip: dict) -> str | None:
 
 
 # Model constants — swap here to change globally
+def _metered_client() -> AsyncAnthropic:
+    """AsyncAnthropic that logs one USAGE line per call: caller, model, tokens.
+
+    grep USAGE in the Railway logs and sum by caller to see which job costs
+    what. Never raises: a logging failure must not break a reply.
+    """
+    client = AsyncAnthropic()
+    _create = client.messages.create
+
+    async def create(*args, **kwargs):
+        resp = await _create(*args, **kwargs)
+        try:
+            u = resp.usage
+            logging.getLogger(__name__).info(
+                "USAGE caller=%s model=%s in=%s out=%s cache_read=%s cache_write=%s",
+                sys._getframe(1).f_code.co_name, kwargs.get("model"),
+                u.input_tokens, u.output_tokens,
+                getattr(u, "cache_read_input_tokens", 0) or 0,
+                getattr(u, "cache_creation_input_tokens", 0) or 0)
+        except Exception:
+            pass
+        return resp
+
+    client.messages.create = create
+    return client
+
+
 CHAT_MODEL = "claude-haiku-4-5-20251001"      # conversations, briefs, tool routing
 SYNTHESIS_MODEL = "claude-sonnet-4-6"          # knowledge synthesis, compression, complex reasoning
 
@@ -873,7 +902,7 @@ HOW TO RESPOND
 
 class WeddingAgent:
     def __init__(self):
-        self.client = AsyncAnthropic()
+        self.client = _metered_client()
 
     def _build_system_prompt(self) -> str:
         cat_lines = "\n".join(
@@ -1439,7 +1468,7 @@ def _task_label(t: dict, today_str: str) -> str:
 
 class DailyAgent:
     def __init__(self):
-        self.client = AsyncAnthropic()
+        self.client = _metered_client()
 
     async def _parse_task(self, text: str) -> dict | None:
         today = _local_today()
@@ -1702,7 +1731,7 @@ Rules:
 Use • for bullets. <b> tags for bold. Emojis welcome. NEVER use **asterisks**. Keep it tight — this is a phone notification, not a report."""
 
         response = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
+            model=CHAT_MODEL,
             max_tokens=500,
             system=DAILY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -1873,7 +1902,7 @@ SHAPE:
 - This is flowing prose: times inline, bold for at most one or two key facts."""
 
         text = await _brief_with_brain(
-            self.client, SYNTHESIS_MODEL, prompt,
+            self.client, CHAT_MODEL, prompt,
             system=DAILY_SYSTEM_PROMPT, max_tokens=800,
         )
         return _fix_md(text)
@@ -3118,7 +3147,7 @@ TOOLS = [
 
 class UnifiedAgent:
     def __init__(self):
-        self.client = AsyncAnthropic()
+        self.client = _metered_client()
         self._wedding = WeddingAgent()
         self._daily = DailyAgent()
 
@@ -5195,7 +5224,7 @@ If nothing is worth flagging: respond with exactly: NOTHING"""
         for _ in range(4):
             try:
                 response = await self.client.messages.create(
-                    model=SYNTHESIS_MODEL,
+                    model=CHAT_MODEL,
                     max_tokens=800,
                     tools=_cache_tools(proactive_tools),
                     messages=messages,
@@ -5421,7 +5450,7 @@ Format: Telegram HTML only. <b>headers</b>. Blank line between every bullet. Emo
 {FORMAT_RULES}"""
 
         resp = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
+            model=CHAT_MODEL,
             max_tokens=1800,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -5497,7 +5526,7 @@ For each milestone in the list: what it is, what it checks for, when to book it.
 RULES: <b>bold</b> only, bullets •, no URLs, no asterisks, no baby size comparisons."""
 
         resp = await self.client.messages.create(
-            model=SYNTHESIS_MODEL,
+            model=CHAT_MODEL,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -5851,7 +5880,7 @@ RULES:
         for _ in range(3):
             try:
                 response = await self.client.messages.create(
-                    model=SYNTHESIS_MODEL,
+                    model=CHAT_MODEL,
                     max_tokens=700,
                     tools=tools,
                     messages=messages,
@@ -5942,7 +5971,7 @@ Keep it to 4-6 short lines total. This is the ONE message she gets today and the
 
 {VOICE_RULES}
 {FORMAT_RULES}"""
-        text = await _brief_with_brain(self.client, SYNTHESIS_MODEL, prompt, max_tokens=500)
+        text = await _brief_with_brain(self.client, CHAT_MODEL, prompt, max_tokens=500)
         return {"text": _fix_md(text), "symptoms": self._symptom_taps()}
 
     async def symptom_response(self, symptom: str, user_id: int,
@@ -6106,7 +6135,7 @@ RULES:
 
         try:
             response = await self.client.messages.create(
-                model=SYNTHESIS_MODEL,
+                model=CHAT_MODEL,
                 max_tokens=700,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -7322,7 +7351,7 @@ STALENESS — before surfacing any FYI, cross-check it:
 - This brief is bulleted blocks, not prose. Bullets here are exempt from the 4+ item rule: one actionable item still gets its own •."""
 
         text = await _brief_with_brain(
-            self.client, SYNTHESIS_MODEL, prompt,
+            self.client, CHAT_MODEL, prompt,
             system=DAILY_SYSTEM_PROMPT, max_tokens=400,
         )
         return _fix_md(text)
@@ -7373,7 +7402,7 @@ Write the story these tell — what's been happening in their life this month. T
 {FORMAT_RULES}
 - Flowing prose per arc, not bullets.
 - Output the story directly — no preamble about what you checked or are about to write, no --- separators. Your first line is the first arc's bold lead-in."""
-        text = await _brief_with_brain(self.client, SYNTHESIS_MODEL, prompt, max_tokens=900)
+        text = await _brief_with_brain(self.client, CHAT_MODEL, prompt, max_tokens=900)
         # If tool-loop narration leaked ahead of a --- separator, keep only the story
         if "---" in text:
             tail = text.split("---")[-1].strip()
