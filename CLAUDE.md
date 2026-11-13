@@ -660,7 +660,7 @@ with 3 friends set up by hand.
   behavior_rules, FORMAT_RULES/VOICE_RULES, SGT and "today" guards,
   `_send_or_alert`.
 - Packs (opt-in per household): wedding, baby, trips, stocks, registry, Split,
-  shows, nuggets. Each pack declares its tables, tools, scheduled jobs and its
+  shows. Each pack declares its tables, tools, scheduled jobs and its
   recall store. Registering the store wires it into `_query_brain_sync` and
   `sweep_recall.py` automatically, so the "DJ plans are gone" silo bug can't
   come back.

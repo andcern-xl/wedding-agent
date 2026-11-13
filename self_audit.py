@@ -65,7 +65,6 @@ LOOP_SILENT_DAYS = {
     "baby_weekly": 10,
     "priority_brief": 10,        # Sunday wedding priorities
     "appointment_prebrief": 30,  # only fires the night before a medical event
-    "babybumps_nuggets": 5,
     "knowledge_sweep_drops": 14,
     "calendar_snapshot": 3,
     "drive_sync": 3,             # daily 8:40am; only checked once a folder is included

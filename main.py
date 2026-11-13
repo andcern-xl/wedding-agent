@@ -36,25 +36,11 @@ from tools.shows import get_upcoming_shows, get_shows_in_n_days, get_show_by_id,
 ANSEN_ID = 63756531
 JESS_ID = 6927468999
 
-# Per-person nightly Reddit nuggets — his = dad's-eye view, hers = the pregnant
-# person's own experience.
-_NUGGET_FEEDS = [
-    {
-        "user_id": ANSEN_ID, "state_key": "daddit_nuggets", "subreddits": ["daddit"],
-        "angle": "This goes to Ansen — address him directly as 'you', never in third person. 1-3 nuggets from r/daddit, learning from dads who've been there, to support Jess through pregnancy and prep for the baby. Pick takeaways for him: partner empathy, what actually helps a pregnant partner, newborn prep, dad mindset.",
-    },
-    {
-        "user_id": JESS_ID, "state_key": "babybumps_nuggets", "subreddits": ["BabyBumps", "pregnant"],
-        "angle": "This goes to Jess — address her directly as 'you', never in third person (don't call her 'Jess', say 'you'). 1-3 nuggets from r/BabyBumps and r/pregnant, from other pregnant women living it right now. Pick takeaways for her: what to expect this stage, symptom reality, self-advocacy at appointments, things she'd want to know from someone a few weeks ahead. Warm and reassuring, never alarming.",
-    },
-]
 
-
-# Nuggets are optional wind-down reading, so they are switchable per person from
-# chat. Ansen turned his daddit feed off on 26 Aug 2026 ("i do not read it, so it
-# becomes less meaningful"). Deliberately a data switch in loop_state rather than
-# a commented-out job the way the stocks brief once was — anything the bot
-# turns on has to be turnable back on without a deploy.
+# Optional feeds (the stocks brief) are switchable from chat. Deliberately a
+# data switch in loop_state rather than a commented-out job — anything the bot
+# turns on has to be turnable back on without a deploy. (The Reddit nuggets
+# feed that used this was removed 13 Nov 2026.)
 _FEED_SWITCH = "feed_enabled"
 
 
@@ -443,7 +429,6 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/plan /tasks /reminders /shared",
         "🔔 /notifications — timed reminders, with a ❌ on each to switch it off",
         "📁 /drive — the Google Drive folders I learn from (/drive add <folder link>)",
-        "🌰 /nuggets — nightly reading, on/off per person",
     ]
     for key, cat in CATEGORIES.items():
         lines.append(f"{cat['emoji']} /{key}")
@@ -2257,26 +2242,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚪️ Nightly stocks & crypto brief is off. /stocks still works any time, and turns it back on.")
         return
 
-    elif data.startswith("feed:"):
-        # feed:{state_key}:{on|off} — only ever your own feed, never your partner's.
-        try:
-            _, state_key, want = data.split(":", 2)
-        except ValueError:
-            return
-        mine = next((f for f in _NUGGET_FEEDS
-                     if f["state_key"] == state_key and f["user_id"] == query.from_user.id), None)
-        if not mine:
-            await query.edit_message_text("⚪️ That isn't your feed to switch.")
-            return
-        on = want == "on"
-        await asyncio.to_thread(_set_feed, state_key, query.from_user.id, on)
-        subs = " + ".join(f"r/{s}" for s in mine["subreddits"])
-        await query.edit_message_text(
-            f"{'🟢' if on else '⚪️'} <b>{subs}</b> nuggets are {'back on' if on else 'off'}"
-            f"{'' if on else ' — nothing more from that feed. /nuggets to bring it back.'}",
-            parse_mode="HTML")
-        return
-
     elif data.startswith("notifstop:"):
         # Kill a recurring reminder for good — every pending copy of it.
         notif_id = data[10:]
@@ -2761,28 +2726,6 @@ async def check_and_send_notifications(context: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"Failed to send notification {notif['id']} to {notif['user_id']}")
 
 
-async def cmd_nuggets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show whose nightly reading is on, with a button to flip your own."""
-    msg = update.effective_message
-    uid = update.effective_user.id
-    if uid not in ALLOWED_IDS:
-        return
-    lines = ["🌰 <b>Nightly nuggets</b>", ""]
-    buttons = []
-    for feed in _NUGGET_FEEDS:
-        subs = " + ".join(f"r/{s}" for s in feed["subreddits"])
-        on = await asyncio.to_thread(_feed_on, feed["state_key"], feed["user_id"])
-        whose = "You" if feed["user_id"] == uid else _NOTIF_USER_NAMES.get(feed["user_id"], "Partner")
-        lines.append(f"{'🟢' if on else '⚪️'} {whose} — {subs} · {'on' if on else 'off'}")
-        if feed["user_id"] == uid:
-            buttons.append([InlineKeyboardButton(
-                f"{'Turn off' if on else 'Turn back on'} — {subs}",
-                callback_data=f"feed:{feed['state_key']}:{'off' if on else 'on'}")])
-    lines += ["", "Sent 9pm daily. Yours is yours to switch — this doesn't touch your partner's."]
-    await msg.reply_text("\n".join(lines), parse_mode="HTML",
-                         reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
-
-
 async def cmd_settled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """What was concluded without being done, and a button to bring it back.
 
@@ -2945,28 +2888,6 @@ async def send_drive_sync(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_IDS:
         return
     await _drive_sync_and_report(context, ANSEN_ID, quiet=True)
-
-
-async def send_evening_nuggets(context: ContextTypes.DEFAULT_TYPE):
-    """Evening: learning nuggets only — his from r/daddit, hers from
-    r/BabyBumps + r/pregnant. The action-driven daily brief moved to 9am; this
-    slot is purely optional wind-down reading, one message per person."""
-    if not ALLOWED_IDS:
-        return
-    for feed in _NUGGET_FEEDS:
-        try:
-            if not await asyncio.to_thread(_feed_on, feed["state_key"], feed["user_id"]):
-                continue
-            nugget = await agent.nightly_nugget(feed["subreddits"], feed["state_key"], feed["angle"])
-            if nugget:
-                subs = " + ".join(f"r/{s}" for s in feed["subreddits"])
-                await context.bot.send_message(
-                    chat_id=feed["user_id"],
-                    text=f"🌰 <b>Tonight's nuggets — {subs}</b>\n\n" + nugget,
-                    parse_mode="HTML",
-                )
-        except Exception:
-            logger.exception(f"nightly nugget failed for {feed['state_key']}")
 
 
 async def send_fyi_graduation(context: ContextTypes.DEFAULT_TYPE):
@@ -3784,7 +3705,6 @@ def main():
             BotCommand("finances", "💼 Portfolio & money picture"),
             BotCommand("me", "👤 My personal tasks"),
             BotCommand("notifications", "🔔 Scheduled reminders — view & turn off"),
-            BotCommand("nuggets", "🌰 Nightly reading — switch your feed on/off"),
             BotCommand("settled", "🧹 Things I closed for you — undo any"),
             BotCommand("drive", "📁 Google Drive docs I learn from — sync now"),
         ]
@@ -3837,7 +3757,6 @@ def main():
     app.add_handler(CommandHandler("build", cmd_build))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("compress", cmd_compress))
-    app.add_handler(CommandHandler("nuggets", cmd_nuggets))
     app.add_handler(CommandHandler("settled", cmd_settled))
     app.add_handler(CommandHandler("drive", cmd_drive))
 
@@ -3873,9 +3792,6 @@ def main():
         # Stocks & crypto brief — Ansen only; switchable from chat (_STOCKS_FEED)
         app.job_queue.run_daily(send_stocks_brief, time=CRYPTO_TIME)
         # ── NIGHT 9pm ────────────────────────────────────────────────
-        # Evening nuggets — optional learning only (his r/daddit, hers
-        # r/BabyBumps+pregnant). The action-driven brief moved to 9am.
-        app.job_queue.run_daily(send_evening_nuggets, time=EVENING_TIME)
         # Knowledge sweep — every Wednesday (extract cross-domain facts into shared brain)
         app.job_queue.run_daily(send_knowledge_sweep, time=EVENING_TIME, days=(2,))
 
