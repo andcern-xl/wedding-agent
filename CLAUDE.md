@@ -1,9 +1,7 @@
 # Wedding Agent — Project Context
 
 ## What this is
-A Telegram bot for Ansen and Jess. Two purposes:
-1. **Wedding brain** — drop notes/screenshots, bot categorises and tracks wedding planning
-2. **Daily brain** — shared and personal task/reminder management with inline Done buttons
+A Telegram bot for Ansen and Jess: daily life, shared and personal tasks/reminders with inline Done buttons, the baby (due 20 Feb 2027), travel and money. It started as a wedding planner; the wedding was 7 Nov 2026 and that side is retired (see "Wedding retired" below). The wedding archive is still searchable.
 
 ## Time zone: everything is SGT
 
@@ -52,7 +50,7 @@ Tables: `daily_tasks`, `user_summaries`, `wedding_drops`, `scheduled_notificatio
 `daily_tasks` columns: `id, user_id, task, due_date, repeat, visibility, done, created_at, completed_at, assigned_to, category`
 
 ## Task categories (domains)
-Every task gets exactly one: `baby` / `baby_questions` / `wedding` / `life` (enum on the `add_daily_task` tool; `normalize_category()` in tools/daily.py maps legacy slugs). Agent picks `unsure` when ambiguous → user gets 👶/💍/🏠 tap buttons (`taskcat:` callback). `/reminders` groups domain-first: Baby, Wedding, then per-person, then Shared. One-time backfill: `backfill_categories.py` (dry-run by default, `--apply` to write — already applied Jul 2026).
+Every task gets exactly one: `baby` / `baby_questions` / `life` (enum on the `add_daily_task` tool; `wedding` retired 16 Nov 2026 but still accepted for old rows; `normalize_category()` in tools/daily.py maps legacy slugs). Agent picks `unsure` when ambiguous → user gets 👶/🏠 tap buttons (`taskcat:` callback). `/reminders` groups domain-first: Baby, Wedding, then per-person, then Shared. One-time backfill: `backfill_categories.py` (dry-run by default, `--apply` to write — already applied Jul 2026).
 
 ## Wedding recall — the vault is not the archive
 The wedding has 160+ drops going back to April 2026, but `brain_entries` only started capturing wedding facts mid-June, because `knowledge_sweep` read "the last 20 drops" — a count window that silently loses whatever overflows it (April alone logged 50). So the substance — day-of running order, food stations, lighting plan, DJ — lived only in `wedding_drops`, while the agent answered wedding questions from the vault slice and reported the wedding as a blank page ("No day-of timeline yet"). Three fixes, Aug 2026:
@@ -175,8 +173,7 @@ Two users in `ALLOWED_USER_IDS` env var. Ansen and Jess.
 - `/tasks` — combined daily brief with buttons
 - `/shared` — shared brain story (facts + recent episodes; Brain/Tasks/Reminders menu — no FYIs button, the concept is retired)
 - `/commands` — full command list
-- `/plan` — wedding priorities this week
-- `/bringmeuptospeed` — full wedding overview
+- `/wedding`, `/plan`, `/bringmeuptospeed`, per-category commands — retired 16 Nov 2026, reply "the wedding's done"
 
 ## Inline Done buttons
 - `_reminders_keyboard(tasks, user_id)` in main.py — shows buttons for all tasks the user can complete (up to 12)
@@ -196,7 +193,7 @@ Tasks starting with: `fyi`, `• fyi`, `ansen deposited`, `jess deposited`, `ans
 Structured rows in `brain_entries`: one fact per row with `domain` (baby/wedding/travel/money/life), `fact_date`, `status` (active/superseded), `source`. Writers supersede stale rows instead of rewriting — `_upsert_shared(fact, domain, source)` and `_upsert_shared_batch` in agent.py, `add_brain_entry`/`supersede_entries` in tools/user_memory.py. `get_shared_summary()` renders active entries in the legacy bullet grammar `• YYYY-MM-DD: [domain] fact` (falls back to the frozen legacy blob on `user_summaries` user_id=0 if the table is empty — that blob is the rollback path, never write it). Injected into chat, proactive check, and morning/evening briefs (relevance-filtered via `_relevant_bullets`). One-time migration: `migrate_brain.py` (dry-run default).
 
 ## Loop state (delta briefs)
-`loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief`, `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
+`loop_state` table, one row per (loop_name, user_id); `tools/loop_state.py` (`load_state`/`save_state`/`already_sent`, `COUPLE=0` for couple-wide loops). Every scheduled sender loads what it already sent and generates delta-only output: `morning_brief` (per-user), `nightly_wrap`, `baby_weekly`, `priority_brief` (retired 16 Nov 2026), `appointment_prebrief` (couple-wide), `proactive_check` (per-user). Old `proactive_state` table/tool kept one release for rollback.
 
 ## Conversations are swept daily — the brain reads what was said
 
@@ -396,7 +393,7 @@ ever asks about genuinely live work. Three **ordered** tests, first match wins:
 1. **done** — recall already resolves it. Requires evidence, never inference.
 2. **moot** — the world moved on: an errand for a finished trip, prep for an
    appointment already held, a deadline that only mattered before it. Merely
-   being old is not moot; a wedding item is live until 7 Nov whatever its date.
+   being old is not moot. Since 16 Nov 2026 any wedding prep item is moot.
 3. **live** — left alone, and gets exactly ONE offer.
 
 Ties break toward live: a wrongly settled item is invisible, a wrongly kept one
@@ -531,9 +528,8 @@ same shape a dozen times. Fixed at chokepoints, not call sites:
 - **FYIs → episodes:** nothing writes `fyis`. Read-only views use
   `tools.fyis.recent_updates()` (FYIs + episodes, FYI-shaped). Ack/keep/archive
   still need `get_fyis()`.
-- **Wedding views** (Catch Up, Plan, category briefs) get `wedding_facts_block()`
-  — all active wedding facts — and `_all_drops()` instead of 100/150 windows
-  (180 drops exist; the window was why a category read "untouched").
+- **Wedding views** (Catch Up, Plan, category briefs) were removed 16 Nov 2026
+  with `wedding_facts_block()`.
 - **Trips:** `canonical_trip()` follows `[merged into …]` pointers; lookups,
   writes and the ✈️ card all go through it. `update_trip` never writes a
   retired row. The Seoul cancel landed on the merged-away row and the live one
@@ -552,6 +548,10 @@ lock the rest.
 Ansen, 29 Sep 2026: the wedding master information lives in Drive
 (folder `Wedding_JxA_07 Nov 2026`). `tools/gdrive.py` + `UnifiedAgent.drive_sync`
 (daily 8:40am, before the calendar sync and brief) + `read_drive` tool + `/drive`.
+Since 16 Nov 2026 the wedding folder is out and the only entry is the **J x A_Baby_Registry** sheet (bit.ly/baby-puggle-registry;
+`1jGRn2k7-Biulh51726cytG6MR-V5R4mgYKYtdEQp2p0`, top of My Drive).
+An entry can be a folder or a **single file** (`/drive add <any Drive link>`); a
+file root is listed on its own and its parent folder is never listed.
 
 - **Inclusion list, enforced in code.** drive.readonly covers the whole Drive,
   so `_call` refuses any files.list not scoped to a folder reached from an
@@ -602,6 +602,19 @@ is a mapping of that response. `format_recap()` turns it into the Telegram messa
 - **Known overlap:** IBKR and Stashaway values live in Split's investment accounts and in the agent's
   `holdings` (`log_holding`). The recap reads Split's; `read_holdings` reads holdings. They can disagree.
 - `test_split_recap.py` locks the message, the account mapping, the SGT dates and the job.
+
+## Pocket recordings (Oct 2026)
+
+`tools/pocket.py` is a small read-only client for Pocket's remote MCP (`POCKET_API_KEY` = the full Authorization header value). `search_pocket` (recordings or action items) is **Ansen only**: the account holds work calls and private recordings, so Jess's calls are refused in code. Results are fenced with `wrap_untrusted` and a successful read sets `untrusted_read` like `read_drive`, so no writes or messages can follow in the same turn. Excerpts are trimmed to 500 chars, 6 hits. Not wired into briefs or sweeps yet.
+
+## Wedding retired (16 Nov 2026)
+
+The wedding was 7 Nov 2026. Ansen caught the bot raising "outstanding" wedding items, so:
+- `RETIRED_DOMAINS = {"wedding"}` in `tools/user_memory.py`: an unfiltered `get_active_entries()` leaves wedding facts out, so the injected brain, briefs, check-ins and the brain story no longer see them. They stay active: `get_active_entries("wedding")` and `query_brain` (on matching words, or domain="wedding") still answer. The wedding drops archive is untouched.
+- Chat prompt says the wedding is over and only answers about it when asked; write tools (tasks, check-ins, brain saves, threads, episodes) no longer offer a `wedding` domain.
+- 2pm proactive check: no countdown, no wedding categories block, no wedding section. Stale-task review treats wedding prep as moot.
+- Retired: `/wedding`, `/plan`, `/bringmeuptospeed`, the per-category commands, the Sunday wedding priority brief (and its self-audit freshness entry). Old `wedding_*` buttons answer "The wedding's done".
+- Open wedding tasks were settled (reason "wedding over…", reversible with `unsettle_task`).
 
 ## Pending / future work
 - Add `category` column to Supabase `daily_tasks` table (would enable proper wedding task filtering)

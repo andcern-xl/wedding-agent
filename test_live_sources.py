@@ -56,8 +56,6 @@ for fname, src in SRC.items():
 agent = SRC["agent.py"]
 checks = [
     ("baby readers union the vault", "def _brain_entries" in open("/Users/ansen/wedding-agent/tools/baby_knowledge.py").read()),
-    ("wedding views read vault facts",
-     all(agent.count("wedding_facts_block()") >= 3 for _ in [0])),
     ("wedding views read all drops, not a 100/150 window",
      "get_recent_drops(limit=100)" not in agent and "get_recent_drops(limit=150)" not in agent),
     ("trip card follows merges", "canonical_trip(get_trip_by_id(trip_id))" in SRC["main.py"]),
@@ -69,7 +67,7 @@ for name, ok in checks:
 # Generators that show dated data must carry the date table.
 for fn in ("brain_synthesis", "brain_search", "trip_milestone_brief", "jess_checkin",
            "appointment_pre_brief", "combined_daily_brief", "compress_shared_brain",
-           "baby_knowledge_brief", "category_status", "bring_me_up_to_speed"):
+           "baby_knowledge_brief"):
     m = re.search(rf"async def {fn}\(.*?(?=\n    async def |\n    def |\Z)", agent, re.S)
     ok = bool(m) and "date_block()" in m.group(0)
     print(("PASS " if ok else "FAIL ") + f"{fn} has date_block()")

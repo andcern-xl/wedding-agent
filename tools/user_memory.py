@@ -45,7 +45,22 @@ def normalize_domain(raw: str | None) -> str:
     return _DOMAIN_ALIASES.get((raw or "").strip().lower(), "life")
 
 
+# Domains whose life event is over. Their facts stay active and recallable
+# (ask for the domain by name, or query_brain on matching words), but an
+# unfiltered read leaves them out, so briefs, check-ins and the injected brain
+# stop raising them. Ansen, 16 Nov 2026: "the wedding is over, I caught the
+# agent talking about outstanding wedding stuff".
+RETIRED_DOMAINS = {"wedding"}
+
+
 def get_active_entries(domain: str | None = None, kind: str | None = None) -> list[dict]:
+    rows = _active_entries(domain, kind)
+    if not domain:
+        rows = [r for r in rows if r.get("domain") not in RETIRED_DOMAINS]
+    return rows
+
+
+def _active_entries(domain: str | None = None, kind: str | None = None) -> list[dict]:
     try:
         q = (
             get_client().table("brain_entries")

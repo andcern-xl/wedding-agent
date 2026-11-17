@@ -163,7 +163,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [
         "👋 Two brains, one bot.\n",
-        "/wedding — planning & categories",
         "/shared — brain, tasks, reminders",
         "/baby — pregnancy updates, milestones, knowledge base",
         "/stocks — newsletter digest + buy/hold/skip",
@@ -172,14 +171,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Or just talk — drop a note, screenshot, or question.",
     ]
     await update.message.reply_text("\n".join(lines))
-
-
-def _wedding_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Catch Up", callback_data="wedding_bringmeuptospeed"),
-         InlineKeyboardButton("📅 Plan", callback_data="wedding_plan")],
-        [InlineKeyboardButton("📂 Categories", callback_data="wedding_categories")],
-    ])
 
 
 def _shared_menu() -> InlineKeyboardMarkup:
@@ -246,21 +237,6 @@ def _render_finances() -> str:
     return "\n".join(lines)
 
 
-def _category_menu() -> InlineKeyboardMarkup:
-    cats = list(CATEGORIES.items())
-    rows = []
-    for i in range(0, len(cats), 3):
-        row = [
-            InlineKeyboardButton(
-                f"{v['emoji']} {v['name'].split(' &')[0].split('—')[0].strip()}",
-                callback_data=f"wedding_cat_{k}",
-            )
-            for k, v in cats[i:i+3]
-        ]
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
-
-
 def _baby_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Weekly Brief", callback_data="baby_brief"),
@@ -270,16 +246,6 @@ def _baby_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❓ Questions", callback_data="baby_questions"),
          InlineKeyboardButton("💰 Budget", callback_data="baby_budget")],
     ])
-
-
-async def cmd_wedding(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not allowed(update):
-        return
-    await update.message.reply_text(
-        "💒 <b>Wedding</b>",
-        parse_mode="HTML",
-        reply_markup=_wedding_menu(),
-    )
 
 
 async def cmd_shared_parent(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,7 +338,6 @@ async def _send_category_asks(context, asks: list[dict], chat_id: int):
             name = (ask.get("task") or "")[:80]
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("👶 Baby", callback_data=f"taskcat:{ask['id']}:baby"),
-                InlineKeyboardButton("💍 Wedding", callback_data=f"taskcat:{ask['id']}:wedding"),
                 InlineKeyboardButton("🏠 Life", callback_data=f"taskcat:{ask['id']}:life"),
             ]])
             await context.bot.send_message(
@@ -420,52 +385,15 @@ async def cmd_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [
         "<b>Commands</b>\n",
-        "💒 /wedding — catch up, plan, tasks, reminders, shared, categories",
         "👶 /baby — weekly brief, knowledge base, milestones",
         "📊 /stocks — newsletter digest + buy/hold/skip\n",
         "💼 /finances — portfolio & money picture\n",
         "<b>Shortcuts</b>",
-        "/bringmeuptospeed — full wedding overview",
-        "/plan /tasks /reminders /shared",
+        "/tasks /reminders /shared",
         "🔔 /notifications — timed reminders, with a ❌ on each to switch it off",
-        "📁 /drive — the Google Drive folders I learn from (/drive add <folder link>)",
+        "📁 /drive — the Google Drive folders and files I learn from (/drive add <link>)",
     ]
-    for key, cat in CATEGORIES.items():
-        lines.append(f"{cat['emoji']} /{key}")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-
-async def cmd_bringmeuptospeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not allowed(update):
-        return
-    msg = await update.message.reply_text("Pulling everything together...")
-    try:
-        summary = await agent.bring_me_up_to_speed()
-        sections = _split_sections(summary)
-        await msg.edit_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
-    except Exception as e:
-        logger.exception("cmd_bringmeuptospeed failed")
-        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
-
-
-async def cmd_category_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not allowed(update):
-        return
-    command = update.message.text[1:].split()[0].lower()
-    if command not in CATEGORIES:
-        return
-    msg = await update.message.reply_text("Checking...")
-    try:
-        status = await agent.category_status(command)
-        sections = _split_sections(status)
-        await msg.edit_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
-    except Exception as e:
-        logger.exception("cmd_category_status failed")
-        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1239,26 +1167,6 @@ async def send_finance_checkin(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-async def send_priority_brief(context: ContextTypes.DEFAULT_TYPE):
-    if not ALLOWED_IDS:
-        return
-    try:
-        from tools.loop_state import COUPLE, load_state as _load_loop, save_state as _save_loop
-        from datetime import datetime as _dt
-        _prev = (await asyncio.to_thread(_load_loop, "priority_brief", COUPLE)).get("last_output") or ""
-        brief = await agent.priority_brief(already_sent=_prev)
-        if brief:
-            _today = _dt.now(REMINDER_TIMEZONE).date().isoformat()
-            await asyncio.to_thread(_save_loop, "priority_brief", COUPLE, brief, _today)
-        sections = _split_sections(brief)
-        for uid in ALLOWED_IDS:
-            await _send_or_alert(context, uid, "<b>Weekly Planning Check-in</b>", "priority_brief")
-            for section in sections:
-                await _send_or_alert(context, uid, section, "priority_brief")
-    except Exception:
-        logger.exception("Error sending priority brief")
-
-
 async def cmd_testnotify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
@@ -1279,21 +1187,6 @@ async def cmd_testnotify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Your ID: {my_id}\nALLOWED_IDS: {ALLOWED_IDS}\n\n" + "\n".join(results)
     )
-
-
-async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not allowed(update):
-        return
-    msg = await update.message.reply_text("Analysing where things stand...")
-    try:
-        brief = await agent.priority_brief()
-        sections = _split_sections(brief)
-        await msg.edit_text(sections[0], parse_mode="HTML")
-        for section in sections[1:]:
-            await update.message.reply_text(section, parse_mode="HTML")
-    except Exception as e:
-        logger.exception("cmd_plan failed")
-        await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
 
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1761,57 +1654,6 @@ async def _handle_shared_callback(query, context, action: str, user_id: int):
             await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] {_err_detail(e)}")
 
 
-async def _handle_wedding_callback(query, context, action: str, user_id: int):
-    chat_id = query.message.chat_id
-
-    if action == "categories":
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="📂 <b>Categories</b>",
-            parse_mode="HTML",
-            reply_markup=_category_menu(),
-        )
-        return
-
-    if action.startswith("cat_"):
-        cat_key = action[4:]
-        if cat_key not in CATEGORIES:
-            return
-        msg = await context.bot.send_message(chat_id=chat_id, text="Checking...")
-        try:
-            status = await agent.category_status(cat_key)
-            sections = _split_sections(status)
-            await msg.edit_text(sections[0], parse_mode="HTML")
-            for section in sections[1:]:
-                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
-        except Exception as e:
-            logger.exception("category_status callback failed")
-            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
-        return
-
-    if action == "bringmeuptospeed":
-        msg = await context.bot.send_message(chat_id=chat_id, text="Pulling everything together...")
-        try:
-            summary = await agent.bring_me_up_to_speed()
-            sections = _split_sections(summary)
-            await msg.edit_text(sections[0], parse_mode="HTML")
-            for section in sections[1:]:
-                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
-        except Exception as e:
-            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
-
-    elif action == "plan":
-        msg = await context.bot.send_message(chat_id=chat_id, text="Analysing where things stand...")
-        try:
-            brief = await agent.priority_brief()
-            sections = _split_sections(brief)
-            await msg.edit_text(sections[0], parse_mode="HTML")
-            for section in sections[1:]:
-                await context.bot.send_message(chat_id=chat_id, text=section, parse_mode="HTML")
-        except Exception as e:
-            await msg.edit_text(f"[DEBUG] {_err_detail(e)}")
-
-
 async def _handle_baby_callback(query, context, action: str):
     import re as _re
     chat_id = query.message.chat_id
@@ -1914,8 +1756,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("handle_callback button removal failed")
 
     elif data.startswith("wedding_"):
-        await query.answer()
-        await _handle_wedding_callback(query, context, data[8:], user_id)
+        # Old /wedding menu buttons still sit in chat history. The wedding is
+        # over (7 Nov 2026), so they no longer open planning views.
+        await query.answer("The wedding's done 🎉 Ask me anything about it in chat.", show_alert=True)
 
     elif data.startswith("baby_"):
         await query.answer()
@@ -2576,7 +2419,7 @@ def _facts_mentioning(event: dict) -> list[dict]:
     day = (event.get("start") or "")[:10]
     out: list = []
     maybe: list = []
-    for domain in ("baby", "wedding", "travel", "money", "life"):
+    for domain in ("baby", "travel", "money", "life"):
         try:
             # No kind filter, so EPISODES are included — they are where a
             # booking actually lives ("Lucille vet appointment booked Tuesday
@@ -2752,29 +2595,37 @@ async def cmd_settled(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons[:8]))
 
 
+async def cmd_retired_wedding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    await update.effective_message.reply_text(
+        "The wedding's done 🎉 so that view is retired. Ask me anything about it in chat and I'll look it up.")
+
+
 async def cmd_drive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """The Drive inclusion list and what the daily sync learned from it.
 
     /drive                  — included folders, synced docs, 🔄 Sync now
-    /drive add <folder link> — include a folder (and everything under it)
-    Nothing outside an included folder is ever listed or opened."""
+    /drive add <link>       — include a folder (and everything under it) or one file
+    Nothing outside the included folders/files is ever listed or opened."""
     if not allowed(update):
         return
     from tools import gdrive
     args = context.args or []
     if args and args[0].lower() == "add":
         if len(args) < 2:
-            await update.effective_message.reply_text("Send: /drive add <Google Drive folder link>")
+            await update.effective_message.reply_text("Send: /drive add <Google Drive folder or file link>")
             return
         uid = update.effective_user.id
         res = await asyncio.to_thread(gdrive.add_folder, args[1], uid)
         if not res.get("ok"):
             await update.effective_message.reply_text(f"⚠️ {res.get('error')}")
             return
+        _what = "file" if res.get("kind") == "file" else "folder"
         await update.effective_message.reply_text(
             f"📁 Included <b>{escape(res.get('name') or '')}</b> — shared with you both. Syncing it now…",
             parse_mode="HTML")
-        await _drive_tell_partner(context, uid, f"📁 {_NOTIF_USER_NAMES.get(uid, 'Someone')} added the Drive folder "
+        await _drive_tell_partner(context, uid, f"📁 {_NOTIF_USER_NAMES.get(uid, 'Someone')} added the Drive {_what} "
                                                 f"<b>{escape(res.get('name') or '')}</b> to what I read.")
         await _drive_sync_and_report(context, update.effective_chat.id)
         return
@@ -2787,8 +2638,8 @@ async def _drive_view() -> dict:
     from tools.loop_state import load_state, COUPLE
     folders = gdrive.included_folders()
     if not folders:
-        return {"text": "📁 <b>Drive</b>\n\nNo folders included yet.\n"
-                        "Send <code>/drive add &lt;folder link&gt;</code> — I'll only ever read inside it.",
+        return {"text": "📁 <b>Drive</b>\n\nNothing included yet.\n"
+                        "Send <code>/drive add &lt;folder or file link&gt;</code> — I'll only ever read that.",
                 "parse_mode": "HTML"}
     st = load_state("drive_sync", COUPLE) or {}
     try:
@@ -2807,7 +2658,8 @@ async def _drive_view() -> dict:
     lines = ["📁 <b>Drive — what I read</b>", ""]
     for rec in gdrive.folder_records():
         who = _NOTIF_USER_NAMES.get(rec.get("added_by"), "config")
-        lines.append(f"• 📂 {escape(names.get(rec['id']) or rec.get('name') or rec['id'])} — added by {who}")
+        _icon = "📄" if rec.get("kind") == "file" else "📂"
+        lines.append(f"• {_icon} {escape(names.get(rec['id']) or rec.get('name') or rec['id'])} — added by {who}")
     lines += ["", "<i>Shared with you both. I only read inside these, only what its owner gave me, "
                   "and I treat what's in a doc as information — never as instructions.</i>"]
     if err:
@@ -3697,7 +3549,6 @@ def main():
     async def post_init(application: Application) -> None:
         commands = [
             BotCommand("start", "Help & intro"),
-            BotCommand("wedding", "💒 Wedding planning"),
             BotCommand("shared", "🧠 Shared brain, tasks & reminders"),
             BotCommand("baby", "👶 Baby & pregnancy"),
             BotCommand("registry", "🛒 Baby registry updates"),
@@ -3734,11 +3585,8 @@ def main():
         )
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("wedding", cmd_wedding))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("commands", cmd_commands))
-    app.add_handler(CommandHandler("bringmeuptospeed", cmd_bringmeuptospeed))
-    app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("tasks", cmd_tasks))
     app.add_handler(CommandHandler("reminders", cmd_reminders))
     app.add_handler(CommandHandler(["notifications", "notifs", "alerts"], cmd_notifications))
@@ -3759,9 +3607,10 @@ def main():
     app.add_handler(CommandHandler("compress", cmd_compress))
     app.add_handler(CommandHandler("settled", cmd_settled))
     app.add_handler(CommandHandler("drive", cmd_drive))
+    # Retired 16 Nov 2026 (the wedding was 7 Nov). Typed from habit, they'd
+    # otherwise fall through to handle_message, which ignores "/" text.
+    app.add_handler(CommandHandler(["wedding", "plan", "bringmeuptospeed", *CATEGORIES.keys()], cmd_retired_wedding))
 
-    for key in CATEGORIES:
-        app.add_handler(CommandHandler(key, cmd_category_status))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE | filters.Document.ALL, handle_message))
@@ -3782,8 +3631,7 @@ def main():
         app.job_queue.run_daily(send_show_reminders, time=REMINDER_TIME)
         # FYI graduation — every Sunday (surface notes nearing 30-day expiry)
         app.job_queue.run_daily(send_fyi_graduation, time=REMINDER_TIME, days=(6,))
-        # Wedding brief — every Sunday morning
-        app.job_queue.run_daily(send_priority_brief, time=REMINDER_TIME, days=(6,))
+        # Sunday wedding brief retired 16 Nov 2026 — the wedding (7 Nov) is over.
         # Trip milestone briefs — fires at 56/28/14/7/2 days before departure
         app.job_queue.run_daily(send_trip_milestones, time=REMINDER_TIME)
         # Appointment pre-brief — nightly check for tomorrow's medical events

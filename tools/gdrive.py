@@ -18,6 +18,11 @@ The inclusion list is DRIVE_FOLDER_IDS (comma-separated, Railway env) plus any
 added from Telegram with /drive add, stored in loop_state so no deploy is
 needed to change it. Everything included is SHARED between them.
 
+An entry can be a folder (read with everything under it) or a single file
+(Ansen, 16 Nov 2026: the Baby Registry sheet sits at the top of My Drive, and
+including My Drive itself would open the whole Drive). A single file is read
+on its own; nothing next to it comes in.
+
 OWNERSHIP — Ansen, same day: "neither jess and i can read any of each other's
 private drive unless we explicitly give you the drive link". The bot reads
 through ANSEN's Google account, so without a rule Jess (or anyone holding her
@@ -216,26 +221,28 @@ def _save_records(records: list[dict]) -> None:
 
 
 def add_folder(link_or_id: str, user_id: int) -> dict:
-    fid = folder_id_from(link_or_id)
+    """Include a folder (and everything under it) or a single file."""
+    fid = folder_id_from(link_or_id) or file_id_from(link_or_id)
     if not fid:
-        return {"ok": False, "error": "That doesn't look like a Drive folder link."}
+        return {"ok": False, "error": "That doesn't look like a Google Drive link."}
     try:
         meta = _call("files", "get", fileId=fid, fields="id,name,mimeType,driveId,owners(emailAddress)",
                      supportsAllDrives=True).execute()
     except Exception:
-        return {"ok": False, "error": "I can't open that folder. Is it shared with Ansen's Google account?"}
+        return {"ok": False, "error": "I can't open that. Is it shared with Ansen's Google account?"}
     ok, why = may_give(meta, user_id)
     if not ok:
         return {"ok": False, "error": why}
-    if meta.get("mimeType") != FOLDER_MIME:
-        return {"ok": False, "error": "That's a file, not a folder — paste it in chat to have me read it."}
+    kind = "folder" if meta.get("mimeType") == FOLDER_MIME else "file"
+    if kind == "file" and not is_supported(meta):
+        return {"ok": False, "error": "I can't read that kind of file (Docs, Sheets, Slides, PDF, CSV and text only)."}
     recs = _records()
     if fid not in {r["id"] for r in recs}:
         from tools.tz import local_today
         recs.append({"id": fid, "name": meta.get("name"), "added_by": user_id,
-                     "added": local_today().isoformat()})
+                     "added": local_today().isoformat(), "kind": kind})
         _save_records(recs)
-    return {"ok": True, "id": fid, "name": meta.get("name")}
+    return {"ok": True, "id": fid, "name": meta.get("name"), "kind": kind}
 
 
 def remove_folder(fid: str, user_id: int) -> tuple[bool, str]:
@@ -264,13 +271,16 @@ def list_files() -> tuple[list[dict], dict]:
     queue = []
     for root in included_folders():
         try:
-            meta = _call("files", "get", fileId=root, fields="id,name,mimeType",
+            meta = _call("files", "get", fileId=root,
+                         fields="id,name,mimeType,modifiedTime,webViewLink",
                          supportsAllDrives=True).execute()
         except Exception as e:
             info["errors"].append(f"{root}: {str(e)[:80]}")
             continue
         if meta.get("mimeType") != FOLDER_MIME:
-            info["errors"].append(f"{root}: not a folder")
+            # A single included file: listed on its own, nothing around it.
+            info["folders"][root] = meta.get("name")
+            files.append({**meta, "path": "", "root": root})
             continue
         info["folders"][root] = meta.get("name")
         _scope_ids.add(root)

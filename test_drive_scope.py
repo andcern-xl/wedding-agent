@@ -45,6 +45,11 @@ TREE = {
     "PRIVATE_DOC_0001": {"name": "2025 tax", "mimeType": DOC, "parents": ["PRIVATE_FOLDER01"],
                          "owners": [{"emailAddress": "ansen@example.com"}]},
     "MYDRIVE_ROOT_01": {"name": "My Drive", "mimeType": F, "parents": []},
+    "REGISTRY_SHEET_1": {"name": "Baby Registry", "mimeType": "application/vnd.google-apps.spreadsheet",
+                         "parents": ["MYDRIVE_ROOT_01"], "owners": [{"emailAddress": "ansen@example.com"}],
+                         "modifiedTime": "2026-11-15T18:01:18Z"},
+    "PHOTO_00000001": {"name": "photo.jpg", "mimeType": "image/jpeg", "parents": ["MYDRIVE_ROOT_01"],
+                       "owners": [{"emailAddress": "ansen@example.com"}]},
 }
 queries = []
 
@@ -249,6 +254,39 @@ check("after a doc read, look-ups still work",
       asyncio.run(ag._execute_tool("query_brain", {"query": "dj"}, A, flags)).get("ran") == "query_brain")
 check("a new turn (fresh flags) is not blocked",
       asyncio.run(ag._execute_tool("message_partner", {}, A, {})).get("ran") == "message_partner")
+
+# ── a single included FILE (16 Nov 2026: the Baby Registry sheet sits at the
+# top of My Drive; including My Drive itself would open everything) ──
+queries.clear()
+G._scope_ids.clear()
+with mock.patch.dict(os.environ, {"DRIVE_FOLDER_IDS": "REGISTRY_SHEET_1"}), \
+        mock.patch.object(G, "_get_service", lambda: _Svc()), \
+        mock.patch.object(G, "_download", fake_download), \
+        mock.patch.object(G, "_xlsx_text", lambda d: d.decode()), \
+        mock.patch("tools.loop_state.load_state", lambda *a: {}):
+    files, info = G.list_files()
+    check("single file: listed on its own", [f["name"] for f in files] == ["Baby Registry"])
+    check("single file: no folder listing at all (My Drive never listed)", queries == [])
+    check("single file: no error for a non-folder root", info["errors"] == [])
+    check("single file: in scope", G.in_scope("REGISTRY_SHEET_1"))
+    check("single file: its My Drive neighbours stay out", not G.in_scope("PRIVATE_DOC_0001")
+          and not G.in_scope("VENDOR_DOC_00001") and not G.in_scope("JESS_DOC_000001"))
+    check("single file: reads", G.read_file(files[0]).get("text") == "text of Baby Registry")
+    try:
+        G._call("files", "list", q="'MYDRIVE_ROOT_01' in parents")
+        check("single file: listing its parent folder is refused", False)
+    except G.OutOfScope:
+        check("single file: listing its parent folder is refused", True)
+    saved = []
+    with mock.patch.object(G, "_save_records", saved.append):
+        G._account_email = None
+        r = G.add_folder("https://docs.google.com/spreadsheets/d/REGISTRY_SHEET_1/edit?usp=sharing", A)
+        check("/drive add accepts a Sheets link", r.get("ok") and r.get("kind") == "file")
+        r = G.add_folder("https://drive.google.com/file/d/PHOTO_00000001/view", A)
+        check("/drive add refuses a file type it can't read", not r.get("ok"))
+        with mock.patch.dict(os.environ, {"GOOGLE_EMAIL_JESS": "jess@example.com"}):
+            check("/drive add: Jess can't include Ansen's file",
+                  not G.add_folder("https://docs.google.com/spreadsheets/d/REGISTRY_SHEET_1/edit", J).get("ok"))
 
 print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
 raise SystemExit(1 if fails else 0)
